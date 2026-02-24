@@ -3,18 +3,31 @@
     { pkgs, ... }:
     {
       devShells.default = pkgs.mkShell {
-        packages = with pkgs; [
-          # Rust
-          cargo
-          rustc
-          rust-analyzer
-          clippy
+        packages =
+          with pkgs;
+          [
+            # Rust
+            cargo
+            rustc
+            rust-analyzer
+            clippy
 
-          # Build deps
-          cmake
-          pkg-config
-          openssl
-        ];
+            # Build deps
+            cmake
+            pkg-config
+            openssl
+
+            # Data inspection
+            parquet-tools
+            duckdb
+            pqrs
+
+            # Profiling (cross-platform)
+            inferno
+          ]
+          ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+            perf
+          ];
       };
     };
 }
