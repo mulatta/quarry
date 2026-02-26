@@ -27,8 +27,8 @@ fn count_parquet_files(dir: &Path) -> usize {
 }
 
 /// Modify .manifest.json in place via serde_json.
-fn patch_manifest(dir: &Path, f: impl FnOnce(&mut serde_json::Value)) {
-    let path = dir.join(".manifest.json");
+fn patch_manifest(raw_dir: &Path, f: impl FnOnce(&mut serde_json::Value)) {
+    let path = raw_dir.join(".manifest.json");
     let text = std::fs::read_to_string(&path).expect("read manifest");
     let mut val: serde_json::Value = serde_json::from_str(&text).expect("parse manifest");
     f(&mut val);
@@ -43,6 +43,7 @@ fn patch_manifest(dir: &Path, f: impl FnOnce(&mut serde_json::Value)) {
 fn incremental_sync_lifecycle() {
     let tmp = TempDir::new().unwrap();
     let dir = tmp.path();
+    let raw = dir.join("raw");
 
     // === 1. Initial run: download 2 shards ===
     // tracing logs go to stdout when output is not a terminal
@@ -50,18 +51,18 @@ fn incremental_sync_lifecycle() {
         .success()
         .stdout(predicate::str::contains("2 completed, 0 failed"));
 
-    assert!(dir.join(".manifest.json").exists(), "manifest snapshot");
-    assert!(dir.join(".state.json").exists(), "state file");
-    assert!(dir.join(".sync_log.jsonl").exists(), "sync log");
+    assert!(raw.join(".manifest.json").exists(), "manifest snapshot");
+    assert!(raw.join(".state.json").exists(), "state file");
+    assert!(raw.join(".sync_log.jsonl").exists(), "sync log");
     assert!(
-        dir.join("works/shard_0000.parquet").exists(),
+        raw.join("works/shard_0000.parquet").exists(),
         "works shard 0"
     );
     assert!(
-        dir.join("works/shard_0001.parquet").exists(),
+        raw.join("works/shard_0001.parquet").exists(),
         "works shard 1"
     );
-    assert_eq!(count_parquet_files(dir), 24, "2 shards × 12 tables");
+    assert_eq!(count_parquet_files(&raw), 24, "2 shards × 12 tables");
 
     // === 2. Incremental dry-run: completed shards skipped ===
     // Extract total shard count from dry-run output to avoid hardcoding
@@ -95,9 +96,9 @@ fn incremental_sync_lifecycle() {
     assert!(stdout.contains("shard_0002"));
 
     // === 3. Tampered content_length → shard re-detected ===
-    let backup = std::fs::read_to_string(dir.join(".manifest.json")).unwrap();
+    let backup = std::fs::read_to_string(raw.join(".manifest.json")).unwrap();
 
-    patch_manifest(dir, |v| {
+    patch_manifest(&raw, |v| {
         v["entries"][0]["content_length"] = serde_json::json!(999);
     });
 
@@ -110,12 +111,12 @@ fn incremental_sync_lifecycle() {
         .stdout(predicate::str::is_match(r"Unchanged \(ok\):\s+1").unwrap())
         .stdout(predicate::str::contains("shard_0000"));
 
-    std::fs::write(dir.join(".manifest.json"), &backup).unwrap();
+    std::fs::write(raw.join(".manifest.json"), &backup).unwrap();
 
     // === 4. Extra snapshot entry → detected as removed ===
-    let backup = std::fs::read_to_string(dir.join(".manifest.json")).unwrap();
+    let backup = std::fs::read_to_string(raw.join(".manifest.json")).unwrap();
 
-    patch_manifest(dir, |v| {
+    patch_manifest(&raw, |v| {
         let fake = serde_json::json!({
             "url": "https://fake.example.com/removed.gz",
             "shard_idx": 9999,
@@ -131,12 +132,12 @@ fn incremental_sync_lifecycle() {
         .stdout(predicate::str::is_match(r"Removed:\s+1").unwrap())
         .stdout(predicate::str::contains("shard_9999"));
 
-    std::fs::write(dir.join(".manifest.json"), &backup).unwrap();
+    std::fs::write(raw.join(".manifest.json"), &backup).unwrap();
 
     // === 5. Removal run deletes parquet files ===
-    let backup = std::fs::read_to_string(dir.join(".manifest.json")).unwrap();
+    let backup = std::fs::read_to_string(raw.join(".manifest.json")).unwrap();
 
-    patch_manifest(dir, |v| {
+    patch_manifest(&raw, |v| {
         let fake = serde_json::json!({
             "url": "https://fake.example.com/will_be_removed.gz",
             "shard_idx": 8888,
@@ -163,7 +164,7 @@ fn incremental_sync_lifecycle() {
         "work_counts_by_year",
     ];
     for table in &tables {
-        let table_dir = dir.join(table);
+        let table_dir = raw.join(table);
         std::fs::create_dir_all(&table_dir).unwrap();
         std::fs::write(table_dir.join("shard_8888.parquet"), b"fake").unwrap();
     }
@@ -172,20 +173,20 @@ fn incremental_sync_lifecycle() {
 
     for table in &["works", "citations", "work_topics"] {
         assert!(
-            !dir.join(table).join("shard_8888.parquet").exists(),
+            !raw.join(table).join("shard_8888.parquet").exists(),
             "{table}/shard_8888.parquet should be deleted"
         );
     }
     assert!(
-        dir.join("works/shard_0000.parquet").exists(),
+        raw.join("works/shard_0000.parquet").exists(),
         "real files intact"
     );
     assert!(
-        dir.join("works/shard_0001.parquet").exists(),
+        raw.join("works/shard_0001.parquet").exists(),
         "real files intact"
     );
 
-    std::fs::write(dir.join(".manifest.json"), &backup).unwrap();
+    std::fs::write(raw.join(".manifest.json"), &backup).unwrap();
 
     // === 6. --force reprocesses all shards ===
     run(dir, &["run", "--dry-run", "--force", "--max-shards", "5"])

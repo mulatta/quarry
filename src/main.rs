@@ -41,8 +41,8 @@ use stream::{HttpConfig as StreamHttpConfig, init_http, set_http_config};
     version
 )]
 struct Cli {
-    /// Output directory
-    #[arg(short, long, global = true, default_value = "./openalex")]
+    /// Output directory (raw/ and hive/ are created inside)
+    #[arg(short, long, global = true, default_value = "./outputs")]
     output_dir: PathBuf,
 
     /// Config file (TOML). CLI options override config values
@@ -77,6 +77,25 @@ struct HiveArgs {
     /// Show what would be done without executing
     #[arg(long)]
     dry_run: bool,
+
+    // -- Compression / output --
+    /// ZSTD compression level for hive parquet [default: inherit top-level or 8]
+    #[arg(long)]
+    zstd_level: Option<i32>,
+    /// Parquet row group size [default: 500000]
+    #[arg(long)]
+    row_group_size: Option<usize>,
+    /// Shards per year partition (deterministic via work_id %% N) [default: 4]
+    #[arg(long)]
+    num_shards: Option<usize>,
+
+    // -- Resource limits --
+    /// Number of DataFusion worker threads [default: 3/4 of CPUs]
+    #[arg(long)]
+    threads: Option<usize>,
+    /// Memory limit for DataFusion (e.g. "32GB", "512MB") [default: 65% of system RAM]
+    #[arg(long)]
+    memory_limit: Option<String>,
 }
 
 #[derive(clap::Args)]
@@ -159,7 +178,7 @@ fn main() -> ExitCode {
         Commands::Run(args) => cmd_run(&cli.output_dir, cli.config.as_deref(), args, multi),
         Commands::Status => cmd_status(&cli.output_dir),
         Commands::Clean => cmd_clean(&cli.output_dir),
-        Commands::Hive(args) => cmd_hive(&cli.output_dir, cli.config.as_deref(), args),
+        Commands::Hive(args) => cmd_hive(&cli.output_dir, cli.config.as_deref(), args, &multi),
     }
 }
 
@@ -222,7 +241,7 @@ fn prepare_run(
     args: &RunArgs,
 ) -> Result<RunPlan, ExitCode> {
     // 1. Load config (file + CLI overrides)
-    let file_cfg = load_config(config_path, output_dir).map_err(|e| {
+    let file_cfg = load_config(config_path).map_err(|e| {
         tracing::error!("Config error: {e}");
         ExitCode::from(2)
     })?;
@@ -252,12 +271,62 @@ fn prepare_run(
         ExitCode::from(2)
     })?;
 
-    // 6. Load state + manifest snapshot
+    // 6. Validate existing parquet schemas (skip with --force)
+    if !resolved.force {
+        let mismatches = sink::validate_existing_schemas(&resolved.output_dir, TABLES);
+        if !mismatches.is_empty() {
+            eprintln!("Schema mismatch in existing parquet files:");
+            for m in &mismatches {
+                let added: Vec<_> = m
+                    .expected_fields
+                    .iter()
+                    .filter(|f| !m.actual_fields.contains(f))
+                    .collect();
+                let removed: Vec<_> = m
+                    .actual_fields
+                    .iter()
+                    .filter(|f| !m.expected_fields.contains(f))
+                    .collect();
+                eprintln!(
+                    "  {}: expected {} cols, found {} (file: {})",
+                    m.table,
+                    m.expected_fields.len(),
+                    m.actual_fields.len(),
+                    m.file.display(),
+                );
+                if !added.is_empty() {
+                    eprintln!(
+                        "    new columns:     {}",
+                        added
+                            .iter()
+                            .map(|s| s.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                }
+                if !removed.is_empty() {
+                    eprintln!(
+                        "    removed columns: {}",
+                        removed
+                            .iter()
+                            .map(|s| s.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                }
+            }
+            eprintln!();
+            eprintln!("Run with --force to re-download all shards with the current schema.");
+            return Err(ExitCode::from(2));
+        }
+    }
+
+    // 7. Load state + manifest snapshot
     let state = State::load(&resolved.output_dir);
     let old_snapshot = ManifestSnapshot::load(&resolved.output_dir);
     warn_on_filter_change(&state, &resolved);
 
-    // 7. Compute manifest diff (stabilize indices + diff in one step)
+    // 8. Compute manifest diff (stabilize indices + diff in one step)
     let manifest::ManifestDiffResult {
         shards: all_shards,
         diff,
@@ -483,28 +552,33 @@ fn resolve_config(
     file_cfg: &config::FileConfig,
     args: &RunArgs,
 ) -> ResolvedConfig {
-    let output_dir = file_cfg
+    let root = file_cfg
         .output
         .as_ref()
         .map(PathBuf::from)
         .unwrap_or_else(|| output_dir.to_path_buf());
+    let output_dir = root.join("raw");
 
-    let filter = build_filter(&args.domain, &args.topic, &file_cfg.filter);
+    let filter = build_filter(&args.domain, &args.topic, &file_cfg.run.filter);
 
     ResolvedConfig {
         output_dir,
-        zstd_level: args.zstd_level.or(file_cfg.zstd_level).unwrap_or(3),
-        concurrency: args.concurrency.or(file_cfg.http.concurrency).unwrap_or(8),
-        max_retries: args.max_retries.or(file_cfg.http.max_retries).unwrap_or(3),
+        zstd_level: args
+            .zstd_level
+            .or(file_cfg.run.zstd_level)
+            .or(file_cfg.zstd_level)
+            .unwrap_or(3),
+        concurrency: args.concurrency.or(file_cfg.run.concurrency).unwrap_or(8),
+        max_retries: args.max_retries.or(file_cfg.run.max_retries).unwrap_or(3),
         read_timeout: args
             .read_timeout
-            .or(file_cfg.http.read_timeout)
+            .or(file_cfg.run.read_timeout)
             .unwrap_or(30),
         outer_retries: args
             .outer_retries
-            .or(file_cfg.http.outer_retries)
+            .or(file_cfg.run.outer_retries)
             .unwrap_or(3),
-        retry_delay: args.retry_delay.or(file_cfg.http.retry_delay).unwrap_or(30),
+        retry_delay: args.retry_delay.or(file_cfg.run.retry_delay).unwrap_or(30),
         filter,
         force: args.force,
         since: args.since.clone(),
@@ -659,6 +733,7 @@ fn print_dry_run(
 // ============================================================
 
 fn cmd_status(output_dir: &Path) -> ExitCode {
+    let raw_dir = output_dir.join("raw");
     if let Err(e) = init_http(1) {
         eprintln!("Failed to initialize HTTP: {e}");
         return ExitCode::from(2);
@@ -692,11 +767,11 @@ fn cmd_status(output_dir: &Path) -> ExitCode {
             println!();
 
             // Local info
-            let state = State::load(output_dir);
-            let old_snapshot = ManifestSnapshot::load(output_dir);
+            let state = State::load(&raw_dir);
+            let old_snapshot = ManifestSnapshot::load(&raw_dir);
             let completed_count = shards
                 .iter()
-                .filter(|s| is_shard_complete(output_dir, s.shard_idx))
+                .filter(|s| is_shard_complete(&raw_dir, s.shard_idx))
                 .count();
 
             println!("Local ({}):", output_dir.display());
@@ -723,7 +798,7 @@ fn cmd_status(output_dir: &Path) -> ExitCode {
 
             // Show manifest diff preview
             if old_snapshot.is_some() {
-                let result = compute_manifest_diff(shards, old_snapshot.as_ref(), output_dir);
+                let result = compute_manifest_diff(shards, old_snapshot.as_ref(), &raw_dir);
                 let d = &result.diff;
                 if d.changed.len() + d.unchanged_missing.len() + d.removed.len() > 0 {
                     println!();
@@ -736,7 +811,7 @@ fn cmd_status(output_dir: &Path) -> ExitCode {
         }
         Err(e) => {
             tracing::error!("Failed to fetch manifest: {e}");
-            let state = State::load(output_dir);
+            let state = State::load(&raw_dir);
             println!("Local ({}):", output_dir.display());
             println!(
                 "  Completed:  {} shards (manifest unavailable)",
@@ -756,8 +831,13 @@ fn cmd_status(output_dir: &Path) -> ExitCode {
 // `papeline hive`
 // ============================================================
 
-fn cmd_hive(output_dir: &Path, config_path: Option<&Path>, args: &HiveArgs) -> ExitCode {
-    let file_cfg = match load_config(config_path, output_dir) {
+fn cmd_hive(
+    output_dir: &Path,
+    config_path: Option<&Path>,
+    args: &HiveArgs,
+    multi: &indicatif::MultiProgress,
+) -> ExitCode {
+    let file_cfg = match load_config(config_path) {
         Ok(cfg) => cfg,
         Err(e) => {
             tracing::error!("Config error: {e}");
@@ -771,7 +851,20 @@ fn cmd_hive(output_dir: &Path, config_path: Option<&Path>, args: &HiveArgs) -> E
         .map(PathBuf::from)
         .unwrap_or_else(|| output_dir.to_path_buf());
 
-    let resolved = match config::ResolvedHiveConfig::from_config(&output_dir, &file_cfg.hive) {
+    // Merge: CLI > [hive] section
+    let hive_cfg = config::HiveConfig {
+        zstd_level: args.zstd_level.or(file_cfg.hive.zstd_level),
+        row_group_size: args.row_group_size.or(file_cfg.hive.row_group_size),
+        num_shards: args.num_shards.or(file_cfg.hive.num_shards),
+        threads: args.threads.or(file_cfg.hive.threads),
+        memory_limit: args.memory_limit.clone().or(file_cfg.hive.memory_limit),
+    };
+
+    let resolved = match config::ResolvedHiveConfig::from_config(
+        &output_dir,
+        &hive_cfg,
+        file_cfg.zstd_level, // top-level fallback for zstd
+    ) {
         Ok(r) => r,
         Err(e) => {
             tracing::error!("Config error: {e}");
@@ -779,7 +872,7 @@ fn cmd_hive(output_dir: &Path, config_path: Option<&Path>, args: &HiveArgs) -> E
         }
     };
 
-    match hive::run_hive(&resolved, args.force, args.dry_run) {
+    match hive::run_hive(&resolved, args.force, args.dry_run, multi) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("Error: {e:#}");
@@ -793,14 +886,15 @@ fn cmd_hive(output_dir: &Path, config_path: Option<&Path>, args: &HiveArgs) -> E
 // ============================================================
 
 fn cmd_clean(output_dir: &Path) -> ExitCode {
-    if !output_dir.exists() {
-        println!("Output directory does not exist: {}", output_dir.display());
+    let raw_dir = output_dir.join("raw");
+    if !raw_dir.exists() {
+        println!("Raw directory does not exist: {}", raw_dir.display());
         return ExitCode::SUCCESS;
     }
 
     let mut total = 0usize;
     for table in TABLES {
-        let dir = output_dir.join(table);
+        let dir = raw_dir.join(table);
         if dir.exists() {
             match sink::cleanup_tmp_files(&dir) {
                 Ok(count) => total += count,
@@ -897,7 +991,15 @@ mod tests {
         };
         let args = empty_run_args();
         let r = resolve_config(Path::new("./out"), &cfg, &args);
-        assert_eq!(r.output_dir, PathBuf::from("/custom/path"));
+        assert_eq!(r.output_dir, PathBuf::from("/custom/path/raw"));
+    }
+
+    #[test]
+    fn resolve_config_output_adds_raw() {
+        let cfg = config::FileConfig::default();
+        let args = empty_run_args();
+        let r = resolve_config(Path::new("./outputs"), &cfg, &args);
+        assert_eq!(r.output_dir, PathBuf::from("./outputs/raw"));
     }
 
     // ---- save_snapshot ----

@@ -613,7 +613,7 @@ mod tests {
         acc.push(row);
         let batch = acc.take_batch().unwrap();
 
-        assert_eq!(batch.num_columns(), 83);
+        assert_eq!(batch.num_columns(), 84);
         assert_eq!(batch.num_rows(), 1);
 
         let id_col = batch

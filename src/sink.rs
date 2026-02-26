@@ -9,6 +9,7 @@ use arrow::datatypes::Schema;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::properties::WriterProperties;
+use parquet::file::reader::FileReader;
 
 /// Buffered parquet writer with atomic tmp->rename.
 ///
@@ -142,6 +143,89 @@ pub fn cleanup_tmp_files(dir: &Path) -> std::io::Result<usize> {
     Ok(count)
 }
 
+/// Schema mismatch detail for a single table.
+#[derive(Debug)]
+pub struct SchemaMismatch {
+    pub table: String,
+    pub file: PathBuf,
+    pub expected_fields: Vec<String>,
+    pub actual_fields: Vec<String>,
+}
+
+/// Validate that existing parquet files match the current schemas.
+///
+/// Checks one file per table directory. Returns a list of mismatches (empty = OK).
+/// Skips tables with no existing parquet files (first run).
+pub fn validate_existing_schemas(output_dir: &Path, tables: &[&str]) -> Vec<SchemaMismatch> {
+    let mut mismatches = Vec::new();
+
+    for &table in tables {
+        let Some(expected) = crate::schema::schema_for_table(table) else {
+            continue;
+        };
+
+        let table_dir = output_dir.join(table);
+        if !table_dir.exists() {
+            continue;
+        }
+
+        // Find the first .parquet file in the directory
+        let Some(sample) = first_parquet_file(&table_dir) else {
+            continue;
+        };
+
+        let Ok(file) = File::open(&sample) else {
+            continue;
+        };
+        let Ok(reader) = parquet::file::reader::SerializedFileReader::new(file) else {
+            continue;
+        };
+
+        let parquet_meta = reader.metadata().file_metadata();
+        let Ok(on_disk) = parquet::arrow::parquet_to_arrow_schema(
+            parquet_meta.schema_descr(),
+            parquet_meta.key_value_metadata(),
+        ) else {
+            continue;
+        };
+
+        let expected_names: Vec<String> = expected
+            .fields()
+            .iter()
+            .map(|f| f.name().to_string())
+            .collect();
+        let actual_names: Vec<String> = on_disk
+            .fields()
+            .iter()
+            .map(|f| f.name().to_string())
+            .collect();
+
+        if expected_names != actual_names {
+            mismatches.push(SchemaMismatch {
+                table: table.to_string(),
+                file: sample,
+                expected_fields: expected_names,
+                actual_fields: actual_names,
+            });
+        }
+    }
+
+    mismatches
+}
+
+/// Return the first `.parquet` file in a directory (by readdir order).
+fn first_parquet_file(dir: &Path) -> Option<PathBuf> {
+    let entries = fs::read_dir(dir).ok()?;
+    for entry in entries {
+        let Ok(entry) = entry else { continue };
+        let path = entry.path();
+        if path.extension().is_some_and(|ext| ext == "parquet") {
+            return Some(path);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,5 +350,81 @@ mod tests {
 
         assert_eq!(rows, 3);
         assert!(is_valid_parquet(&dir.path().join("test_ds_0002.parquet")));
+    }
+
+    // ---- validate_existing_schemas ----
+
+    /// Write a parquet file with the given schema into `dir/table/shard_0000.parquet`.
+    fn write_parquet_with_schema(dir: &Path, table: &str, schema: &Schema) {
+        use arrow::array::{ArrayRef, Int64Array};
+
+        let table_dir = dir.join(table);
+        std::fs::create_dir_all(&table_dir).unwrap();
+        let path = table_dir.join("shard_0000.parquet");
+        let schema = Arc::new(schema.clone());
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            schema
+                .fields()
+                .iter()
+                .map(|_| Arc::new(Int64Array::from(vec![1])) as ArrayRef)
+                .collect(),
+        )
+        .unwrap();
+        let file = File::create(&path).unwrap();
+        let mut writer = ArrowWriter::try_new(file, schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+    }
+
+    #[test]
+    fn validate_schemas_empty_dir() {
+        let dir = TempDir::new().unwrap();
+        let mismatches = validate_existing_schemas(dir.path(), &["works"]);
+        assert!(mismatches.is_empty());
+    }
+
+    #[test]
+    fn validate_schemas_matching() {
+        use arrow::datatypes::{DataType, Field};
+
+        let dir = TempDir::new().unwrap();
+        // Write a parquet with exactly 2 Int64 columns matching our "fake" table
+        let schema = Schema::new(vec![
+            Field::new("a", DataType::Int64, true),
+            Field::new("b", DataType::Int64, true),
+        ]);
+        write_parquet_with_schema(dir.path(), "test_table", &schema);
+
+        // No mismatch since table isn't in schema_for_table registry
+        let mismatches = validate_existing_schemas(dir.path(), &["test_table"]);
+        assert!(mismatches.is_empty());
+    }
+
+    #[test]
+    fn validate_schemas_mismatch_detected() {
+        use arrow::datatypes::{DataType, Field};
+
+        let dir = TempDir::new().unwrap();
+        // Write a parquet with an old schema (missing content_hash)
+        let old_schema = Schema::new(vec![
+            Field::new("a", DataType::Int64, true),
+            Field::new("b", DataType::Int64, true),
+        ]);
+        write_parquet_with_schema(dir.path(), "works", &old_schema);
+
+        let mismatches = validate_existing_schemas(dir.path(), &["works"]);
+        assert_eq!(mismatches.len(), 1);
+        assert_eq!(mismatches[0].table, "works");
+        assert_eq!(mismatches[0].actual_fields, vec!["a", "b"]);
+        assert_eq!(mismatches[0].expected_fields.len(), 84);
+    }
+
+    #[test]
+    fn validate_schemas_skips_missing_table() {
+        let dir = TempDir::new().unwrap();
+        // works dir doesn't exist → skip, no mismatch
+        let mismatches = validate_existing_schemas(dir.path(), &["works"]);
+        assert!(mismatches.is_empty());
     }
 }

@@ -1,4 +1,4 @@
-//! Works accumulator (83-column fact table) and arrow helper functions.
+//! Works accumulator (84-column fact table) and arrow helper functions.
 
 use std::sync::Arc;
 
@@ -130,7 +130,7 @@ pub(crate) fn opt_vec_to_opt(v: Vec<String>) -> Option<Vec<String>> {
 }
 
 // ============================================================
-// Works accumulator (83 cols)
+// Works accumulator (84 cols)
 // ============================================================
 
 pub struct WorksAccumulator {
@@ -144,6 +144,7 @@ pub struct WorksAccumulator {
     title: Vec<Option<String>>,
     display_name: Vec<Option<String>>,
     abstract_text: Vec<Option<String>>,
+    content_hash: Vec<Option<String>>,
     // dates
     publication_date: Vec<Option<String>>,
     publication_year: Vec<Option<i32>>,
@@ -265,6 +266,7 @@ impl WorksAccumulator {
             title: vec_cap!(),
             display_name: vec_cap!(),
             abstract_text: vec_cap!(),
+            content_hash: vec_cap!(),
             publication_date: vec_cap!(),
             publication_year: vec_cap!(),
             created_date: vec_cap!(),
@@ -359,14 +361,24 @@ impl Accumulator for WorksAccumulator {
                 .and_then(normalize_doi)
                 .map(|b| b.into_string()),
         );
+        // Decode abstract before push so we can compute content_hash
+        let abstract_text = row
+            .abstract_inverted_index
+            .as_ref()
+            .map(decode_inverted_index)
+            .filter(|s| !s.is_empty());
+
+        // blake3(title + \0 + abstract) for downstream embedding change detection
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(row.title.as_deref().unwrap_or("").as_bytes());
+        hasher.update(b"\0");
+        hasher.update(abstract_text.as_deref().unwrap_or("").as_bytes());
+        self.content_hash
+            .push(Some(hasher.finalize().to_hex().to_string()));
+
         self.title.push(row.title);
         self.display_name.push(row.display_name);
-        self.abstract_text.push(
-            row.abstract_inverted_index
-                .as_ref()
-                .map(decode_inverted_index)
-                .filter(|s| !s.is_empty()),
-        );
+        self.abstract_text.push(abstract_text);
 
         // dates
         self.publication_date.push(row.publication_date);
@@ -552,6 +564,7 @@ impl Accumulator for WorksAccumulator {
             Arc::new(StringArray::from(std::mem::take(&mut self.title))),
             Arc::new(StringArray::from(std::mem::take(&mut self.display_name))),
             Arc::new(StringArray::from(std::mem::take(&mut self.abstract_text))),
+            Arc::new(StringArray::from(std::mem::take(&mut self.content_hash))),
             // dates (4)
             Arc::new(StringArray::from(std::mem::take(
                 &mut self.publication_date,

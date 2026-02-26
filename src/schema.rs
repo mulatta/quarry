@@ -15,7 +15,7 @@ fn list_list_utf8() -> DataType {
     DataType::List(Arc::new(Field::new("item", list_utf8(), true)))
 }
 
-/// works.parquet — 82-column fact table
+/// works.parquet — 84-column fact table
 pub fn works() -> &'static Arc<Schema> {
     static SCHEMA: LazyLock<Arc<Schema>> = LazyLock::new(|| {
         Arc::new(Schema::new(vec![
@@ -26,6 +26,7 @@ pub fn works() -> &'static Arc<Schema> {
             Field::new("title", DataType::Utf8, true),
             Field::new("display_name", DataType::Utf8, true),
             Field::new("abstract_text", DataType::Utf8, true),
+            Field::new("content_hash", DataType::Utf8, true),
             // -- dates (4)
             Field::new("publication_date", DataType::Utf8, true),
             Field::new("publication_year", DataType::Int32, true),
@@ -307,13 +308,32 @@ pub fn work_counts_by_year() -> &'static Arc<Schema> {
     &SCHEMA
 }
 
+/// Look up the expected Arrow schema for a table name.
+pub fn schema_for_table(table: &str) -> Option<&'static Arc<Schema>> {
+    match table {
+        "works" => Some(works()),
+        "works_keys" => Some(works_keys()),
+        "citations" => Some(citations()),
+        "work_authorships" => Some(work_authorships()),
+        "work_topics" => Some(work_topics()),
+        "work_keywords" => Some(work_keywords()),
+        "work_mesh" => Some(work_mesh()),
+        "work_locations" => Some(work_locations()),
+        "work_funders" => Some(work_funders()),
+        "work_awards" => Some(work_awards()),
+        "work_sdgs" => Some(work_sdgs()),
+        "work_counts_by_year" => Some(work_counts_by_year()),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn works_has_83_cols() {
-        assert_eq!(works().fields().len(), 83);
+    fn works_has_84_cols() {
+        assert_eq!(works().fields().len(), 84);
     }
 
     #[test]

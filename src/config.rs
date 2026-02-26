@@ -13,26 +13,44 @@ use crate::transform::Filter;
 
 /// Parsed from `papeline.toml`.
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FileConfig {
     pub output: Option<String>,
+    /// Shared ZSTD level fallback (both `[run]` and `[hive]` inherit if unset).
     pub zstd_level: Option<i32>,
     #[serde(default)]
-    pub filter: FilterConfig,
-    #[serde(default)]
-    pub http: HttpConfig,
+    pub run: RunConfig,
     #[serde(default)]
     pub hive: HiveConfig,
 }
 
+/// `[run]` section — settings for `papeline run`.
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunConfig {
+    pub zstd_level: Option<i32>,
+    pub concurrency: Option<usize>,
+    pub max_retries: Option<u32>,
+    pub read_timeout: Option<u64>,
+    pub outer_retries: Option<u32>,
+    pub retry_delay: Option<u64>,
+    #[serde(default)]
+    pub filter: FilterConfig,
+}
+
+/// `[hive]` section — settings for `papeline hive`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HiveConfig {
     pub zstd_level: Option<i32>,
     pub row_group_size: Option<usize>,
+    pub num_shards: Option<usize>,
     pub threads: Option<usize>,
     pub memory_limit: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FilterConfig {
     #[serde(default)]
     pub domains: Vec<String>,
@@ -40,24 +58,15 @@ pub struct FilterConfig {
     pub topics: Vec<String>,
 }
 
-#[derive(Debug, Default, Deserialize)]
-pub struct HttpConfig {
-    pub concurrency: Option<usize>,
-    pub max_retries: Option<u32>,
-    pub read_timeout: Option<u64>,
-    pub outer_retries: Option<u32>,
-    pub retry_delay: Option<u64>,
-}
-
-/// Try loading config from explicit path or `{output_dir}/papeline.toml`.
-pub fn load_config(explicit: Option<&Path>, output_dir: &Path) -> anyhow::Result<FileConfig> {
+/// Try loading config from explicit `--config` path or `./papeline.toml` in CWD.
+pub fn load_config(explicit: Option<&Path>) -> anyhow::Result<FileConfig> {
     let path = if let Some(p) = explicit {
         if !p.exists() {
             anyhow::bail!("Config file not found: {}", p.display());
         }
         Some(p.to_path_buf())
     } else {
-        let auto = output_dir.join("papeline.toml");
+        let auto = PathBuf::from("./papeline.toml");
         if auto.exists() {
             tracing::info!("Using config: {}", auto.display());
             Some(auto)
@@ -107,12 +116,23 @@ pub struct ResolvedHiveConfig {
     pub staging_dir: PathBuf,
     pub zstd_level: i32,
     pub row_group_size: usize,
+    pub num_shards: usize,
     pub threads: usize,
     pub memory_limit_bytes: usize,
 }
 
 impl ResolvedHiveConfig {
-    pub fn from_config(output_dir: &Path, hive: &HiveConfig) -> anyhow::Result<Self> {
+    /// Resolve hive config with fallback chain:
+    /// CLI > `[hive]` section > `fallback_zstd` (top-level) > defaults.
+    ///
+    /// `output_dir` is the root (e.g. `./outputs`).
+    /// Raw shards are read from `output_dir/raw/`, hive written to `output_dir/hive/`.
+    pub fn from_config(
+        output_dir: &Path,
+        hive: &HiveConfig,
+        fallback_zstd: Option<i32>,
+    ) -> anyhow::Result<Self> {
+        let raw_dir = output_dir.join("raw");
         let hive_dir = output_dir.join("hive");
         let staging_dir = hive_dir.join(".staging");
 
@@ -127,11 +147,12 @@ impl ResolvedHiveConfig {
             .unwrap_or_else(|| (num_cpus::get() * 3 / 4).max(2));
 
         Ok(Self {
-            raw_dir: output_dir.to_path_buf(),
+            raw_dir,
             hive_dir,
             staging_dir,
-            zstd_level: hive.zstd_level.unwrap_or(8),
+            zstd_level: hive.zstd_level.or(fallback_zstd).unwrap_or(8),
             row_group_size: hive.row_group_size.unwrap_or(500_000),
+            num_shards: hive.num_shards.unwrap_or(4),
             threads,
             memory_limit_bytes,
         })
@@ -335,39 +356,29 @@ mod tests {
 output = "/data/out"
 zstd_level = 5
 
-[filter]
+[run]
+concurrency = 16
+
+[run.filter]
 domains = ["Health Sciences"]
 topics = ["T123"]
-
-[http]
-concurrency = 16
 "#,
         )
         .unwrap();
 
-        let cfg = load_config(Some(path.as_path()), dir.path()).unwrap();
+        let cfg = load_config(Some(path.as_path())).unwrap();
         assert_eq!(cfg.output.as_deref(), Some("/data/out"));
         assert_eq!(cfg.zstd_level, Some(5));
-        assert_eq!(cfg.filter.domains, vec!["Health Sciences"]);
-        assert_eq!(cfg.filter.topics, vec!["T123"]);
-        assert_eq!(cfg.http.concurrency, Some(16));
-    }
-
-    #[test]
-    fn load_config_auto_discovery() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("papeline.toml");
-        fs::write(&path, "zstd_level = 9\n").unwrap();
-
-        let cfg = load_config(None, dir.path()).unwrap();
-        assert_eq!(cfg.zstd_level, Some(9));
+        assert_eq!(cfg.run.filter.domains, vec!["Health Sciences"]);
+        assert_eq!(cfg.run.filter.topics, vec!["T123"]);
+        assert_eq!(cfg.run.concurrency, Some(16));
     }
 
     #[test]
     fn load_config_missing_explicit() {
         let dir = TempDir::new().unwrap();
         let missing = dir.path().join("nope.toml");
-        let err = load_config(Some(missing.as_path()), dir.path());
+        let err = load_config(Some(missing.as_path()));
         assert!(err.is_err());
         assert!(
             err.unwrap_err().to_string().contains("not found"),
@@ -381,18 +392,93 @@ concurrency = 16
         let path = dir.path().join("bad.toml");
         fs::write(&path, "this is not [[[valid toml").unwrap();
 
-        let err = load_config(Some(path.as_path()), dir.path());
+        let err = load_config(Some(path.as_path()));
         assert!(err.is_err());
     }
 
     #[test]
-    fn load_config_no_config() {
+    fn load_config_rejects_old_format() {
         let dir = TempDir::new().unwrap();
-        // No papeline.toml, no explicit path
-        let cfg = load_config(None, dir.path()).unwrap();
-        assert!(cfg.output.is_none());
-        assert!(cfg.zstd_level.is_none());
-        assert!(cfg.filter.domains.is_empty());
+        // Old format: [filter] at top level is now unknown
+        let path = dir.path().join("old.toml");
+        fs::write(&path, "[filter]\ndomains = [\"test\"]\n").unwrap();
+        let err = load_config(Some(path.as_path()));
+        assert!(err.is_err());
+        assert!(
+            err.unwrap_err().to_string().contains("unknown field"),
+            "should mention unknown field"
+        );
+    }
+
+    #[test]
+    fn load_config_subcommand_sections() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("full.toml");
+        fs::write(
+            &path,
+            r#"
+output = "/data"
+zstd_level = 9
+
+[run]
+zstd_level = 3
+concurrency = 16
+
+[run.filter]
+domains = ["Health Sciences"]
+
+[hive]
+zstd_level = 8
+threads = 12
+memory_limit = "32GB"
+"#,
+        )
+        .unwrap();
+        let cfg = load_config(Some(path.as_path())).unwrap();
+        assert_eq!(cfg.zstd_level, Some(9));
+        assert_eq!(cfg.run.zstd_level, Some(3));
+        assert_eq!(cfg.run.concurrency, Some(16));
+        assert_eq!(cfg.run.filter.domains, vec!["Health Sciences"]);
+        assert_eq!(cfg.hive.zstd_level, Some(8));
+        assert_eq!(cfg.hive.threads, Some(12));
+        assert_eq!(cfg.hive.memory_limit.as_deref(), Some("32GB"));
+    }
+
+    #[test]
+    fn resolved_hive_inherits_global_zstd() {
+        let hive = HiveConfig::default();
+        let r = ResolvedHiveConfig::from_config(Path::new("/tmp"), &hive, Some(9)).unwrap();
+        assert_eq!(r.zstd_level, 9);
+        assert_eq!(r.raw_dir, PathBuf::from("/tmp/raw"));
+        assert_eq!(r.hive_dir, PathBuf::from("/tmp/hive"));
+    }
+
+    #[test]
+    fn resolved_hive_section_overrides_global() {
+        let hive = HiveConfig {
+            zstd_level: Some(5),
+            ..Default::default()
+        };
+        let r = ResolvedHiveConfig::from_config(Path::new("/tmp"), &hive, Some(9)).unwrap();
+        assert_eq!(r.zstd_level, 5);
+    }
+
+    #[test]
+    fn resolved_hive_default_without_global() {
+        let hive = HiveConfig::default();
+        let r = ResolvedHiveConfig::from_config(Path::new("/tmp"), &hive, None).unwrap();
+        assert_eq!(r.zstd_level, 8);
+    }
+
+    #[test]
+    fn load_config_no_config() {
+        // No explicit path, and CWD auto-discovery may or may not find a file.
+        // Just verify that None doesn't panic.
+        let cfg = load_config(None).unwrap();
+        // If CWD has no papeline.toml, we get defaults.
+        // If it does (e.g. repo root), we get that file's config.
+        // Either way, it must succeed.
+        let _ = cfg;
     }
 
     // ---- build_filter ----

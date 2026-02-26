@@ -1,0 +1,25 @@
+zstd_level = 9
+
+[run]
+concurrency = 24
+
+[run.filter]
+domains = ["Health Sciences", "Life Sciences"]
+topics = [
+  "T11162",
+  "T10211",
+  "T10059",
+  "T13280",
+  "T10729",
+  "T11190",
+  "T10862",
+  "T10782",
+  "T11966",
+  "T11829",
+  "T11626",
+]
+
+[hive]
+threads = 24
+memory_limit = "128GB"
+row_group_size = 1000000
