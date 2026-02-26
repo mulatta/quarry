@@ -32,10 +32,9 @@ pub fn works() -> &'static Arc<Schema> {
             Field::new("publication_year", DataType::Int32, true),
             Field::new("created_date", DataType::Utf8, true),
             Field::new("updated_date", DataType::Utf8, true),
-            // -- classification (3)
+            // -- classification (2)
             Field::new("language", DataType::Utf8, true),
             Field::new("work_type", DataType::Utf8, true),
-            Field::new("type_crossref", DataType::Utf8, true),
             // -- counts (5)
             Field::new("cited_by_count", DataType::Int32, true),
             Field::new("referenced_works_count", DataType::Int32, true),
@@ -127,8 +126,9 @@ pub fn works() -> &'static Arc<Schema> {
             Field::new("corresponding_institution_ids", list_utf8(), true),
             Field::new("indexed_in", list_utf8(), true),
             Field::new("related_works", list_utf8(), true),
-            // -- shard metadata (1)
+            // -- shard metadata (2)
             Field::new("shard_updated_date", DataType::Utf8, true),
+            Field::new("oa_shard_idx", DataType::UInt16, true),
         ]))
     });
     &SCHEMA
@@ -272,12 +272,11 @@ pub fn work_awards() -> &'static Arc<Schema> {
     static SCHEMA: LazyLock<Arc<Schema>> = LazyLock::new(|| {
         Arc::new(Schema::new(vec![
             Field::new("work_id", DataType::Utf8, true),
-            Field::new("award_id", DataType::Utf8, true),
+            Field::new("id", DataType::Utf8, true),
             Field::new("display_name", DataType::Utf8, true),
             Field::new("funder_award_id", DataType::Utf8, true),
             Field::new("funder_id", DataType::Utf8, true),
             Field::new("funder_display_name", DataType::Utf8, true),
-            Field::new("doi", DataType::Utf8, true),
         ]))
     });
     &SCHEMA
@@ -377,8 +376,8 @@ mod tests {
     }
 
     #[test]
-    fn work_awards_has_7_cols() {
-        assert_eq!(work_awards().fields().len(), 7);
+    fn work_awards_has_6_cols() {
+        assert_eq!(work_awards().fields().len(), 6);
     }
 
     #[test]

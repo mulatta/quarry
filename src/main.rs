@@ -1,5 +1,7 @@
 //! papeline -- Academic paper data pipeline (OpenAlex).
 
+use std::io::IsTerminal;
+
 mod accumulator;
 mod api;
 mod config;
@@ -135,6 +137,10 @@ struct RunArgs {
     #[arg(long)]
     topic: Vec<String>,
 
+    /// Filter works by language code, e.g. en (repeatable)
+    #[arg(long)]
+    language: Vec<String>,
+
     // -- Run modes --
     /// Force re-download of all shards (ignore completed)
     #[arg(long)]
@@ -151,20 +157,53 @@ struct RunArgs {
     /// Show what would be processed without executing
     #[arg(long)]
     dry_run: bool,
+
+    /// Auto-run hive partitioning after successful download
+    #[arg(long)]
+    hive: bool,
+
+    /// Remove raw parquet files after successful hive (requires --hive)
+    #[arg(long, requires = "hive")]
+    clean_raw: bool,
 }
 
 // ============================================================
 // Entry point
 // ============================================================
 
+/// Raise the open-file soft limit to the hard limit.
+///
+/// Job runners (pueue, systemd) often inherit a low soft limit (1024)
+/// while the hard limit is much higher. Hive partitioning needs ~2000+
+/// simultaneous writers, so we raise the soft limit at startup.
+fn raise_fd_limit() {
+    unsafe {
+        let mut rlim = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) == 0 && rlim.rlim_cur < rlim.rlim_max {
+            rlim.rlim_cur = rlim.rlim_max;
+            libc::setrlimit(libc::RLIMIT_NOFILE, &rlim);
+        }
+    }
+}
+
 fn main() -> ExitCode {
+    raise_fd_limit();
     let cli = Cli::parse();
 
     // Create MultiProgress early so tracing output is routed through it,
     // preventing log lines from corrupting progress bar rendering.
     let multi = indicatif::MultiProgress::new();
 
-    let level = if cli.verbose { "debug" } else { "warn" };
+    let level = if cli.verbose {
+        "debug"
+    } else if std::io::stderr().is_terminal() {
+        "warn"
+    } else {
+        "info"
+    };
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -197,16 +236,28 @@ fn cmd_run(
         Err(code) => return code,
     };
 
+    let multi_for_hive = multi.clone();
+
     let Some(result) = execute_run(&plan, multi) else {
         save_snapshot(
             &plan.all_shards,
             &FxHashSet::default(),
             &plan.resolved.output_dir,
         );
+        // No shards processed; still run hive if requested (idempotent check inside)
+        if args.hive {
+            return run_auto_hive(output_dir, config_path, args.clean_raw, &multi_for_hive);
+        }
         return ExitCode::SUCCESS;
     };
 
-    finalize_run(plan, &result)
+    let code = finalize_run(plan, &result);
+
+    if code != ExitCode::SUCCESS || !args.hive {
+        return code;
+    }
+
+    run_auto_hive(output_dir, config_path, args.clean_raw, &multi_for_hive)
 }
 
 // ---- Phase types ----
@@ -559,7 +610,12 @@ fn resolve_config(
         .unwrap_or_else(|| output_dir.to_path_buf());
     let output_dir = root.join("raw");
 
-    let filter = build_filter(&args.domain, &args.topic, &file_cfg.run.filter);
+    let filter = build_filter(
+        &args.domain,
+        &args.topic,
+        &args.language,
+        &file_cfg.run.filter,
+    );
 
     ResolvedConfig {
         output_dir,
@@ -603,9 +659,20 @@ fn warn_on_filter_change(state: &State, resolved: &ResolvedConfig) {
         .iter()
         .map(|s| s.as_str())
         .collect();
-    if state_domains != cur_domains || state_topics != cur_topics {
+    let state_languages: std::collections::BTreeSet<&str> =
+        state.filter.languages.iter().map(|s| s.as_str()).collect();
+    let cur_languages: std::collections::BTreeSet<&str> = resolved
+        .filter
+        .languages
+        .iter()
+        .map(|s| s.as_str())
+        .collect();
+    if state_domains != cur_domains
+        || state_topics != cur_topics
+        || state_languages != cur_languages
+    {
         tracing::warn!(
-            "Filter changed since last run! Previous: domains={state_domains:?} topics={state_topics:?}"
+            "Filter changed since last run! Previous: domains={state_domains:?} topics={state_topics:?} languages={state_languages:?}"
         );
     }
 }
@@ -664,6 +731,7 @@ fn build_new_state(
     state.filter = config::StateFilter {
         domains: filter.domains.iter().cloned().collect(),
         topics: filter.topic_ids.iter().cloned().collect(),
+        languages: filter.languages.iter().cloned().collect(),
     };
     let (started_at, finished_at) = timestamps;
     state.started_at = Some(started_at.to_owned());
@@ -828,6 +896,78 @@ fn cmd_status(output_dir: &Path) -> ExitCode {
 }
 
 // ============================================================
+// Auto-hive (invoked by `papeline run --hive`)
+// ============================================================
+
+fn run_auto_hive(
+    output_dir: &Path,
+    config_path: Option<&Path>,
+    clean_raw: bool,
+    multi: &indicatif::MultiProgress,
+) -> ExitCode {
+    let file_cfg = match load_config(config_path) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            tracing::error!("Config error: {e}");
+            return ExitCode::from(2);
+        }
+    };
+
+    let root = file_cfg
+        .output
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| output_dir.to_path_buf());
+
+    let resolved =
+        match config::ResolvedHiveConfig::from_config(&root, &file_cfg.hive, file_cfg.zstd_level) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!("Hive config error: {e}");
+                return ExitCode::from(2);
+            }
+        };
+
+    match hive::run_hive(&resolved, false, false, multi) {
+        Ok(()) => {}
+        Err(e) => {
+            eprintln!("Hive error: {e:#}");
+            return ExitCode::from(1);
+        }
+    }
+
+    if clean_raw {
+        clean_raw_parquet(&resolved.raw_dir);
+    }
+
+    ExitCode::SUCCESS
+}
+
+/// Remove parquet files from raw table directories, preserving metadata files.
+fn clean_raw_parquet(raw_dir: &Path) {
+    let mut total = 0usize;
+    for table in TABLES {
+        let dir = raw_dir.join(table);
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|ext| ext == "parquet") {
+                if let Err(e) = std::fs::remove_file(&path) {
+                    tracing::warn!("Failed to remove {}: {e}", path.display());
+                } else {
+                    total += 1;
+                }
+            }
+        }
+    }
+    if total > 0 {
+        println!("Cleaned {total} raw parquet files");
+    }
+}
+
+// ============================================================
 // `papeline hive`
 // ============================================================
 
@@ -926,10 +1066,13 @@ mod tests {
             zstd_level: None,
             domain: vec![],
             topic: vec![],
+            language: vec![],
             force: false,
             since: None,
             max_shards: None,
             dry_run: false,
+            hive: false,
+            clean_raw: false,
         }
     }
 

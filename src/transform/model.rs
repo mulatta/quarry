@@ -32,8 +32,6 @@ pub struct WorkRow {
     #[serde(rename = "type", default)]
     pub work_type: Option<String>,
     #[serde(default)]
-    pub type_crossref: Option<String>,
-    #[serde(default)]
     pub cited_by_count: Option<i32>,
     #[serde(default)]
     pub referenced_works_count: Option<i32>,
@@ -57,6 +55,8 @@ pub struct WorkRow {
     pub cited_by_percentile_year: Option<PercentileYear>,
     #[serde(default)]
     pub has_fulltext: Option<bool>,
+    #[serde(default)]
+    pub has_content: Option<HasContent>,
     #[serde(default)]
     pub biblio: Option<Biblio>,
     #[serde(default)]
@@ -90,7 +90,7 @@ pub struct WorkRow {
     #[serde(default)]
     pub funders: Vec<Funder>,
     #[serde(default)]
-    pub grants: Vec<Award>,
+    pub awards: Vec<Award>,
     #[serde(default)]
     pub counts_by_year: Vec<CountByYear>,
     #[serde(default)]
@@ -113,6 +113,14 @@ pub struct OpenAccess {
     pub oa_url: Option<String>,
     #[serde(default)]
     pub any_repository_has_fulltext: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct HasContent {
+    #[serde(default)]
+    pub pdf: Option<bool>,
+    #[serde(default)]
+    pub grobid_xml: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -340,18 +348,18 @@ pub struct Funder {
 
 #[derive(Debug, Deserialize)]
 pub struct Award {
+    /// OpenAlex award/grant ID (e.g. "https://openalex.org/G1466802593")
     #[serde(default)]
-    pub award_id: Option<String>,
+    pub id: Option<String>,
     #[serde(default)]
     pub display_name: Option<String>,
     #[serde(default)]
     pub funder_award_id: Option<String>,
-    #[serde(default)]
-    pub funder: Option<String>,
+    /// Funder OpenAlex ID (e.g. "https://openalex.org/F4320306076")
+    #[serde(default, alias = "funder")]
+    pub funder_id: Option<String>,
     #[serde(default)]
     pub funder_display_name: Option<String>,
-    #[serde(default)]
-    pub doi: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

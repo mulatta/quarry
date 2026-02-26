@@ -149,7 +149,7 @@ pub fn compute_manifest_diff(
     }
 }
 
-/// Delete all 12 parquet files for removed shards.
+/// Delete all parquet files (12 tables) for removed shards.
 pub fn delete_shard_files(output_dir: &Path, removed: &[RemovedShard]) {
     for r in removed {
         let mut deleted = 0usize;

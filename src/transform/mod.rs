@@ -72,38 +72,61 @@ pub fn strip_oa_prefix(url: &str) -> &str {
 // Domain/Topic Filter
 // ============================================================
 
-/// Row-level filter for domain and topic matching.
+/// Row-level filter for domain, topic, and language matching.
 ///
-/// A work matches if ANY of its topics belongs to a listed domain
-/// OR has a listed topic ID. Empty filter matches everything.
+/// A work matches if it passes ALL active filter dimensions:
+///   - language: row.language must be in the set (if non-empty)
+///   - domain/topic: ANY topic belongs to a listed domain OR has a listed topic ID (if non-empty)
+///
+/// Empty filter matches everything.
 #[derive(Debug, Clone, Default)]
 pub struct Filter {
     pub domains: rustc_hash::FxHashSet<String>,
     pub topic_ids: rustc_hash::FxHashSet<String>,
+    pub languages: rustc_hash::FxHashSet<String>,
 }
 
 impl Filter {
     pub fn is_empty(&self) -> bool {
-        self.domains.is_empty() && self.topic_ids.is_empty()
+        self.domains.is_empty() && self.topic_ids.is_empty() && self.languages.is_empty()
     }
 
-    /// Returns true if work matches ANY domain OR ANY topic.
+    /// Returns true if work passes all active filter dimensions.
     pub fn matches(&self, row: &WorkRow) -> bool {
         if self.is_empty() {
             return true;
         }
 
-        if let Some(topic) = &row.primary_topic
-            && self.matches_topic(topic)
-        {
-            return true;
-        }
-        for topic in &row.topics {
-            if self.matches_topic(topic) {
-                return true;
+        // Language filter (AND with domain/topic)
+        if !self.languages.is_empty() {
+            match &row.language {
+                Some(lang) if self.languages.contains(lang.as_str()) => {}
+                _ => return false,
             }
         }
-        false
+
+        // Domain/topic filter
+        if !self.domains.is_empty() || !self.topic_ids.is_empty() {
+            let mut topic_match = false;
+            if let Some(topic) = &row.primary_topic
+                && self.matches_topic(topic)
+            {
+                topic_match = true;
+            }
+            if !topic_match {
+                for topic in &row.topics {
+                    if self.matches_topic(topic) {
+                        topic_match = true;
+                        break;
+                    }
+                }
+            }
+            if !topic_match {
+                return false;
+            }
+        }
+
+        true
     }
 
     fn matches_topic(&self, topic: &Topic) -> bool {

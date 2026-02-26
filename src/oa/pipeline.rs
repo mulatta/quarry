@@ -94,6 +94,7 @@ impl ShardPipeline {
         shard_idx: usize,
         ctx: &RunContext,
         shard_updated_date: Option<String>,
+        oa_shard_idx: u16,
     ) -> Result<Self, ShardError> {
         let z = ctx.zstd_level;
         let mk =
@@ -152,19 +153,19 @@ impl ShardPipeline {
         ];
 
         Ok(Self {
-            works_acc: WorksAccumulator::with_shard_updated_date(shard_updated_date),
+            works_acc: WorksAccumulator::with_shard_metadata(shard_updated_date, oa_shard_idx),
             works_sink: mk("works", schema::works())?,
             fanouts,
         })
     }
 
-    /// Push a parsed work row through all 12 accumulators, flushing any that are full.
+    /// Push a parsed work row through all 12 accumulators, flushing when full.
     fn push_work(&mut self, work_id: &Arc<str>, row: Box<WorkRow>) -> std::io::Result<()> {
         // Fan-out accumulators borrow the row first
         for (acc, _) in &mut self.fanouts {
             acc.push_from_work(work_id, &row);
         }
-        // Works accumulator consumes the row
+        // Works accumulator consumes the row (computes content_hash)
         self.works_acc.push(*row);
 
         // Flush works if full
@@ -232,7 +233,12 @@ pub(super) fn process_works_shard(
 
         let t_connect = t0.elapsed();
 
-        let mut pipeline = ShardPipeline::create(shard.shard_idx, ctx, shard.updated_date.clone())?;
+        let mut pipeline = ShardPipeline::create(
+            shard.shard_idx,
+            ctx,
+            shard.updated_date.clone(),
+            u16::try_from(shard.shard_idx).expect("shard_idx overflow"),
+        )?;
 
         let result = process_works_lines(&mut reader, &counter, &mut pipeline, filter, pb)
             .map_err(ShardError::Io)?;
@@ -401,7 +407,7 @@ mod tests {
     // Rich fixture — all major fields populated
     // ============================================================
 
-    const RICH_WORK_JSON: &str = r#"{"id":"https://openalex.org/W2741809807","doi":"https://doi.org/10.1038/s41586-020-2649-2","display_name":"Array programming with NumPy","title":"Array programming with NumPy","publication_year":2020,"publication_date":"2020-09-17","language":"en","type":"journal-article","type_crossref":"journal-article","cited_by_count":5000,"is_retracted":false,"is_paratext":false,"ids":{"openalex":"https://openalex.org/W2741809807","doi":"https://doi.org/10.1038/s41586-020-2649-2","mag":2741809807,"pmid":"https://pubmed.ncbi.nlm.nih.gov/32939066","pmcid":"https://www.ncbi.nlm.nih.gov/pmc/articles/PMC7759461"},"referenced_works":["https://openalex.org/W100","https://openalex.org/W200"],"counts_by_year":[{"year":2023,"cited_by_count":1500},{"year":2022,"cited_by_count":1200}],"keywords":[{"id":"K1","display_name":"NumPy","score":0.95}],"mesh":[{"descriptor_ui":"D000123","descriptor_name":"Software","qualifier_ui":"Q000456","qualifier_name":"standards","is_major_topic":true}],"topics":[{"id":"https://openalex.org/T10101","display_name":"Scientific Computing","score":0.99,"subfield":{"id":"SF1","display_name":"Computational Science"},"field":{"id":"F1","display_name":"Computer Science"},"domain":{"id":"D1","display_name":"Physical Sciences"}}],"authorships":[{"author_position":"first","author":{"id":"https://openalex.org/A1","display_name":"Charles Harris","orcid":"0000-0001-0002-0003"},"institutions":[{"id":"https://openalex.org/I1","display_name":"MIT","ror":"https://ror.org/012345","country_code":"US","type":"education"}],"countries":["US"],"is_corresponding":true,"raw_affiliation_strings":["MIT, Cambridge, MA"]}],"locations":[{"is_oa":true,"landing_page_url":"https://www.nature.com/articles/s41586-020-2649-2","pdf_url":"https://www.nature.com/articles/s41586-020-2649-2.pdf","license":"cc-by","version":"publishedVersion","source":{"id":"https://openalex.org/S1","display_name":"Nature","issn_l":"0028-0836","issn":["0028-0836","1476-4687"],"host_organization":"https://openalex.org/P1","type":"journal"}}],"sustainable_development_goals":[{"id":"SDG9","display_name":"Industry and Innovation","score":0.8}],"funders":[{"id":"https://openalex.org/F1","display_name":"NSF"}],"grants":[{"funder":"https://openalex.org/F1","funder_display_name":"NSF","award_id":"1234567"}],"open_access":{"is_oa":true,"oa_status":"gold","oa_url":"https://example.com/oa"},"abstract_inverted_index":{"Array":[0],"programming":[1],"with":[2],"NumPy":[3]}}"#;
+    const RICH_WORK_JSON: &str = r#"{"id":"https://openalex.org/W2741809807","doi":"https://doi.org/10.1038/s41586-020-2649-2","display_name":"Array programming with NumPy","title":"Array programming with NumPy","publication_year":2020,"publication_date":"2020-09-17","language":"en","type":"journal-article","cited_by_count":5000,"is_retracted":false,"is_paratext":false,"has_content":{"pdf":true,"grobid_xml":false},"ids":{"openalex":"https://openalex.org/W2741809807","doi":"https://doi.org/10.1038/s41586-020-2649-2","mag":2741809807,"pmid":"https://pubmed.ncbi.nlm.nih.gov/32939066","pmcid":"https://www.ncbi.nlm.nih.gov/pmc/articles/PMC7759461"},"referenced_works":["https://openalex.org/W100","https://openalex.org/W200"],"counts_by_year":[{"year":2023,"cited_by_count":1500},{"year":2022,"cited_by_count":1200}],"keywords":[{"id":"K1","display_name":"NumPy","score":0.95}],"mesh":[{"descriptor_ui":"D000123","descriptor_name":"Software","qualifier_ui":"Q000456","qualifier_name":"standards","is_major_topic":true}],"topics":[{"id":"https://openalex.org/T10101","display_name":"Scientific Computing","score":0.99,"subfield":{"id":"SF1","display_name":"Computational Science"},"field":{"id":"F1","display_name":"Computer Science"},"domain":{"id":"D1","display_name":"Physical Sciences"}}],"authorships":[{"author_position":"first","author":{"id":"https://openalex.org/A1","display_name":"Charles Harris","orcid":"0000-0001-0002-0003"},"institutions":[{"id":"https://openalex.org/I1","display_name":"MIT","ror":"https://ror.org/012345","country_code":"US","type":"education"}],"countries":["US"],"is_corresponding":true,"raw_affiliation_strings":["MIT, Cambridge, MA"]}],"locations":[{"is_oa":true,"landing_page_url":"https://www.nature.com/articles/s41586-020-2649-2","pdf_url":"https://www.nature.com/articles/s41586-020-2649-2.pdf","license":"cc-by","version":"publishedVersion","source":{"id":"https://openalex.org/S1","display_name":"Nature","issn_l":"0028-0836","issn":["0028-0836","1476-4687"],"host_organization":"https://openalex.org/P1","type":"journal"}}],"sustainable_development_goals":[{"id":"SDG9","display_name":"Industry and Innovation","score":0.8}],"funders":[{"id":"https://openalex.org/F1","display_name":"NSF"}],"awards":[{"id":"https://openalex.org/G1234567","funder_id":"https://openalex.org/F1","funder_display_name":"NSF","funder_award_id":"1234567"}],"open_access":{"is_oa":true,"oa_status":"gold","oa_url":"https://example.com/oa"},"abstract_inverted_index":{"Array":[0],"programming":[1],"with":[2],"NumPy":[3]}}"#;
 
     // ============================================================
     // Test helpers
@@ -453,7 +459,8 @@ mod tests {
             concurrency: 1,
         };
 
-        let mut pipeline = ShardPipeline::create(0, &ctx, Some("2024-01-15".to_string())).unwrap();
+        let mut pipeline =
+            ShardPipeline::create(0, &ctx, Some("2024-01-15".to_string()), 0u16).unwrap();
 
         let input = format!("{}\n", RICH_WORK_JSON);
         let mut reader = std::io::BufReader::new(input.as_bytes());
@@ -493,6 +500,25 @@ mod tests {
         assert_str_col(&works, "ids_pmcid", &["PMC7759461"]);
         assert_str_col(&works, "ids_mag", &["2741809807"]);
         assert_str_col(&works, "shard_updated_date", &["2024-01-15"]);
+
+        // oa_shard_idx
+        let idx_col = works
+            .column_by_name("oa_shard_idx")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::UInt16Array>()
+            .unwrap();
+        assert_eq!(idx_col.value(0), 0);
+
+        // content_hash = blake3(title + \0 + abstract)
+        let expected_hash = {
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(b"Array programming with NumPy");
+            hasher.update(b"\0");
+            hasher.update(b"Array programming with NumPy");
+            hasher.finalize().to_hex().to_string()
+        };
+        assert_str_col(&works, "content_hash", &[&expected_hash]);
 
         // Verify works_keys table
         let keys = read_parquet(&dir.path().join("works_keys/shard_0000.parquet"));
@@ -549,10 +575,11 @@ mod tests {
         assert_eq!(funders.num_rows(), 1);
         assert_str_col(&funders, "display_name", &["NSF"]);
 
-        // Awards: 1 grant entry
+        // Awards: 1 award entry
         let awards = read_parquet(&dir.path().join("work_awards/shard_0000.parquet"));
         assert_eq!(awards.num_rows(), 1);
-        assert_str_col(&awards, "award_id", &["1234567"]);
+        assert_str_col(&awards, "id", &["https://openalex.org/G1234567"]);
+        assert_str_col(&awards, "funder_award_id", &["1234567"]);
         assert_str_col(&awards, "funder_display_name", &["NSF"]);
     }
 
@@ -629,7 +656,7 @@ mod tests {
             concurrency: 1,
         };
 
-        let mut pipeline = ShardPipeline::create(0, &ctx, None).unwrap();
+        let mut pipeline = ShardPipeline::create(0, &ctx, None, 0u16).unwrap();
 
         let input = r#"{"id":"https://openalex.org/W99","authorships":[{"author_position":"first","author":{"id":"https://openalex.org/A1","display_name":"Bob"},"institutions":[],"affiliations":[{"raw_affiliation_string":"MIT","institution_ids":[null,"https://openalex.org/I1"]}]}]}
 "#;

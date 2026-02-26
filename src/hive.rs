@@ -18,8 +18,8 @@ use arrow::array::{Array, ArrayRef, Int32Array, StringArray, UInt32Array};
 use arrow::compute;
 use arrow::record_batch::RecordBatch;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
-use parquet::arrow::ArrowWriter;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use parquet::arrow::{ArrowWriter, ProjectionMask};
 use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::properties::WriterProperties;
 use rayon::prelude::*;
@@ -938,34 +938,49 @@ pub fn run_hive(
     Ok(())
 }
 
-/// Rebuild partition map from existing hive works directory (for resume).
+/// Rebuild partition map from raw works shards (for resume).
+///
+/// Uses column projection to read only `work_id` + `publication_year` (2 of 84
+/// columns), reducing I/O by ~97% compared to a full read.
 fn rebuild_partition_map(
     config: &ResolvedHiveConfig,
     pb: &ProgressBar,
 ) -> Result<WorkPartitionMap> {
-    // Read from raw works shards (same source as process_works, but only extract 2 columns)
     let shard_files = list_shard_files(&config.raw_dir.join("works"))?;
     let mut map = WorkPartitionMap::new();
 
     pb.set_length(shard_files.len() as u64);
     for shard_path in &shard_files {
         let file = fs::File::open(shard_path)?;
-        let reader = ParquetRecordBatchReaderBuilder::try_new(file)?
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+
+        // Project only the 2 columns needed for partition routing
+        let arrow_schema = builder.schema();
+        let work_id_root = arrow_schema
+            .index_of("work_id")
+            .map_err(|e| anyhow::anyhow!("works schema missing work_id: {e}"))?;
+        let pub_year_root = arrow_schema
+            .index_of("publication_year")
+            .map_err(|e| anyhow::anyhow!("works schema missing publication_year: {e}"))?;
+        let mask = ProjectionMask::roots(builder.parquet_schema(), [work_id_root, pub_year_root]);
+
+        let reader = builder
+            .with_projection(mask)
             .with_batch_size(READER_BATCH_SIZE)
             .build()?;
 
         for batch_result in reader {
             let batch = batch_result?;
 
-            let work_id_idx = batch.schema().index_of("work_id").unwrap();
-            let pub_year_idx = batch.schema().index_of("publication_year").unwrap();
-
             let work_id_col = batch
-                .column(work_id_idx)
+                .column_by_name("work_id")
+                .context("projected batch missing work_id")?
                 .as_any()
                 .downcast_ref::<StringArray>()
                 .context("work_id must be Utf8")?;
-            let pub_year_col = batch.column(pub_year_idx);
+            let pub_year_col = batch
+                .column_by_name("publication_year")
+                .context("projected batch missing publication_year")?;
             let pub_year_array = pub_year_col.as_any().downcast_ref::<Int32Array>();
 
             for i in 0..batch.num_rows() {

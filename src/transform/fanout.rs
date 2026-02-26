@@ -291,38 +291,35 @@ impl MeshAccumulator {
 
 fanout_accumulator!(AwardsAccumulator, schema::work_awards, {
     work_id: Option<Arc<str>>,
-    award_id: Option<String>,
+    id: Option<String>,
     display_name: Option<String>,
     funder_award_id: Option<String>,
     funder_id: Option<String>,
     funder_display_name: Option<String>,
-    doi: Option<String>,
 });
 
 impl AwardsAccumulator {
     pub fn push_from_work(&mut self, work_id: &Arc<str>, row: &WorkRow) {
-        for a in &row.grants {
+        for a in &row.awards {
             self.work_id.push(Some(Arc::clone(work_id)));
-            self.award_id.push(a.award_id.clone());
+            self.id.push(a.id.clone());
             self.display_name.push(a.display_name.clone());
             self.funder_award_id.push(a.funder_award_id.clone());
-            self.funder_id.push(a.funder.clone());
+            self.funder_id.push(a.funder_id.clone());
             self.funder_display_name.push(a.funder_display_name.clone());
-            self.doi.push(a.doi.clone());
         }
     }
 
     pub fn take_batch(&mut self) -> Result<RecordBatch, arrow::error::ArrowError> {
         let arrays: Vec<ArrayRef> = vec![
             arc_str_col_to_array(&mut self.work_id),
-            Arc::new(StringArray::from(std::mem::take(&mut self.award_id))),
+            Arc::new(StringArray::from(std::mem::take(&mut self.id))),
             Arc::new(StringArray::from(std::mem::take(&mut self.display_name))),
             Arc::new(StringArray::from(std::mem::take(&mut self.funder_award_id))),
             Arc::new(StringArray::from(std::mem::take(&mut self.funder_id))),
             Arc::new(StringArray::from(std::mem::take(
                 &mut self.funder_display_name,
             ))),
-            Arc::new(StringArray::from(std::mem::take(&mut self.doi))),
         ];
         RecordBatch::try_new(self.schema.clone(), arrays)
     }
@@ -605,8 +602,7 @@ mod tests {
                 "cited_by_count": 42,
                 "open_access": {"is_oa": true, "oa_status": "gold", "oa_url": "https://example.com"},
                 "fwci": 1.5,
-                "biblio": {"volume": "10", "issue": "2"},
-                "type_crossref": "journal-article"
+                "biblio": {"volume": "10", "issue": "2"}
             }"#,
         )
         .unwrap();
@@ -647,14 +643,6 @@ mod tests {
             .downcast_ref::<StringArray>()
             .unwrap();
         assert_eq!(vol.value(0), "10");
-
-        let tc = batch
-            .column_by_name("type_crossref")
-            .unwrap()
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        assert_eq!(tc.value(0), "journal-article");
     }
 
     #[test]

@@ -56,6 +56,8 @@ pub struct FilterConfig {
     pub domains: Vec<String>,
     #[serde(default)]
     pub topics: Vec<String>,
+    #[serde(default)]
+    pub languages: Vec<String>,
 }
 
 /// Try loading config from explicit `--config` path or `./papeline.toml` in CWD.
@@ -228,8 +230,13 @@ fn system_memory_bytes() -> u64 {
     }
 }
 
-/// Build filter from merged CLI + config domains/topics.
-pub fn build_filter(cli_domains: &[String], cli_topics: &[String], cfg: &FilterConfig) -> Filter {
+/// Build filter from merged CLI + config domains/topics/languages.
+pub fn build_filter(
+    cli_domains: &[String],
+    cli_topics: &[String],
+    cli_languages: &[String],
+    cfg: &FilterConfig,
+) -> Filter {
     let mut filter = Filter::default();
     // CLI overrides config if any CLI values given; otherwise use config
     let domains = if cli_domains.is_empty() {
@@ -242,11 +249,19 @@ pub fn build_filter(cli_domains: &[String], cli_topics: &[String], cfg: &FilterC
     } else {
         cli_topics
     };
+    let languages = if cli_languages.is_empty() {
+        &cfg.languages
+    } else {
+        cli_languages
+    };
     for d in domains {
         filter.domains.insert(d.clone());
     }
     for t in topics {
         filter.topic_ids.insert(t.clone());
+    }
+    for l in languages {
+        filter.languages.insert(l.clone());
     }
     filter
 }
@@ -277,6 +292,8 @@ pub struct StateFilter {
     pub domains: Vec<String>,
     #[serde(default)]
     pub topics: Vec<String>,
+    #[serde(default)]
+    pub languages: Vec<String>,
 }
 
 impl State {
@@ -490,8 +507,9 @@ memory_limit = "32GB"
         let cfg = FilterConfig {
             domains: vec!["D2".to_string()],
             topics: vec!["T2".to_string()],
+            languages: vec![],
         };
-        let f = build_filter(&cli_domains, &cli_topics, &cfg);
+        let f = build_filter(&cli_domains, &cli_topics, &[], &cfg);
         assert!(f.domains.contains("D1"));
         assert!(!f.domains.contains("D2"));
         assert!(f.topic_ids.contains("T1"));
@@ -503,8 +521,9 @@ memory_limit = "32GB"
         let cfg = FilterConfig {
             domains: vec!["D2".to_string()],
             topics: vec!["T2".to_string()],
+            languages: vec![],
         };
-        let f = build_filter(&[], &[], &cfg);
+        let f = build_filter(&[], &[], &[], &cfg);
         assert!(f.domains.contains("D2"));
         assert!(f.topic_ids.contains("T2"));
     }
@@ -512,7 +531,7 @@ memory_limit = "32GB"
     #[test]
     fn build_filter_empty() {
         let cfg = FilterConfig::default();
-        let f = build_filter(&[], &[], &cfg);
+        let f = build_filter(&[], &[], &[], &cfg);
         assert!(f.is_empty());
     }
 

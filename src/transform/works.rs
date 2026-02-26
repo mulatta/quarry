@@ -137,6 +137,8 @@ pub struct WorksAccumulator {
     schema: Arc<Schema>,
     /// Shard-level updated_date (same for all rows in a shard).
     shard_updated_date: Option<String>,
+    /// Shard index for provenance tracking (replaces tracking table).
+    oa_shard_idx: u16,
     // identity
     work_id: Vec<Option<String>>,
     doi: Vec<Option<String>>,
@@ -153,7 +155,6 @@ pub struct WorksAccumulator {
     // classification
     language: Vec<Option<String>>,
     work_type: Vec<Option<String>>,
-    type_crossref: Vec<Option<String>>,
     // counts
     cited_by_count: Vec<Option<i32>>,
     referenced_works_count: Vec<Option<i32>>,
@@ -253,13 +254,14 @@ macro_rules! vec_cap {
 
 impl WorksAccumulator {
     pub fn new() -> Self {
-        Self::with_shard_updated_date(None)
+        Self::with_shard_metadata(None, 0)
     }
 
-    pub fn with_shard_updated_date(shard_updated_date: Option<String>) -> Self {
+    pub fn with_shard_metadata(shard_updated_date: Option<String>, oa_shard_idx: u16) -> Self {
         Self {
             schema: schema::works().clone(),
             shard_updated_date,
+            oa_shard_idx,
             work_id: vec_cap!(),
             doi: vec_cap!(),
             doi_norm: vec_cap!(),
@@ -273,7 +275,6 @@ impl WorksAccumulator {
             updated_date: vec_cap!(),
             language: vec_cap!(),
             work_type: vec_cap!(),
-            type_crossref: vec_cap!(),
             cited_by_count: vec_cap!(),
             referenced_works_count: vec_cap!(),
             countries_distinct_count: vec_cap!(),
@@ -389,7 +390,6 @@ impl Accumulator for WorksAccumulator {
         // classification
         self.language.push(row.language);
         self.work_type.push(row.work_type);
-        self.type_crossref.push(row.type_crossref);
 
         // counts
         self.cited_by_count.push(row.cited_by_count);
@@ -428,8 +428,11 @@ impl Accumulator for WorksAccumulator {
         self.cited_by_percentile_max.push(pct.and_then(|p| p.max));
 
         // has_content
-        self.has_content_pdf.push(row.has_fulltext);
-        self.has_content_grobid_xml.push(None);
+        let hc = row.has_content.as_ref();
+        self.has_content_pdf
+            .push(hc.and_then(|h| h.pdf).or(row.has_fulltext));
+        self.has_content_grobid_xml
+            .push(hc.and_then(|h| h.grobid_xml));
 
         // biblio
         let bib = row.biblio.as_ref();
@@ -572,10 +575,9 @@ impl Accumulator for WorksAccumulator {
             Arc::new(Int32Array::from(std::mem::take(&mut self.publication_year))),
             Arc::new(StringArray::from(std::mem::take(&mut self.created_date))),
             Arc::new(StringArray::from(std::mem::take(&mut self.updated_date))),
-            // classification (3)
+            // classification (2)
             Arc::new(StringArray::from(std::mem::take(&mut self.language))),
             Arc::new(StringArray::from(std::mem::take(&mut self.work_type))),
-            Arc::new(StringArray::from(std::mem::take(&mut self.type_crossref))),
             // counts (5)
             Arc::new(Int32Array::from(std::mem::take(&mut self.cited_by_count))),
             Arc::new(Int32Array::from(std::mem::take(
@@ -755,11 +757,12 @@ impl Accumulator for WorksAccumulator {
             build_list_string_array(&std::mem::take(&mut self.corresponding_institution_ids)),
             build_list_string_array(&std::mem::take(&mut self.indexed_in)),
             build_list_string_array(&std::mem::take(&mut self.related_works)),
-            // shard metadata (repeated constant — no per-row clone needed)
+            // shard metadata (repeated constants — no per-row clone needed)
             Arc::new(StringArray::from(vec![
                 self.shard_updated_date.as_deref();
                 n
             ])) as ArrayRef,
+            Arc::new(UInt16Array::from(vec![self.oa_shard_idx; n])) as ArrayRef,
         ];
         RecordBatch::try_new(self.schema.clone(), arrays)
     }

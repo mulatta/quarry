@@ -18,6 +18,7 @@ topics = [
   "T11829",
   "T11626",
 ]
+languages = ["en"]
 
 [hive]
 threads = 24
