@@ -6,7 +6,6 @@
 
 use std::path::Path;
 
-use assert_cmd::assert::OutputAssertExt;
 use assert_cmd::cargo::cargo_bin_cmd;
 use predicates::prelude::*;
 use tempfile::TempDir;
@@ -16,8 +15,6 @@ fn run(dir: &Path, args: &[&str]) -> assert_cmd::assert::Assert {
         .arg("--output-dir")
         .arg(dir)
         .args(args)
-        .output()
-        .expect("failed to execute")
         .assert()
 }
 
@@ -67,12 +64,35 @@ fn incremental_sync_lifecycle() {
     assert_eq!(count_parquet_files(dir), 24, "2 shards × 12 tables");
 
     // === 2. Incremental dry-run: completed shards skipped ===
-    run(dir, &["run", "--dry-run", "--max-shards", "5"])
-        .success()
-        .stdout(predicate::str::is_match(r"Unchanged \(ok\):\s+2").unwrap())
-        .stdout(predicate::str::is_match(r"Changed/new:\s+1978").unwrap())
-        .stdout(predicate::str::is_match(r"Removed:\s+0").unwrap())
-        .stdout(predicate::str::contains("shard_0002"));
+    // Extract total shard count from dry-run output to avoid hardcoding
+    // (remote manifest shard count changes over time)
+    let output = cargo_bin_cmd!("papeline")
+        .arg("--output-dir")
+        .arg(dir)
+        .args(["run", "--dry-run", "--max-shards", "5"])
+        .output()
+        .expect("failed to execute");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Parse total from "Remote manifest: N shards"
+    let total: usize = {
+        let re = regex::Regex::new(r"Remote manifest:\s+(\d+)\s+shards").unwrap();
+        re.captures(&stdout).expect("should contain shard count")[1]
+            .parse()
+            .unwrap()
+    };
+    let expected_changed = total - 2; // 2 completed shards
+    assert!(
+        stdout.contains("Unchanged (ok):    2"),
+        "expected 2 unchanged, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains(&format!("Changed/new:       {expected_changed}")),
+        "expected {expected_changed} changed, got:\n{stdout}"
+    );
+    assert!(stdout.contains("Removed:           0"));
+    assert!(stdout.contains("shard_0002"));
 
     // === 3. Tampered content_length → shard re-detected ===
     let backup = std::fs::read_to_string(dir.join(".manifest.json")).unwrap();
@@ -83,7 +103,10 @@ fn incremental_sync_lifecycle() {
 
     run(dir, &["run", "--dry-run", "--max-shards", "5"])
         .success()
-        .stdout(predicate::str::is_match(r"Changed/new:\s+1979").unwrap())
+        .stdout(predicate::str::contains(format!(
+            "Changed/new:       {}",
+            expected_changed + 1
+        )))
         .stdout(predicate::str::is_match(r"Unchanged \(ok\):\s+1").unwrap())
         .stdout(predicate::str::contains("shard_0000"));
 
@@ -167,6 +190,8 @@ fn incremental_sync_lifecycle() {
     // === 6. --force reprocesses all shards ===
     run(dir, &["run", "--dry-run", "--force", "--max-shards", "5"])
         .success()
-        .stdout(predicate::str::is_match(r"Changed/new:\s+1980").unwrap())
+        .stdout(predicate::str::contains(format!(
+            "Changed/new:       {total}"
+        )))
         .stdout(predicate::str::is_match(r"Unchanged \(ok\):\s+0").unwrap());
 }

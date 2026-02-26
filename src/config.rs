@@ -20,6 +20,16 @@ pub struct FileConfig {
     pub filter: FilterConfig,
     #[serde(default)]
     pub http: HttpConfig,
+    #[serde(default)]
+    pub hive: HiveConfig,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct HiveConfig {
+    pub zstd_level: Option<i32>,
+    pub row_group_size: Option<usize>,
+    pub threads: Option<usize>,
+    pub memory_limit: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -87,6 +97,114 @@ pub struct ResolvedConfig {
     pub since: Option<String>,
     pub max_shards: Option<usize>,
     pub dry_run: bool,
+}
+
+/// Fully resolved hive configuration with all defaults applied.
+#[derive(Debug)]
+pub struct ResolvedHiveConfig {
+    pub raw_dir: PathBuf,
+    pub hive_dir: PathBuf,
+    pub staging_dir: PathBuf,
+    pub zstd_level: i32,
+    pub row_group_size: usize,
+    pub threads: usize,
+    pub memory_limit_bytes: usize,
+}
+
+impl ResolvedHiveConfig {
+    pub fn from_config(output_dir: &Path, hive: &HiveConfig) -> anyhow::Result<Self> {
+        let hive_dir = output_dir.join("hive");
+        let staging_dir = hive_dir.join(".staging");
+
+        let memory_limit_bytes = match &hive.memory_limit {
+            Some(s) => parse_memory_limit(s)?,
+            None => (system_memory_bytes() * 65 / 100) as usize,
+        };
+
+        // 3/4 of cores: avoids saturating efficiency cores on heterogeneous CPUs (e.g. M4 Max)
+        let threads = hive
+            .threads
+            .unwrap_or_else(|| (num_cpus::get() * 3 / 4).max(2));
+
+        Ok(Self {
+            raw_dir: output_dir.to_path_buf(),
+            hive_dir,
+            staging_dir,
+            zstd_level: hive.zstd_level.unwrap_or(8),
+            row_group_size: hive.row_group_size.unwrap_or(500_000),
+            threads,
+            memory_limit_bytes,
+        })
+    }
+}
+
+/// Format byte count as human-readable string (e.g. "41GB", "512MB").
+pub fn format_bytes(bytes: usize) -> String {
+    let gb = bytes / (1024 * 1024 * 1024);
+    if gb > 0 {
+        format!("{gb}GB")
+    } else {
+        let mb = bytes / (1024 * 1024);
+        format!("{mb}MB")
+    }
+}
+
+/// Parse human-readable memory limit string (e.g. "32GB", "512MB") to bytes.
+pub fn parse_memory_limit(s: &str) -> anyhow::Result<usize> {
+    let s = s.trim();
+    let (num_str, multiplier) = if let Some(n) = s.strip_suffix("GB") {
+        (n, 1024 * 1024 * 1024)
+    } else if let Some(n) = s.strip_suffix("MB") {
+        (n, 1024 * 1024)
+    } else if let Some(n) = s.strip_suffix("KB") {
+        (n, 1024)
+    } else {
+        (s, 1usize)
+    };
+    let num: usize = num_str
+        .trim()
+        .parse()
+        .map_err(|_| anyhow::anyhow!("Invalid memory limit: {s}"))?;
+    Ok(num * multiplier)
+}
+
+fn system_memory_bytes() -> u64 {
+    // /proc/meminfo on Linux, sysctl on macOS; fallback to 8GB
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_to_string("/proc/meminfo")
+            .ok()
+            .and_then(|s| {
+                s.lines()
+                    .find(|l| l.starts_with("MemTotal:"))
+                    .and_then(|l| {
+                        l.split_whitespace()
+                            .nth(1)
+                            .and_then(|v| v.parse::<u64>().ok())
+                            .map(|kb| kb * 1024)
+                    })
+            })
+            .unwrap_or(8 * 1024 * 1024 * 1024)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // sysctl hw.memsize returns total physical memory in bytes
+        std::process::Command::new("sysctl")
+            .args(["-n", "hw.memsize"])
+            .output()
+            .ok()
+            .and_then(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .trim()
+                    .parse::<u64>()
+                    .ok()
+            })
+            .unwrap_or(8 * 1024 * 1024 * 1024)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        8 * 1024 * 1024 * 1024
+    }
 }
 
 /// Build filter from merged CLI + config domains/topics.

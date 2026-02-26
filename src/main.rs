@@ -4,6 +4,7 @@ mod accumulator;
 mod api;
 mod config;
 mod error;
+mod hive;
 mod id;
 mod manifest;
 mod oa;
@@ -64,6 +65,18 @@ enum Commands {
     Status,
     /// Remove temporary (.tmp) files from output directory
     Clean,
+    /// Repartition raw shards into year-partitioned Hive parquet
+    Hive(HiveArgs),
+}
+
+#[derive(clap::Args)]
+struct HiveArgs {
+    /// Force rebuild even if source manifest unchanged
+    #[arg(long)]
+    force: bool,
+    /// Show what would be done without executing
+    #[arg(long)]
+    dry_run: bool,
 }
 
 #[derive(clap::Args)]
@@ -146,6 +159,7 @@ fn main() -> ExitCode {
         Commands::Run(args) => cmd_run(&cli.output_dir, cli.config.as_deref(), args, multi),
         Commands::Status => cmd_status(&cli.output_dir),
         Commands::Clean => cmd_clean(&cli.output_dir),
+        Commands::Hive(args) => cmd_hive(&cli.output_dir, cli.config.as_deref(), args),
     }
 }
 
@@ -736,6 +750,42 @@ fn cmd_status(output_dir: &Path) -> ExitCode {
     }
 
     ExitCode::SUCCESS
+}
+
+// ============================================================
+// `papeline hive`
+// ============================================================
+
+fn cmd_hive(output_dir: &Path, config_path: Option<&Path>, args: &HiveArgs) -> ExitCode {
+    let file_cfg = match load_config(config_path, output_dir) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            tracing::error!("Config error: {e}");
+            return ExitCode::from(2);
+        }
+    };
+
+    let output_dir = file_cfg
+        .output
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| output_dir.to_path_buf());
+
+    let resolved = match config::ResolvedHiveConfig::from_config(&output_dir, &file_cfg.hive) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("Config error: {e}");
+            return ExitCode::from(2);
+        }
+    };
+
+    match hive::run_hive(&resolved, args.force, args.dry_run) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("Error: {e:#}");
+            ExitCode::from(1)
+        }
+    }
 }
 
 // ============================================================
