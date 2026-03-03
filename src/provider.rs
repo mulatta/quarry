@@ -13,6 +13,7 @@ use crate::progress::SharedProgress;
 #[derive(Debug, Default)]
 pub struct ShardStats {
     pub rows_written: usize,
+    pub lines_scanned: usize,
 }
 
 /// Aggregated summary from [`run_provider`].
@@ -21,6 +22,7 @@ pub struct RunSummary {
     pub completed: usize,
     pub failed: usize,
     pub total_rows: usize,
+    pub total_scanned: usize,
     pub elapsed: Duration,
     /// Indices (into the input vec) of shards that failed.
     pub failed_indices: Vec<usize>,
@@ -64,6 +66,7 @@ pub fn run_provider<P: Provider>(
 ) -> RunSummary {
     let start = Instant::now();
     let rows = AtomicUsize::new(0);
+    let scanned = AtomicUsize::new(0);
     let completed = AtomicUsize::new(0);
     let failed = AtomicUsize::new(0);
     let failed_indices: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
@@ -83,8 +86,8 @@ pub fn run_provider<P: Provider>(
             match provider.process_shard(shard, ctx, &pb) {
                 Ok(stats) => {
                     rows.fetch_add(stats.rows_written, Ordering::Relaxed);
+                    scanned.fetch_add(stats.lines_scanned, Ordering::Relaxed);
                     completed.fetch_add(1, Ordering::Relaxed);
-                    tracing::debug!("{label}: {} rows", stats.rows_written);
                 }
                 Err(e) => {
                     failed.fetch_add(1, Ordering::Relaxed);
@@ -114,6 +117,7 @@ pub fn run_provider<P: Provider>(
         completed: completed.load(Ordering::Relaxed),
         failed: failed.load(Ordering::Relaxed),
         total_rows: rows.load(Ordering::Relaxed),
+        total_scanned: scanned.load(Ordering::Relaxed),
         elapsed: start.elapsed(),
         failed_indices: fi,
     }
@@ -149,7 +153,10 @@ mod tests {
             if self.fail_indices.contains(shard) {
                 Err(format!("shard {shard} failed"))
             } else {
-                Ok(ShardStats { rows_written: 10 })
+                Ok(ShardStats {
+                    rows_written: 10,
+                    lines_scanned: 10,
+                })
             }
         }
     }

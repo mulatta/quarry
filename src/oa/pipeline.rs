@@ -263,7 +263,6 @@ pub(super) fn process_works_shard(
         pipeline.finalize()?;
 
         let t_total = t0.elapsed();
-        let t_finalize = t_total - t_connect - t_process;
         let rows = result.rows_written;
         let rows_per_sec = if t_process.as_secs_f64() > 0.0 {
             rows as f64 / t_process.as_secs_f64()
@@ -271,17 +270,30 @@ pub(super) fn process_works_shard(
             0.0
         };
 
-        tracing::debug!(
-            "{shard_label}: connect={:.1}s process={:.1}s ({:.0} rows/s) finalize={:.1}s total={:.1}s rows={}",
-            t_connect.as_secs_f64(),
-            t_process.as_secs_f64(),
-            rows_per_sec,
-            t_finalize.as_secs_f64(),
-            t_total.as_secs_f64(),
-            rows,
-        );
+        let scanned = result.lines_scanned;
+        if scanned > 0 && scanned != rows {
+            let match_pct = rows as f64 / scanned as f64 * 100.0;
+            tracing::info!(
+                "{shard_label}: {:>7} scanned → {:>6} matched ({:>4.1}%) | {:>5.1}s {:>5} rows/s",
+                fmt_num(scanned),
+                fmt_num(rows),
+                match_pct,
+                t_total.as_secs_f64(),
+                fmt_num(rows_per_sec as usize),
+            );
+        } else {
+            tracing::info!(
+                "{shard_label}: {:>7} rows | {:>5.1}s {:>5} rows/s",
+                fmt_num(rows),
+                t_total.as_secs_f64(),
+                fmt_num(rows_per_sec as usize),
+            );
+        }
 
-        Ok(ShardStats { rows_written: rows })
+        Ok(ShardStats {
+            rows_written: rows,
+            lines_scanned: scanned,
+        })
     })
 }
 
@@ -289,6 +301,7 @@ const UPDATE_INTERVAL: usize = 10_000;
 
 /// Result of processing lines within a shard.
 struct LinesResult {
+    lines_scanned: usize,
     rows_written: usize,
     parse_failures: usize,
     /// Rows where `affiliation.institution_ids` contained null elements.
@@ -356,6 +369,7 @@ fn process_works_lines(
     pipeline.flush_remaining()?;
 
     Ok(LinesResult {
+        lines_scanned,
         rows_written,
         parse_failures,
         null_institution_ids,
