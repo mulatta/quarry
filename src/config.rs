@@ -58,6 +58,10 @@ pub struct FilterConfig {
     pub topics: Vec<String>,
     #[serde(default)]
     pub languages: Vec<String>,
+    #[serde(default)]
+    pub work_types: Vec<String>,
+    #[serde(default)]
+    pub require_abstract: bool,
 }
 
 /// Try loading config from explicit `--config` path or `./papeline.toml` in CWD.
@@ -235,6 +239,8 @@ pub fn build_filter(
     cli_domains: &[String],
     cli_topics: &[String],
     cli_languages: &[String],
+    cli_work_types: &[String],
+    cli_require_abstract: bool,
     cfg: &FilterConfig,
 ) -> Filter {
     let mut filter = Filter::default();
@@ -254,6 +260,11 @@ pub fn build_filter(
     } else {
         cli_languages
     };
+    let work_types = if cli_work_types.is_empty() {
+        &cfg.work_types
+    } else {
+        cli_work_types
+    };
     for d in domains {
         filter.domains.insert(d.clone());
     }
@@ -263,6 +274,10 @@ pub fn build_filter(
     for l in languages {
         filter.languages.insert(l.clone());
     }
+    for w in work_types {
+        filter.work_types.insert(w.clone());
+    }
+    filter.require_abstract = cli_require_abstract || cfg.require_abstract;
     filter
 }
 
@@ -294,6 +309,10 @@ pub struct StateFilter {
     pub topics: Vec<String>,
     #[serde(default)]
     pub languages: Vec<String>,
+    #[serde(default)]
+    pub work_types: Vec<String>,
+    #[serde(default)]
+    pub require_abstract: bool,
 }
 
 impl State {
@@ -508,8 +527,10 @@ memory_limit = "32GB"
             domains: vec!["D2".to_string()],
             topics: vec!["T2".to_string()],
             languages: vec![],
+            work_types: vec![],
+            require_abstract: false,
         };
-        let f = build_filter(&cli_domains, &cli_topics, &[], &cfg);
+        let f = build_filter(&cli_domains, &cli_topics, &[], &[], false, &cfg);
         assert!(f.domains.contains("D1"));
         assert!(!f.domains.contains("D2"));
         assert!(f.topic_ids.contains("T1"));
@@ -522,8 +543,10 @@ memory_limit = "32GB"
             domains: vec!["D2".to_string()],
             topics: vec!["T2".to_string()],
             languages: vec![],
+            work_types: vec![],
+            require_abstract: false,
         };
-        let f = build_filter(&[], &[], &[], &cfg);
+        let f = build_filter(&[], &[], &[], &[], false, &cfg);
         assert!(f.domains.contains("D2"));
         assert!(f.topic_ids.contains("T2"));
     }
@@ -531,7 +554,7 @@ memory_limit = "32GB"
     #[test]
     fn build_filter_empty() {
         let cfg = FilterConfig::default();
-        let f = build_filter(&[], &[], &[], &cfg);
+        let f = build_filter(&[], &[], &[], &[], false, &cfg);
         assert!(f.is_empty());
     }
 

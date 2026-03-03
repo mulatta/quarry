@@ -84,11 +84,17 @@ pub struct Filter {
     pub domains: rustc_hash::FxHashSet<String>,
     pub topic_ids: rustc_hash::FxHashSet<String>,
     pub languages: rustc_hash::FxHashSet<String>,
+    pub work_types: rustc_hash::FxHashSet<String>,
+    pub require_abstract: bool,
 }
 
 impl Filter {
     pub fn is_empty(&self) -> bool {
-        self.domains.is_empty() && self.topic_ids.is_empty() && self.languages.is_empty()
+        self.domains.is_empty()
+            && self.topic_ids.is_empty()
+            && self.languages.is_empty()
+            && self.work_types.is_empty()
+            && !self.require_abstract
     }
 
     /// Returns true if work passes all active filter dimensions.
@@ -97,12 +103,30 @@ impl Filter {
             return true;
         }
 
-        // Language filter (AND with domain/topic)
+        // Language filter
         if !self.languages.is_empty() {
             match &row.language {
                 Some(lang) if self.languages.contains(lang.as_str()) => {}
                 _ => return false,
             }
+        }
+
+        // Work type filter
+        if !self.work_types.is_empty() {
+            match &row.work_type {
+                Some(wt) if self.work_types.contains(wt.as_str()) => {}
+                _ => return false,
+            }
+        }
+
+        // Abstract requirement
+        if self.require_abstract
+            && row
+                .abstract_inverted_index
+                .as_ref()
+                .is_none_or(|idx| idx.is_empty())
+        {
+            return false;
         }
 
         // Domain/topic filter

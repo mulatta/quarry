@@ -141,6 +141,14 @@ struct RunArgs {
     #[arg(long)]
     language: Vec<String>,
 
+    /// Filter works by type, e.g. article, review, preprint (repeatable)
+    #[arg(long)]
+    work_type: Vec<String>,
+
+    /// Only keep works that have an abstract
+    #[arg(long)]
+    require_abstract: bool,
+
     // -- Run modes --
     /// Force re-download of all shards (ignore completed)
     #[arg(long)]
@@ -614,6 +622,8 @@ fn resolve_config(
         &args.domain,
         &args.topic,
         &args.language,
+        &args.work_type,
+        args.require_abstract,
         &file_cfg.run.filter,
     );
 
@@ -667,12 +677,23 @@ fn warn_on_filter_change(state: &State, resolved: &ResolvedConfig) {
         .iter()
         .map(|s| s.as_str())
         .collect();
+    let state_work_types: std::collections::BTreeSet<&str> =
+        state.filter.work_types.iter().map(|s| s.as_str()).collect();
+    let cur_work_types: std::collections::BTreeSet<&str> = resolved
+        .filter
+        .work_types
+        .iter()
+        .map(|s| s.as_str())
+        .collect();
     if state_domains != cur_domains
         || state_topics != cur_topics
         || state_languages != cur_languages
+        || state_work_types != cur_work_types
+        || state.filter.require_abstract != resolved.filter.require_abstract
     {
         tracing::warn!(
-            "Filter changed since last run! Previous: domains={state_domains:?} topics={state_topics:?} languages={state_languages:?}"
+            "Filter changed since last run! Previous: domains={state_domains:?} topics={state_topics:?} languages={state_languages:?} work_types={state_work_types:?} require_abstract={}",
+            state.filter.require_abstract
         );
     }
 }
@@ -732,6 +753,8 @@ fn build_new_state(
         domains: filter.domains.iter().cloned().collect(),
         topics: filter.topic_ids.iter().cloned().collect(),
         languages: filter.languages.iter().cloned().collect(),
+        work_types: filter.work_types.iter().cloned().collect(),
+        require_abstract: filter.require_abstract,
     };
     let (started_at, finished_at) = timestamps;
     state.started_at = Some(started_at.to_owned());
@@ -756,9 +779,12 @@ fn print_dry_run(
     removed: &[manifest::RemovedShard],
 ) {
     println!(
-        "Filter: domains={:?} topics={:?}",
+        "Filter: domains={:?} topics={:?} languages={:?} work_types={:?} require_abstract={}",
         cfg.filter.domains.iter().collect::<Vec<_>>(),
-        cfg.filter.topic_ids.iter().collect::<Vec<_>>()
+        cfg.filter.topic_ids.iter().collect::<Vec<_>>(),
+        cfg.filter.languages.iter().collect::<Vec<_>>(),
+        cfg.filter.work_types.iter().collect::<Vec<_>>(),
+        cfg.filter.require_abstract,
     );
     if let Some(since) = &cfg.since {
         println!("Since: {since} (cli)");
@@ -857,10 +883,19 @@ fn cmd_status(output_dir: &Path) -> ExitCode {
             } else {
                 println!("  Snapshot:   none (first run)");
             }
-            if !state.filter.domains.is_empty() || !state.filter.topics.is_empty() {
+            if !state.filter.domains.is_empty()
+                || !state.filter.topics.is_empty()
+                || !state.filter.languages.is_empty()
+                || !state.filter.work_types.is_empty()
+                || state.filter.require_abstract
+            {
                 println!(
-                    "  Filter:     domains={:?} topics={:?}",
-                    state.filter.domains, state.filter.topics
+                    "  Filter:     domains={:?} topics={:?} languages={:?} work_types={:?} require_abstract={}",
+                    state.filter.domains,
+                    state.filter.topics,
+                    state.filter.languages,
+                    state.filter.work_types,
+                    state.filter.require_abstract,
                 );
             }
 
@@ -1067,6 +1102,8 @@ mod tests {
             domain: vec![],
             topic: vec![],
             language: vec![],
+            work_type: vec![],
+            require_abstract: false,
             force: false,
             since: None,
             max_shards: None,
