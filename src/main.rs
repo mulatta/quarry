@@ -170,8 +170,8 @@ struct RunArgs {
     #[arg(long)]
     hive: bool,
 
-    /// Remove raw parquet files after successful hive (requires --hive)
-    #[arg(long, requires = "hive")]
+    /// Remove raw parquet files after successful hive
+    #[arg(long)]
     clean_raw: bool,
 }
 
@@ -245,6 +245,8 @@ fn cmd_run(
     };
 
     let multi_for_hive = multi.clone();
+    let auto_hive = plan.auto_hive;
+    let auto_clean_raw = plan.auto_clean_raw;
 
     let Some(result) = execute_run(&plan, multi) else {
         save_snapshot(
@@ -253,19 +255,19 @@ fn cmd_run(
             &plan.resolved.output_dir,
         );
         // No shards processed; still run hive if requested (idempotent check inside)
-        if args.hive {
-            return run_auto_hive(output_dir, config_path, args.clean_raw, &multi_for_hive);
+        if auto_hive {
+            return run_auto_hive(output_dir, config_path, auto_clean_raw, &multi_for_hive);
         }
         return ExitCode::SUCCESS;
     };
 
     let code = finalize_run(plan, &result);
 
-    if code != ExitCode::SUCCESS || !args.hive {
+    if code != ExitCode::SUCCESS || !auto_hive {
         return code;
     }
 
-    run_auto_hive(output_dir, config_path, args.clean_raw, &multi_for_hive)
+    run_auto_hive(output_dir, config_path, auto_clean_raw, &multi_for_hive)
 }
 
 // ---- Phase types ----
@@ -277,12 +279,17 @@ struct RunPlan {
     all_shards: Vec<OAShard>,
     shards_to_process: Vec<OAShard>,
     removed: Vec<manifest::RemovedShard>,
+    /// Run hive after download (CLI `--hive` OR config `[hive].enable`).
+    auto_hive: bool,
+    /// Clean raw after hive (CLI `--clean-raw` OR config `[hive].clean_raw`).
+    auto_clean_raw: bool,
 }
 
 /// Outcome of pipeline execution (only produced when shards were processed).
 struct RunResult {
     total_completed: usize,
     total_rows: usize,
+    total_scanned: usize,
     /// Shards that failed after all retry passes.
     pending: Vec<OAShard>,
     started_at: String,
@@ -449,12 +456,17 @@ fn prepare_run(
         return Err(ExitCode::SUCCESS);
     }
 
+    let auto_hive = args.hive || file_cfg.hive.enable.unwrap_or(false);
+    let auto_clean_raw = args.clean_raw || file_cfg.hive.clean_raw.unwrap_or(false);
+
     Ok(RunPlan {
         resolved,
         state,
         all_shards,
         shards_to_process,
         removed: diff.removed,
+        auto_hive,
+        auto_clean_raw,
     })
 }
 
@@ -487,10 +499,23 @@ fn execute_run(plan: &RunPlan, multi: indicatif::MultiProgress) -> Option<RunRes
         filter: plan.resolved.filter.clone(),
     };
 
+    // Log active filter at INFO so non-TTY environments see it
+    if !plan.resolved.filter.is_empty() {
+        tracing::info!(
+            "Filter: domains={:?} topics={:?} languages={:?} work_types={:?} require_abstract={}",
+            plan.resolved.filter.domains.iter().collect::<Vec<_>>(),
+            plan.resolved.filter.topic_ids.iter().collect::<Vec<_>>(),
+            plan.resolved.filter.languages.iter().collect::<Vec<_>>(),
+            plan.resolved.filter.work_types.iter().collect::<Vec<_>>(),
+            plan.resolved.filter.require_abstract,
+        );
+    }
+
     // Outer retry loop
     let mut pending = plan.shards_to_process.clone();
     let mut total_completed: usize = 0;
     let mut total_rows: usize = 0;
+    let mut total_scanned: usize = 0;
     let outer_retries = plan.resolved.outer_retries;
 
     for pass in 0..=outer_retries {
@@ -513,14 +538,27 @@ fn execute_run(plan: &RunPlan, multi: indicatif::MultiProgress) -> Option<RunRes
         let summary = run_provider(&provider, &pending, &ctx, &progress);
         total_completed += summary.completed;
         total_rows += summary.total_rows;
+        total_scanned += summary.total_scanned;
 
-        tracing::info!(
-            "Pass {pass}: {} completed, {} failed, {} rows, {:.1}s",
-            summary.completed,
-            summary.failed,
-            summary.total_rows,
-            summary.elapsed.as_secs_f64()
-        );
+        if summary.total_scanned > 0 && summary.total_scanned != summary.total_rows {
+            let pct = summary.total_rows as f64 / summary.total_scanned as f64 * 100.0;
+            tracing::info!(
+                "Pass {pass}: {} completed, {} failed | {} scanned → {} matched ({pct:.1}%) | {:.1}s",
+                summary.completed,
+                summary.failed,
+                summary.total_scanned,
+                summary.total_rows,
+                summary.elapsed.as_secs_f64()
+            );
+        } else {
+            tracing::info!(
+                "Pass {pass}: {} completed, {} failed, {} rows, {:.1}s",
+                summary.completed,
+                summary.failed,
+                summary.total_rows,
+                summary.elapsed.as_secs_f64()
+            );
+        }
 
         if summary.failed_indices.is_empty() {
             pending = Vec::new();
@@ -538,6 +576,7 @@ fn execute_run(plan: &RunPlan, multi: indicatif::MultiProgress) -> Option<RunRes
     Some(RunResult {
         total_completed,
         total_rows,
+        total_scanned,
         pending,
         started_at,
         finished_at: chrono::Utc::now().to_rfc3339(),
@@ -572,13 +611,25 @@ fn finalize_run(plan: RunPlan, result: &RunResult) -> ExitCode {
     save_snapshot(&plan.all_shards, &failed_urls, &plan.resolved.output_dir);
 
     // Summary
-    println!(
-        "Done: {} completed, {} failed, {} removed, {} rows",
-        result.total_completed,
-        failed_count,
-        removed_indices.len(),
-        result.total_rows
-    );
+    if result.total_scanned > 0 && result.total_scanned != result.total_rows {
+        let pct = result.total_rows as f64 / result.total_scanned as f64 * 100.0;
+        println!(
+            "Done: {} completed, {} failed, {} removed | {} scanned → {} matched ({pct:.1}%)",
+            result.total_completed,
+            failed_count,
+            removed_indices.len(),
+            result.total_scanned,
+            result.total_rows,
+        );
+    } else {
+        println!(
+            "Done: {} completed, {} failed, {} removed, {} rows",
+            result.total_completed,
+            failed_count,
+            removed_indices.len(),
+            result.total_rows,
+        );
+    }
 
     // Sync log
     let log_entry = SyncLogEntry {
@@ -624,27 +675,17 @@ fn resolve_config(
         &args.language,
         &args.work_type,
         args.require_abstract,
-        &file_cfg.run.filter,
+        &file_cfg.filter,
     );
 
     ResolvedConfig {
         output_dir,
-        zstd_level: args
-            .zstd_level
-            .or(file_cfg.run.zstd_level)
-            .or(file_cfg.zstd_level)
-            .unwrap_or(3),
-        concurrency: args.concurrency.or(file_cfg.run.concurrency).unwrap_or(8),
-        max_retries: args.max_retries.or(file_cfg.run.max_retries).unwrap_or(3),
-        read_timeout: args
-            .read_timeout
-            .or(file_cfg.run.read_timeout)
-            .unwrap_or(30),
-        outer_retries: args
-            .outer_retries
-            .or(file_cfg.run.outer_retries)
-            .unwrap_or(3),
-        retry_delay: args.retry_delay.or(file_cfg.run.retry_delay).unwrap_or(30),
+        zstd_level: args.zstd_level.or(file_cfg.zstd_level).unwrap_or(3),
+        concurrency: args.concurrency.or(file_cfg.concurrency).unwrap_or(8),
+        max_retries: args.max_retries.or(file_cfg.max_retries).unwrap_or(3),
+        read_timeout: args.read_timeout.or(file_cfg.read_timeout).unwrap_or(30),
+        outer_retries: args.outer_retries.or(file_cfg.outer_retries).unwrap_or(3),
+        retry_delay: args.retry_delay.or(file_cfg.retry_delay).unwrap_or(30),
         filter,
         force: args.force,
         since: args.since.clone(),
@@ -1028,6 +1069,8 @@ fn cmd_hive(
 
     // Merge: CLI > [hive] section
     let hive_cfg = config::HiveConfig {
+        enable: file_cfg.hive.enable,
+        clean_raw: file_cfg.hive.clean_raw,
         zstd_level: args.zstd_level.or(file_cfg.hive.zstd_level),
         row_group_size: args.row_group_size.or(file_cfg.hive.row_group_size),
         num_shards: args.num_shards.or(file_cfg.hive.num_shards),

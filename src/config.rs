@@ -12,22 +12,14 @@ use crate::transform::Filter;
 // ============================================================
 
 /// Parsed from `papeline.toml`.
+///
+/// Run settings live at the top level (no `[run]` section).
+/// Hive settings live under `[hive]`, filter settings under `[filter]`.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FileConfig {
     pub output: Option<String>,
-    /// Shared ZSTD level fallback (both `[run]` and `[hive]` inherit if unset).
-    pub zstd_level: Option<i32>,
-    #[serde(default)]
-    pub run: RunConfig,
-    #[serde(default)]
-    pub hive: HiveConfig,
-}
-
-/// `[run]` section — settings for `papeline run`.
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RunConfig {
+    /// ZSTD level for run output. Also used as fallback for `[hive]` if unset.
     pub zstd_level: Option<i32>,
     pub concurrency: Option<usize>,
     pub max_retries: Option<u32>,
@@ -36,12 +28,18 @@ pub struct RunConfig {
     pub retry_delay: Option<u64>,
     #[serde(default)]
     pub filter: FilterConfig,
+    #[serde(default)]
+    pub hive: HiveConfig,
 }
 
 /// `[hive]` section — settings for `papeline hive`.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HiveConfig {
+    /// Auto-run hive after `papeline run` (same as `--hive` CLI flag).
+    pub enable: Option<bool>,
+    /// Remove raw parquet after hive (same as `--clean-raw` CLI flag).
+    pub clean_raw: Option<bool>,
     pub zstd_level: Option<i32>,
     pub row_group_size: Option<usize>,
     pub num_shards: Option<usize>,
@@ -391,11 +389,9 @@ mod tests {
             r#"
 output = "/data/out"
 zstd_level = 5
-
-[run]
 concurrency = 16
 
-[run.filter]
+[filter]
 domains = ["Health Sciences"]
 topics = ["T123"]
 "#,
@@ -405,9 +401,9 @@ topics = ["T123"]
         let cfg = load_config(Some(path.as_path())).unwrap();
         assert_eq!(cfg.output.as_deref(), Some("/data/out"));
         assert_eq!(cfg.zstd_level, Some(5));
-        assert_eq!(cfg.run.filter.domains, vec!["Health Sciences"]);
-        assert_eq!(cfg.run.filter.topics, vec!["T123"]);
-        assert_eq!(cfg.run.concurrency, Some(16));
+        assert_eq!(cfg.filter.domains, vec!["Health Sciences"]);
+        assert_eq!(cfg.filter.topics, vec!["T123"]);
+        assert_eq!(cfg.concurrency, Some(16));
     }
 
     #[test]
@@ -435,9 +431,9 @@ topics = ["T123"]
     #[test]
     fn load_config_rejects_old_format() {
         let dir = TempDir::new().unwrap();
-        // Old format: [filter] at top level is now unknown
+        // Old format: [run] section is no longer valid
         let path = dir.path().join("old.toml");
-        fs::write(&path, "[filter]\ndomains = [\"test\"]\n").unwrap();
+        fs::write(&path, "[run]\nconcurrency = 8\n").unwrap();
         let err = load_config(Some(path.as_path()));
         assert!(err.is_err());
         assert!(
@@ -447,7 +443,7 @@ topics = ["T123"]
     }
 
     #[test]
-    fn load_config_subcommand_sections() {
+    fn load_config_all_sections() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("full.toml");
         fs::write(
@@ -455,15 +451,14 @@ topics = ["T123"]
             r#"
 output = "/data"
 zstd_level = 9
-
-[run]
-zstd_level = 3
 concurrency = 16
 
-[run.filter]
+[filter]
 domains = ["Health Sciences"]
 
 [hive]
+enable = true
+clean_raw = true
 zstd_level = 8
 threads = 12
 memory_limit = "32GB"
@@ -472,9 +467,10 @@ memory_limit = "32GB"
         .unwrap();
         let cfg = load_config(Some(path.as_path())).unwrap();
         assert_eq!(cfg.zstd_level, Some(9));
-        assert_eq!(cfg.run.zstd_level, Some(3));
-        assert_eq!(cfg.run.concurrency, Some(16));
-        assert_eq!(cfg.run.filter.domains, vec!["Health Sciences"]);
+        assert_eq!(cfg.concurrency, Some(16));
+        assert_eq!(cfg.filter.domains, vec!["Health Sciences"]);
+        assert_eq!(cfg.hive.enable, Some(true));
+        assert_eq!(cfg.hive.clean_raw, Some(true));
         assert_eq!(cfg.hive.zstd_level, Some(8));
         assert_eq!(cfg.hive.threads, Some(12));
         assert_eq!(cfg.hive.memory_limit.as_deref(), Some("32GB"));
