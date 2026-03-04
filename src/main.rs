@@ -12,13 +12,12 @@ mod manifest;
 mod oa;
 mod progress;
 mod provider;
+mod remote;
 mod retry;
 mod schema;
 mod sink;
 mod stream;
-mod sync;
 mod transform;
-mod upload;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -1179,7 +1178,7 @@ fn try_spawn_upload(
         resolved.endpoint,
     );
 
-    upload::spawn_upload_worker(resolved, base_dir.to_path_buf(), 64)
+    remote::spawn_upload_worker(resolved, base_dir.to_path_buf(), 64)
         .map_err(|e| {
             eprintln!("Failed to start upload worker: {e:#}");
             ExitCode::from(2)
@@ -1349,12 +1348,12 @@ fn cmd_push(output_dir: &Path, config_path: Option<&Path>, args: &PushArgs) -> E
         return ExitCode::from(2);
     }
 
-    let targets = sync::SyncTargets {
+    let targets = remote::RemoteTargets {
         raw: !args.hive_only,
         hive: !args.raw_only,
     };
 
-    match sync::run_push(&upload_cfg, &root, &targets, args.dry_run, args.concurrency) {
+    match remote::run_push(&upload_cfg, &root, &targets, args.dry_run, args.concurrency) {
         Ok(summary) => {
             println!(
                 "Push: {} transferred ({}), {} skipped",
@@ -1377,12 +1376,12 @@ fn cmd_pull(output_dir: &Path, config_path: Option<&Path>, args: &PullArgs) -> E
         Err(code) => return code,
     };
 
-    let targets = sync::SyncTargets {
+    let targets = remote::RemoteTargets {
         raw: true,
         hive: args.include_hive,
     };
 
-    match sync::run_pull(&upload_cfg, &root, &targets, args.dry_run, args.concurrency) {
+    match remote::run_pull(&upload_cfg, &root, &targets, args.dry_run, args.concurrency) {
         Ok(summary) => {
             println!(
                 "Pull: {} transferred ({}), {} skipped",

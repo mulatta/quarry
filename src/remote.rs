@@ -1,28 +1,182 @@
-//! Diff-based sync between local filesystem and S3-compatible storage.
+//! S3-compatible remote storage operations (Cloudflare R2).
 //!
-//! Used by `papeline push` and `papeline pull` for incremental file transfer.
+//! Three modes of remote access:
+//! - **Streaming upload**: background worker fed via `mpsc` channel during fetch/hive
+//! - **Push**: diff-based local → remote sync (`papeline push`)
+//! - **Pull**: diff-based remote → local sync (`papeline pull`)
+//!
 //! Sync strategy: filename + file_size comparison (no checksums needed because
 //! parquet files are immutable in our append-only pipeline).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
-use s3::Bucket;
+use s3::creds::Credentials;
+use s3::{Bucket, Region};
 
 use crate::config::{ResolvedUploadConfig, format_bytes};
 use crate::oa::TABLES;
-use crate::upload::create_bucket;
+
+// ============================================================
+// Bucket creation
+// ============================================================
+
+/// Create an S3 Bucket handle from resolved config.
+pub fn create_bucket(config: &ResolvedUploadConfig) -> Result<Box<Bucket>> {
+    let credentials = Credentials::new(
+        Some(&config.access_key),
+        Some(&config.secret_key),
+        None,
+        None,
+        None,
+    )
+    .map_err(|e| anyhow::anyhow!("S3 credentials error: {e}"))?;
+
+    let region = Region::Custom {
+        region: config.region.clone(),
+        endpoint: config.endpoint.clone(),
+    };
+
+    let bucket = Bucket::new(&config.bucket, region, credentials)
+        .map_err(|e| anyhow::anyhow!("S3 bucket error: {e}"))?
+        .with_path_style();
+
+    Ok(bucket)
+}
+
+// ============================================================
+// Streaming upload worker (used by fetch --hive and hive --upload)
+// ============================================================
+
+/// Spawn a background upload worker thread.
+///
+/// Returns `(sender, join_handle)`. Send `PathBuf`s of completed files
+/// through the sender. Drop the sender to signal completion; the worker will
+/// drain remaining items and return.
+///
+/// `base_dir` is the local root — used to compute the S3 object key
+/// by stripping this prefix from each file path.
+/// e.g. base_dir = `/output`, file = `/output/raw/works/shard_0000.parquet`
+///      → key = `{prefix}/raw/works/shard_0000.parquet`
+pub fn spawn_upload_worker(
+    config: ResolvedUploadConfig,
+    base_dir: PathBuf,
+    channel_bound: usize,
+) -> Result<(
+    mpsc::SyncSender<PathBuf>,
+    std::thread::JoinHandle<Result<()>>,
+)> {
+    let (tx, rx) = mpsc::sync_channel::<PathBuf>(channel_bound);
+
+    let handle = std::thread::Builder::new()
+        .name("upload-worker".to_string())
+        .spawn(move || upload_thread(config, base_dir, rx))?;
+
+    Ok((tx, handle))
+}
+
+/// The upload thread entry point — creates a tokio runtime and processes files.
+///
+/// Takes ownership because this runs in a `thread::spawn(move || ...)` closure.
+#[allow(clippy::needless_pass_by_value)]
+fn upload_thread(
+    config: ResolvedUploadConfig,
+    base_dir: PathBuf,
+    rx: mpsc::Receiver<PathBuf>,
+) -> Result<()> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("Failed to create upload tokio runtime")?;
+
+    rt.block_on(async {
+        let bucket = create_bucket(&config)?;
+        let mut uploaded = 0usize;
+        let mut bytes = 0u64;
+
+        while let Ok(path) = rx.recv() {
+            match stream_upload_file(&bucket, &config.prefix, &base_dir, &path).await {
+                Ok(size) => {
+                    uploaded += 1;
+                    bytes += size;
+                    tracing::info!(
+                        "uploaded {}: {} bytes (total: {} files, {} bytes)",
+                        path.display(),
+                        size,
+                        uploaded,
+                        bytes,
+                    );
+                }
+                Err(e) => {
+                    tracing::error!("upload failed for {}: {e:#}", path.display());
+                    return Err(e);
+                }
+            }
+        }
+
+        tracing::info!(
+            "Upload complete: {} files, {} bytes",
+            uploaded,
+            format_bytes(bytes as usize),
+        );
+        Ok(())
+    })
+}
+
+/// Upload a single file to the bucket via streaming (used by the background worker).
+async fn stream_upload_file(
+    bucket: &Bucket,
+    prefix: &str,
+    base_dir: &Path,
+    local_path: &Path,
+) -> Result<u64> {
+    let relative = local_path
+        .strip_prefix(base_dir)
+        .with_context(|| {
+            format!(
+                "{} is not under {}",
+                local_path.display(),
+                base_dir.display()
+            )
+        })?
+        .to_string_lossy();
+
+    let key = make_key(prefix, &relative);
+
+    let file_len = tokio::fs::metadata(local_path)
+        .await
+        .with_context(|| format!("Cannot stat {}", local_path.display()))?
+        .len();
+
+    let mut file = tokio::fs::File::open(local_path)
+        .await
+        .with_context(|| format!("Cannot open {}", local_path.display()))?;
+
+    let ct = content_type(&relative);
+
+    bucket
+        .put_object_stream_with_content_type(&mut file, &key, ct)
+        .await
+        .map_err(|e| anyhow::anyhow!("S3 put_object_stream failed for {key}: {e}"))?;
+
+    Ok(file_len)
+}
+
+// ============================================================
+// Diff-based push / pull
+// ============================================================
 
 /// Which directories to sync.
-pub struct SyncTargets {
+pub struct RemoteTargets {
     pub raw: bool,
     pub hive: bool,
 }
 
-/// Result summary after sync completes.
-pub struct SyncSummary {
+/// Result summary after push/pull completes.
+pub struct TransferSummary {
     pub files_transferred: usize,
     pub bytes_transferred: u64,
     pub files_skipped: usize,
@@ -36,9 +190,7 @@ const STATE_FILES: &[&str] = &[
     ".hive_state.json",
 ];
 
-// ============================================================
-// File listing types
-// ============================================================
+// ---- File listing types ----
 
 struct RemoteObject {
     /// Path relative to config prefix (e.g. "raw/works/shard_0000.parquet")
@@ -53,9 +205,7 @@ struct LocalFile {
     size: u64,
 }
 
-// ============================================================
-// List remote objects
-// ============================================================
+// ---- List remote objects ----
 
 /// List all objects under `{config_prefix}/{sub}/` in the bucket.
 async fn list_remote(bucket: &Bucket, config_prefix: &str, sub: &str) -> Result<Vec<RemoteObject>> {
@@ -97,9 +247,7 @@ async fn list_remote(bucket: &Bucket, config_prefix: &str, sub: &str) -> Result<
     Ok(objects)
 }
 
-// ============================================================
-// List local files
-// ============================================================
+// ---- List local files ----
 
 /// Walk local directory and collect all sync-eligible files.
 fn list_local(output_dir: &Path, sub: &str) -> Result<Vec<LocalFile>> {
@@ -161,9 +309,7 @@ fn walk_parquet_dir(dir: &Path, prefix: &str, files: &mut Vec<LocalFile>) -> Res
     Ok(())
 }
 
-// ============================================================
-// Diff computation
-// ============================================================
+// ---- Diff computation ----
 
 fn is_state_file(relative: &str) -> bool {
     STATE_FILES.iter().any(|sf| relative.ends_with(sf))
@@ -211,9 +357,7 @@ fn compute_pull_diff<'a>(remote: &'a [RemoteObject], local: &[LocalFile]) -> Vec
         .collect()
 }
 
-// ============================================================
-// Transfer operations
-// ============================================================
+// ---- Transfer operations ----
 
 fn content_type(relative: &str) -> &'static str {
     if relative.ends_with(".parquet") {
@@ -231,7 +375,7 @@ fn make_key(prefix: &str, relative: &str) -> String {
     }
 }
 
-/// Upload a single file to the bucket.
+/// Upload a single file to the bucket (used by push).
 async fn push_file(
     bucket: &Bucket,
     prefix: &str,
@@ -310,10 +454,10 @@ async fn pull_file(
 pub fn run_push(
     config: &ResolvedUploadConfig,
     output_dir: &Path,
-    targets: &SyncTargets,
+    targets: &RemoteTargets,
     dry_run: bool,
     concurrency: usize,
-) -> Result<SyncSummary> {
+) -> Result<TransferSummary> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -343,7 +487,7 @@ pub fn run_push(
             for f in &to_push {
                 println!("  + {} ({})", f.relative, format_bytes(f.size as usize));
             }
-            return Ok(SyncSummary {
+            return Ok(TransferSummary {
                 files_transferred: 0,
                 bytes_transferred: 0,
                 files_skipped: total_files,
@@ -351,7 +495,7 @@ pub fn run_push(
         }
 
         if push_count == 0 {
-            return Ok(SyncSummary {
+            return Ok(TransferSummary {
                 files_transferred: 0,
                 bytes_transferred: 0,
                 files_skipped: total_files,
@@ -380,7 +524,7 @@ pub fn run_push(
             transferred += 1;
         }
 
-        Ok(SyncSummary {
+        Ok(TransferSummary {
             files_transferred: transferred,
             bytes_transferred: bytes,
             files_skipped: total_files - transferred,
@@ -392,10 +536,10 @@ pub fn run_push(
 pub fn run_pull(
     config: &ResolvedUploadConfig,
     output_dir: &Path,
-    targets: &SyncTargets,
+    targets: &RemoteTargets,
     dry_run: bool,
     concurrency: usize,
-) -> Result<SyncSummary> {
+) -> Result<TransferSummary> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -425,7 +569,7 @@ pub fn run_pull(
             for f in &to_pull {
                 println!("  + {} ({})", f.relative, format_bytes(f.size as usize));
             }
-            return Ok(SyncSummary {
+            return Ok(TransferSummary {
                 files_transferred: 0,
                 bytes_transferred: 0,
                 files_skipped: total_files,
@@ -433,7 +577,7 @@ pub fn run_pull(
         }
 
         if pull_count == 0 {
-            return Ok(SyncSummary {
+            return Ok(TransferSummary {
                 files_transferred: 0,
                 bytes_transferred: 0,
                 files_skipped: total_files,
@@ -462,7 +606,7 @@ pub fn run_pull(
             transferred += 1;
         }
 
-        Ok(SyncSummary {
+        Ok(TransferSummary {
             files_transferred: transferred,
             bytes_transferred: bytes,
             files_skipped: total_files - transferred,
@@ -470,7 +614,7 @@ pub fn run_pull(
     })
 }
 
-fn target_subs(targets: &SyncTargets) -> Vec<&'static str> {
+fn target_subs(targets: &RemoteTargets) -> Vec<&'static str> {
     let mut subs = Vec::new();
     if targets.raw {
         subs.push("raw");
