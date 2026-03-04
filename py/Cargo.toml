@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [lib]
-name = "papeline"
+name = "_native"
 crate-type = ["cdylib"]
 
 [dependencies]
@@ -13,9 +13,9 @@ pyo3 = { workspace = true }
 rustc-hash = { workspace = true }
 indicatif = { workspace = true }
 
-[lints]
-workspace = true
-
 [lints.clippy]
-too_many_arguments = "allow"
 needless_pass_by_value = "allow"
+too_many_arguments = "allow"
+unnested_or_patterns = "warn"
+cloned_instead_of_copied = "warn"
+manual_let_else = "warn"

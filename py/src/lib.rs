@@ -417,7 +417,7 @@ fn num_cpus() -> usize {
 // ============================================================
 
 #[pymodule]
-fn papeline(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyHttpPool>()?;
     m.add_class::<PyFilter>()?;
     m.add_class::<PyOAShard>()?;
