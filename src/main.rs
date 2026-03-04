@@ -16,6 +16,7 @@ mod retry;
 mod schema;
 mod sink;
 mod stream;
+mod sync;
 mod transform;
 mod upload;
 
@@ -70,6 +71,10 @@ enum Commands {
     Clean,
     /// Repartition raw shards into year-partitioned Hive parquet
     Hive(HiveArgs),
+    /// Sync local files to R2 (upload new/changed)
+    Push(PushArgs),
+    /// Sync R2 files to local (download new/changed)
+    Pull(PullArgs),
 }
 
 #[derive(clap::Args)]
@@ -103,6 +108,35 @@ struct HiveArgs {
     /// Upload completed parquet files to S3-compatible storage (requires [upload] config)
     #[arg(long)]
     upload: bool,
+}
+
+#[derive(clap::Args)]
+struct PushArgs {
+    /// Push raw/ only (skip hive/)
+    #[arg(long)]
+    raw_only: bool,
+    /// Push hive/ only (skip raw/)
+    #[arg(long)]
+    hive_only: bool,
+    /// Show what would be pushed without executing
+    #[arg(long)]
+    dry_run: bool,
+    /// Max concurrent uploads [default: 8]
+    #[arg(long, default_value = "8")]
+    concurrency: usize,
+}
+
+#[derive(clap::Args)]
+struct PullArgs {
+    /// Also pull hive/ (default: raw/ only)
+    #[arg(long)]
+    include_hive: bool,
+    /// Show what would be pulled without executing
+    #[arg(long)]
+    dry_run: bool,
+    /// Max concurrent downloads [default: 8]
+    #[arg(long, default_value = "8")]
+    concurrency: usize,
 }
 
 #[derive(clap::Args)]
@@ -231,6 +265,8 @@ fn main() -> ExitCode {
         Commands::Status => cmd_status(&cli.output_dir),
         Commands::Clean => cmd_clean(&cli.output_dir),
         Commands::Hive(args) => cmd_hive(&cli.output_dir, cli.config.as_deref(), args, &multi),
+        Commands::Push(args) => cmd_push(&cli.output_dir, cli.config.as_deref(), args),
+        Commands::Pull(args) => cmd_pull(&cli.output_dir, cli.config.as_deref(), args),
     }
 }
 
@@ -1188,6 +1224,94 @@ fn cmd_hive(
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("Error: {e:#}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+// ============================================================
+// `papeline push` / `papeline pull`
+// ============================================================
+
+fn resolve_upload_config(
+    output_dir: &Path,
+    config_path: Option<&Path>,
+) -> Result<(PathBuf, config::ResolvedUploadConfig), ExitCode> {
+    let file_cfg = load_config(config_path).map_err(|e| {
+        tracing::error!("Config error: {e}");
+        ExitCode::from(2)
+    })?;
+
+    let root = file_cfg
+        .output
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| output_dir.to_path_buf());
+
+    let upload_cfg = config::ResolvedUploadConfig::from_config(&file_cfg.upload).map_err(|e| {
+        eprintln!("Upload config error: {e:#}");
+        ExitCode::from(2)
+    })?;
+
+    Ok((root, upload_cfg))
+}
+
+fn cmd_push(output_dir: &Path, config_path: Option<&Path>, args: &PushArgs) -> ExitCode {
+    let (root, upload_cfg) = match resolve_upload_config(output_dir, config_path) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+
+    if args.raw_only && args.hive_only {
+        eprintln!("Cannot use --raw-only and --hive-only together");
+        return ExitCode::from(2);
+    }
+
+    let targets = sync::SyncTargets {
+        raw: !args.hive_only,
+        hive: !args.raw_only,
+    };
+
+    match sync::run_push(&upload_cfg, &root, &targets, args.dry_run, args.concurrency) {
+        Ok(summary) => {
+            println!(
+                "Push: {} transferred ({}), {} skipped",
+                summary.files_transferred,
+                config::format_bytes(summary.bytes_transferred as usize),
+                summary.files_skipped,
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("Push error: {e:#}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn cmd_pull(output_dir: &Path, config_path: Option<&Path>, args: &PullArgs) -> ExitCode {
+    let (root, upload_cfg) = match resolve_upload_config(output_dir, config_path) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+
+    let targets = sync::SyncTargets {
+        raw: true,
+        hive: args.include_hive,
+    };
+
+    match sync::run_pull(&upload_cfg, &root, &targets, args.dry_run, args.concurrency) {
+        Ok(summary) => {
+            println!(
+                "Pull: {} transferred ({}), {} skipped",
+                summary.files_transferred,
+                config::format_bytes(summary.bytes_transferred as usize),
+                summary.files_skipped,
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("Pull error: {e:#}");
             ExitCode::from(1)
         }
     }
