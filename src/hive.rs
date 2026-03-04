@@ -18,6 +18,8 @@ use arrow::array::{Array, ArrayRef, Int32Array, StringArray, UInt32Array};
 use arrow::compute;
 use arrow::record_batch::RecordBatch;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+
+use crate::progress::{IndicatifReporter, NoopReporter, ProgressReporter};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::{ArrowWriter, ProjectionMask};
 use parquet::basic::{Compression, ZstdLevel};
@@ -315,7 +317,7 @@ fn parallel_process<F>(
     writers: &HashMap<(i32, usize), std::sync::Mutex<PartitionWriter>>,
     per_writer_mem_limit: usize,
     pool: &rayon::ThreadPool,
-    pb: &ProgressBar,
+    pb: &dyn ProgressReporter,
     route_fn: F,
 ) -> Result<()>
 where
@@ -366,7 +368,7 @@ fn rebuild_partition_map_from(
     config: &ResolvedHiveConfig,
     shard_files: &[PathBuf],
     pool: &rayon::ThreadPool,
-    pb: &ProgressBar,
+    pb: &dyn ProgressReporter,
 ) -> Result<WorkPartitionMap> {
     let num_shards = config.num_shards;
 
@@ -445,7 +447,7 @@ fn rebuild_partition_map_from(
 fn process_works(
     config: &ResolvedHiveConfig,
     pool: &rayon::ThreadPool,
-    pb: &ProgressBar,
+    pb: &dyn ProgressReporter,
 ) -> Result<WorkPartitionMap> {
     let staging = config.staging_dir.join("works");
     fs::create_dir_all(&staging)?;
@@ -555,7 +557,7 @@ fn process_child(
     config: &ResolvedHiveConfig,
     partition_map: &WorkPartitionMap,
     pool: &rayon::ThreadPool,
-    pb: &ProgressBar,
+    pb: &dyn ProgressReporter,
 ) -> Result<()> {
     let staging = config.staging_dir.join(table);
     fs::create_dir_all(&staging)?;
@@ -760,14 +762,14 @@ fn hive_table_style() -> ProgressStyle {
         .progress_chars("=>-")
 }
 
-fn make_table_bar(multi: &MultiProgress, is_tty: bool, name: &str) -> ProgressBar {
+fn make_table_bar(multi: &MultiProgress, is_tty: bool, name: &str) -> Box<dyn ProgressReporter> {
     if !is_tty {
-        return ProgressBar::hidden();
+        return Box::new(NoopReporter);
     }
     let pb = multi.add(ProgressBar::new(0));
     pb.set_style(hive_table_style());
     pb.set_prefix(name.to_string());
-    pb
+    Box::new(IndicatifReporter(pb))
 }
 
 // ============================================================
@@ -908,14 +910,14 @@ pub fn run_hive(
     );
 
     // 6. Progress bars
-    let global_bar = if is_tty {
+    let global_bar: Box<dyn ProgressReporter> = if is_tty {
         let pb = multi.add(ProgressBar::new(tables.len() as u64));
         pb.set_style(hive_global_style());
         pb.set_prefix("Hive");
         pb.set_position(completed_tables.len() as u64);
-        pb
+        Box::new(IndicatifReporter(pb))
     } else {
-        ProgressBar::hidden()
+        Box::new(NoopReporter)
     };
 
     // 7. Build rayon thread pool for parallel compression
@@ -935,7 +937,7 @@ pub fn run_hive(
     let partition_map = if remaining.contains(&"works") {
         let pb = make_table_bar(multi, is_tty, "works");
         let t = Instant::now();
-        match process_works(config, &pool, &pb) {
+        match process_works(config, &pool, &*pb) {
             Ok(map) => {
                 atomic_swap_table(&config.hive_dir, &config.staging_dir, "works")?;
                 if let Some(tx) = upload_tx {
@@ -944,7 +946,7 @@ pub fn run_hive(
                 completed_tables.push("works".to_string());
                 save_partial_state(&hash, config, &tables, &completed_tables)?;
                 let elapsed = t.elapsed();
-                pb.finish_with_message(format!(
+                pb.finish_with_message(&format!(
                     "done ({}, {} works)",
                     fmt_elapsed(elapsed),
                     map.len()
@@ -968,9 +970,9 @@ pub fn run_hive(
         // Works already done — rebuild partition map from existing hive works
         let pb = make_table_bar(multi, is_tty, "works (map)");
         let t = Instant::now();
-        let map = rebuild_partition_map(config, &pool, &pb)?;
+        let map = rebuild_partition_map(config, &pool, &*pb)?;
         let elapsed = t.elapsed();
-        pb.finish_with_message(format!(
+        pb.finish_with_message(&format!(
             "map rebuilt ({}, {} works)",
             fmt_elapsed(elapsed),
             map.len()
@@ -991,7 +993,7 @@ pub fn run_hive(
         }
         let pb = make_table_bar(multi, is_tty, table);
         let t = Instant::now();
-        match process_child(table, config, &partition_map, &pool, &pb) {
+        match process_child(table, config, &partition_map, &pool, &*pb) {
             Ok(()) => {
                 atomic_swap_table(&config.hive_dir, &config.staging_dir, table)?;
                 if let Some(tx) = upload_tx {
@@ -1000,7 +1002,7 @@ pub fn run_hive(
                 completed_tables.push(table.to_string());
                 save_partial_state(&hash, config, &tables, &completed_tables)?;
                 let elapsed = t.elapsed();
-                pb.finish_with_message(format!("done ({})", fmt_elapsed(elapsed)));
+                pb.finish_with_message(&format!("done ({})", fmt_elapsed(elapsed)));
                 global_bar.inc(1);
                 tracing::info!("{:<20} completed in {}", table, fmt_elapsed(elapsed));
             }
@@ -1039,7 +1041,7 @@ pub fn run_hive(
 fn rebuild_partition_map(
     config: &ResolvedHiveConfig,
     pool: &rayon::ThreadPool,
-    pb: &ProgressBar,
+    pb: &dyn ProgressReporter,
 ) -> Result<WorkPartitionMap> {
     let shard_files = list_shard_files(&config.raw_dir.join("works"))?;
     rebuild_partition_map_from(config, &shard_files, pool, pb)

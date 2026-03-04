@@ -6,9 +6,8 @@ mod pipeline;
 
 use std::path::Path;
 
-use indicatif::ProgressBar;
-
 use crate::error::ShardError;
+use crate::progress::ProgressReporter;
 use crate::provider::{RunContext, ShardStats};
 use crate::sink::is_valid_parquet;
 use crate::transform::Filter;
@@ -107,7 +106,7 @@ impl crate::provider::Provider for OAProvider {
         &self,
         shard: &OAShard,
         ctx: &RunContext,
-        pb: &ProgressBar,
+        pb: &dyn ProgressReporter,
     ) -> Result<ShardStats, ShardError> {
         pipeline::process_works_shard(shard, ctx, &self.filter, pb)
     }

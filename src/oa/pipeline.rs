@@ -6,15 +6,13 @@ use std::io::BufRead;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use arrow::array::RecordBatch;
-use indicatif::ProgressBar;
-
 use crate::accumulator::Accumulator;
 use crate::error::ShardError;
-use crate::progress::fmt_num;
+use crate::progress::{ProgressReporter, fmt_num};
 use crate::provider::{RunContext, ShardStats};
 use crate::sink::ParquetSink;
 use crate::stream::ByteCounter;
+use arrow::array::RecordBatch;
 
 use crate::schema;
 use crate::transform::{
@@ -216,7 +214,7 @@ pub(super) fn process_works_shard(
     shard: &OAShard,
     ctx: &RunContext,
     filter: &Filter,
-    pb: &ProgressBar,
+    pb: &dyn ProgressReporter,
 ) -> Result<ShardStats, ShardError> {
     let shard_label = format!("works_{:04}", shard.shard_idx);
 
@@ -227,7 +225,7 @@ pub(super) fn process_works_shard(
             crate::stream::open_gzip_reader(&shard.url).map_err(ShardError::Stream)?;
 
         if let Some(total) = total_bytes.or(shard.content_length) {
-            crate::progress::upgrade_to_bar(pb, total);
+            pb.upgrade_to_determinate(total);
         }
         pb.set_message("processing...");
 
@@ -313,7 +311,7 @@ fn process_works_lines(
     counter: &ByteCounter,
     pipeline: &mut ShardPipeline,
     filter: &Filter,
-    pb: &ProgressBar,
+    pb: &dyn ProgressReporter,
 ) -> std::io::Result<LinesResult> {
     let mut buf = String::with_capacity(4096);
     let mut rows_written = 0usize;
@@ -331,10 +329,10 @@ fn process_works_lines(
         if lines_scanned.is_multiple_of(UPDATE_INTERVAL) {
             pb.set_position(counter.load(Ordering::Relaxed));
             if filter.is_empty() {
-                pb.set_message(format!("{} rows", fmt_num(rows_written)));
+                pb.set_message(&format!("{} rows", fmt_num(rows_written)));
             } else {
                 let match_pct = rows_written as f64 / lines_scanned as f64 * 100.0;
-                pb.set_message(format!(
+                pb.set_message(&format!(
                     "{} rows ({:.1}% match)",
                     fmt_num(rows_written),
                     match_pct
@@ -479,7 +477,7 @@ mod tests {
         let input = format!("{}\n", RICH_WORK_JSON);
         let mut reader = std::io::BufReader::new(input.as_bytes());
         let counter: ByteCounter = Arc::new(AtomicU64::new(0));
-        let pb = ProgressBar::hidden();
+        let pb = crate::progress::NoopReporter;
         let filter = Filter::default();
 
         let result =
@@ -676,7 +674,7 @@ mod tests {
 "#;
         let mut reader = std::io::BufReader::new(input.as_bytes());
         let counter: ByteCounter = Arc::new(AtomicU64::new(0));
-        let pb = ProgressBar::hidden();
+        let pb = crate::progress::NoopReporter;
         let filter = Filter::default();
 
         let result =

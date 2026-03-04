@@ -12,6 +12,71 @@ use std::io::{IsTerminal, Write};
 use std::sync::Arc;
 use tracing_subscriber::fmt::MakeWriter;
 
+// ============================================================
+// Abstract progress reporting
+// ============================================================
+
+/// Abstraction over progress reporting, decoupled from indicatif.
+///
+/// All pipeline/provider/retry code uses this trait instead of `ProgressBar`
+/// directly, enabling library (PyO3) usage without a terminal.
+pub trait ProgressReporter: Send + Sync {
+    fn set_message(&self, msg: &str);
+    fn set_length(&self, len: u64);
+    fn set_position(&self, pos: u64);
+    fn inc(&self, delta: u64);
+    fn finish_and_clear(&self);
+    fn finish_with_message(&self, msg: &str);
+
+    /// Switch from indeterminate (pending) to determinate (bar) mode.
+    ///
+    /// Default implementation just sets the length. Indicatif overrides
+    /// this to also switch the bar style from pending to bytes-bar.
+    fn upgrade_to_determinate(&self, total: u64) {
+        self.set_length(total);
+    }
+}
+
+/// Indicatif-backed progress reporter.
+pub struct IndicatifReporter(pub ProgressBar);
+
+impl ProgressReporter for IndicatifReporter {
+    fn set_message(&self, msg: &str) {
+        self.0.set_message(msg.to_owned());
+    }
+    fn set_length(&self, len: u64) {
+        self.0.set_length(len);
+    }
+    fn set_position(&self, pos: u64) {
+        self.0.set_position(pos);
+    }
+    fn inc(&self, delta: u64) {
+        self.0.inc(delta);
+    }
+    fn finish_and_clear(&self) {
+        self.0.finish_and_clear();
+    }
+    fn finish_with_message(&self, msg: &str) {
+        self.0.finish_with_message(msg.to_owned());
+    }
+    fn upgrade_to_determinate(&self, total: u64) {
+        self.0.set_length(total);
+        self.0.set_style(bar_style());
+    }
+}
+
+/// No-op reporter for tests and non-TTY library use.
+pub struct NoopReporter;
+
+impl ProgressReporter for NoopReporter {
+    fn set_message(&self, _msg: &str) {}
+    fn set_length(&self, _len: u64) {}
+    fn set_position(&self, _pos: u64) {}
+    fn inc(&self, _delta: u64) {}
+    fn finish_and_clear(&self) {}
+    fn finish_with_message(&self, _msg: &str) {}
+}
+
 /// Global progress bar style (shard count)
 fn global_style() -> ProgressStyle {
     ProgressStyle::default_bar()
@@ -33,12 +98,6 @@ fn pending_style() -> ProgressStyle {
     ProgressStyle::default_bar()
         .template("{prefix:<20.dim} {wide_msg:.dim}")
         .expect("invalid template")
-}
-
-/// Upgrade a progress bar from pending to bytes bar.
-pub fn upgrade_to_bar(pb: &ProgressBar, total: u64) {
-    pb.set_length(total);
-    pb.set_style(bar_style());
 }
 
 // ============================================================
@@ -196,16 +255,16 @@ impl ProgressContext {
     }
 
     /// Create per-worker progress bar (inserted below the global bar).
-    pub fn shard_bar(&self, name: &str) -> ProgressBar {
+    pub fn shard_bar(&self, name: &str) -> Box<dyn ProgressReporter> {
         if !self.is_tty {
-            return ProgressBar::hidden();
+            return Box::new(NoopReporter);
         }
 
         let pb = self.multi.add(ProgressBar::new(0));
         pb.set_style(pending_style());
         let display = if name.len() > 20 { &name[..20] } else { name };
         pb.set_prefix(display.to_string());
-        pb
+        Box::new(IndicatifReporter(pb))
     }
 }
 

@@ -4,10 +4,9 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use indicatif::ProgressBar;
 use rayon::prelude::*;
 
-use crate::progress::SharedProgress;
+use crate::progress::{ProgressReporter, SharedProgress};
 
 /// Statistics returned from processing a single shard.
 #[derive(Debug, Default)]
@@ -53,7 +52,7 @@ pub trait Provider: Sync {
         &self,
         shard: &Self::Shard,
         ctx: &RunContext,
-        pb: &ProgressBar,
+        pb: &dyn ProgressReporter,
     ) -> Result<ShardStats, Self::Err>;
 }
 
@@ -89,7 +88,7 @@ pub fn run_provider<P: Provider>(
             let label = provider.shard_label(shard);
             let pb = progress.shard_bar(&label);
 
-            match provider.process_shard(shard, ctx, &pb) {
+            match provider.process_shard(shard, ctx, &*pb) {
                 Ok(stats) => {
                     rows.fetch_add(stats.rows_written, Ordering::Relaxed);
                     scanned.fetch_add(stats.lines_scanned, Ordering::Relaxed);
@@ -156,7 +155,7 @@ mod tests {
             &self,
             shard: &usize,
             _ctx: &RunContext,
-            _pb: &ProgressBar,
+            _pb: &dyn ProgressReporter,
         ) -> Result<ShardStats, String> {
             self.call_count.fetch_add(1, Ordering::Relaxed);
             if self.fail_indices.contains(shard) {

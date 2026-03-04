@@ -2,9 +2,8 @@
 
 use std::time::Duration;
 
-use indicatif::ProgressBar;
-
 use crate::error::ShardError;
+use crate::progress::ProgressReporter;
 use crate::stream::http_config;
 
 /// Exponential backoff: 2^attempt seconds (2s, 4s, 8s, ...)
@@ -18,7 +17,7 @@ pub const fn backoff_duration(attempt: u32) -> Duration {
 /// and retries up to `max_retries` (from global [`HttpConfig`]).
 pub fn retry_with_backoff<T>(
     shard_label: &str,
-    pb: &ProgressBar,
+    pb: &dyn ProgressReporter,
     mut attempt_fn: impl FnMut() -> Result<T, ShardError>,
 ) -> Result<T, ShardError> {
     let max_retries = http_config().max_retries;
@@ -28,7 +27,7 @@ pub fn retry_with_backoff<T>(
             Ok(v) => return Ok(v),
             Err(e) if attempt < max_retries && e.is_retryable() => {
                 attempt += 1;
-                pb.set_message(format!("retry {attempt}/{max_retries}..."));
+                pb.set_message(&format!("retry {attempt}/{max_retries}..."));
                 tracing::debug!(
                     "{shard_label}: attempt {attempt}/{max_retries} failed: {e}, retrying..."
                 );
@@ -46,6 +45,7 @@ pub fn retry_with_backoff<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::progress::NoopReporter;
     use crate::stream::StreamError;
 
     #[test]
@@ -57,7 +57,7 @@ mod tests {
 
     #[test]
     fn retry_succeeds_first_try() {
-        let pb = ProgressBar::hidden();
+        let pb = NoopReporter;
         let mut calls = 0u32;
         let result = retry_with_backoff("test", &pb, || {
             calls += 1;
@@ -69,7 +69,7 @@ mod tests {
 
     #[test]
     fn retry_non_retryable_fails_immediately() {
-        let pb = ProgressBar::hidden();
+        let pb = NoopReporter;
         let mut calls = 0u32;
         let result = retry_with_backoff("test", &pb, || {
             calls += 1;
