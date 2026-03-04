@@ -18,9 +18,12 @@ blake3 = "1"
 
 # HTTP
 reqwest = { version = "0.12", features = ["native-tls", "stream"], default-features = false }
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "io-util"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "io-util", "fs"] }
 futures-util = "0.3"
 tokio-util = { version = "0.7", features = ["io"] }
+
+# S3-compatible upload (Cloudflare R2)
+rust-s3 = { version = "0.37", default-features = false, features = ["tokio-native-tls", "fail-on-err"] }
 
 # Compression
 flate2 = { version = "1", features = ["zlib-ng"], default-features = false }

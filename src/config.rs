@@ -30,6 +30,8 @@ pub struct FileConfig {
     pub filter: FilterConfig,
     #[serde(default)]
     pub hive: HiveConfig,
+    #[serde(default)]
+    pub upload: UploadConfig,
 }
 
 /// `[hive]` section — settings for `papeline hive`.
@@ -60,6 +62,91 @@ pub struct FilterConfig {
     pub work_types: Vec<String>,
     #[serde(default)]
     pub require_abstract: bool,
+}
+
+/// `[upload]` section — S3-compatible upload (e.g. Cloudflare R2).
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UploadConfig {
+    /// S3 bucket name
+    pub bucket: Option<String>,
+    /// S3 endpoint URL (e.g. "https://<account>.r2.cloudflarestorage.com")
+    pub endpoint: Option<String>,
+    /// S3 region (default: "auto" for R2)
+    pub region: Option<String>,
+    /// Access key (or use $R2_ACCESS_KEY_ID / $AWS_ACCESS_KEY_ID env var)
+    pub access_key: Option<String>,
+    /// Secret key (or use $R2_SECRET_ACCESS_KEY / $AWS_SECRET_ACCESS_KEY env var)
+    pub secret_key: Option<String>,
+    /// Key prefix in bucket (e.g. "papeline/hive")
+    pub prefix: Option<String>,
+}
+
+/// Fully resolved upload configuration.
+#[derive(Debug, Clone)]
+pub struct ResolvedUploadConfig {
+    pub bucket: String,
+    pub endpoint: String,
+    pub region: String,
+    pub access_key: String,
+    pub secret_key: String,
+    pub prefix: String,
+}
+
+impl ResolvedUploadConfig {
+    /// Resolve upload config from TOML + env vars.
+    ///
+    /// Env vars: R2_ACCESS_KEY_ID / AWS_ACCESS_KEY_ID,
+    ///           R2_SECRET_ACCESS_KEY / AWS_SECRET_ACCESS_KEY,
+    ///           R2_ENDPOINT, R2_BUCKET.
+    pub fn from_config(cfg: &UploadConfig) -> anyhow::Result<Self> {
+        let bucket = cfg
+            .bucket
+            .clone()
+            .or_else(|| std::env::var("R2_BUCKET").ok())
+            .ok_or_else(|| anyhow::anyhow!("upload.bucket or $R2_BUCKET required"))?;
+
+        let endpoint = cfg
+            .endpoint
+            .clone()
+            .or_else(|| std::env::var("R2_ENDPOINT").ok())
+            .ok_or_else(|| anyhow::anyhow!("upload.endpoint or $R2_ENDPOINT required"))?;
+
+        let region = cfg.region.clone().unwrap_or_else(|| "auto".to_string());
+
+        let access_key = cfg
+            .access_key
+            .clone()
+            .or_else(|| std::env::var("R2_ACCESS_KEY_ID").ok())
+            .or_else(|| std::env::var("AWS_ACCESS_KEY_ID").ok())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "upload.access_key or $R2_ACCESS_KEY_ID / $AWS_ACCESS_KEY_ID required"
+                )
+            })?;
+
+        let secret_key = cfg
+            .secret_key
+            .clone()
+            .or_else(|| std::env::var("R2_SECRET_ACCESS_KEY").ok())
+            .or_else(|| std::env::var("AWS_SECRET_ACCESS_KEY").ok())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "upload.secret_key or $R2_SECRET_ACCESS_KEY / $AWS_SECRET_ACCESS_KEY required"
+                )
+            })?;
+
+        let prefix = cfg.prefix.clone().unwrap_or_default();
+
+        Ok(Self {
+            bucket,
+            endpoint,
+            region,
+            access_key,
+            secret_key,
+            prefix,
+        })
+    }
 }
 
 /// Try loading config from explicit `--config` path or `./papeline.toml` in CWD.
@@ -462,6 +549,11 @@ clean_raw = true
 zstd_level = 8
 threads = 12
 memory_limit = "32GB"
+
+[upload]
+bucket = "my-bucket"
+endpoint = "https://acct.r2.cloudflarestorage.com"
+prefix = "papeline/hive"
 "#,
         )
         .unwrap();
@@ -471,6 +563,12 @@ memory_limit = "32GB"
         assert_eq!(cfg.filter.domains, vec!["Health Sciences"]);
         assert_eq!(cfg.hive.enable, Some(true));
         assert_eq!(cfg.hive.clean_raw, Some(true));
+        assert_eq!(cfg.upload.bucket.as_deref(), Some("my-bucket"));
+        assert_eq!(
+            cfg.upload.endpoint.as_deref(),
+            Some("https://acct.r2.cloudflarestorage.com")
+        );
+        assert_eq!(cfg.upload.prefix.as_deref(), Some("papeline/hive"));
         assert_eq!(cfg.hive.zstd_level, Some(8));
         assert_eq!(cfg.hive.threads, Some(12));
         assert_eq!(cfg.hive.memory_limit.as_deref(), Some("32GB"));
@@ -618,5 +716,49 @@ memory_limit = "32GB"
         assert_eq!(lines.len(), 2);
         assert!(lines[0].contains("2025-01-01T00:00:00Z"));
         assert!(lines[1].contains("2025-01-02T00:00:00Z"));
+    }
+
+    // ---- ResolvedUploadConfig ----
+
+    #[test]
+    fn resolved_upload_from_config_all_fields() {
+        let cfg = UploadConfig {
+            bucket: Some("test-bucket".to_string()),
+            endpoint: Some("https://example.com".to_string()),
+            region: Some("us-east-1".to_string()),
+            access_key: Some("AK".to_string()),
+            secret_key: Some("SK".to_string()),
+            prefix: Some("data/hive".to_string()),
+        };
+        let resolved = ResolvedUploadConfig::from_config(&cfg).unwrap();
+        assert_eq!(resolved.bucket, "test-bucket");
+        assert_eq!(resolved.endpoint, "https://example.com");
+        assert_eq!(resolved.region, "us-east-1");
+        assert_eq!(resolved.access_key, "AK");
+        assert_eq!(resolved.secret_key, "SK");
+        assert_eq!(resolved.prefix, "data/hive");
+    }
+
+    #[test]
+    fn resolved_upload_defaults_region_auto() {
+        let cfg = UploadConfig {
+            bucket: Some("b".to_string()),
+            endpoint: Some("https://e.com".to_string()),
+            region: None,
+            access_key: Some("AK".to_string()),
+            secret_key: Some("SK".to_string()),
+            prefix: None,
+        };
+        let resolved = ResolvedUploadConfig::from_config(&cfg).unwrap();
+        assert_eq!(resolved.region, "auto");
+        assert!(resolved.prefix.is_empty());
+    }
+
+    #[test]
+    fn resolved_upload_missing_bucket_errors() {
+        let cfg = UploadConfig::default();
+        let err = ResolvedUploadConfig::from_config(&cfg);
+        assert!(err.is_err());
+        assert!(err.unwrap_err().to_string().contains("bucket"));
     }
 }

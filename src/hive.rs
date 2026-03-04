@@ -664,6 +664,38 @@ fn atomic_swap_table(hive_dir: &Path, staging_dir: &Path, table: &str) -> Result
     Ok(())
 }
 
+/// Enqueue all parquet files under `hive_dir/{table}` for upload.
+///
+/// Called AFTER `atomic_swap_table` so paths point to the final hive location.
+pub fn enqueue_table_upload(
+    hive_dir: &Path,
+    table: &str,
+    tx: &std::sync::mpsc::SyncSender<PathBuf>,
+) -> Result<()> {
+    let table_dir = hive_dir.join(table);
+    // Walk year-partition subdirectories
+    for entry in
+        fs::read_dir(&table_dir).with_context(|| format!("Cannot read {}", table_dir.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            // pub_year=YYYY directory — enumerate parquet files inside
+            for file_entry in fs::read_dir(&path)? {
+                let file_entry = file_entry?;
+                let file_path = file_entry.path();
+                if file_path.extension().is_some_and(|ext| ext == "parquet") {
+                    tx.send(file_path).context("upload channel closed")?;
+                }
+            }
+        } else if path.extension().is_some_and(|ext| ext == "parquet") {
+            // Flat parquet (unlikely for hive layout, but handle it)
+            tx.send(path).context("upload channel closed")?;
+        }
+    }
+    Ok(())
+}
+
 /// Remove staging directory for a table on failure.
 fn cleanup_staging(staging_dir: &Path, table: &str) {
     let staged = staging_dir.join(table);
@@ -774,6 +806,7 @@ pub fn run_hive(
     force: bool,
     dry_run: bool,
     multi: &MultiProgress,
+    upload_tx: Option<&std::sync::mpsc::SyncSender<PathBuf>>,
 ) -> Result<()> {
     let is_tty = std::io::stderr().is_terminal();
     let total_start = Instant::now();
@@ -905,6 +938,9 @@ pub fn run_hive(
         match process_works(config, &pool, &pb) {
             Ok(map) => {
                 atomic_swap_table(&config.hive_dir, &config.staging_dir, "works")?;
+                if let Some(tx) = upload_tx {
+                    enqueue_table_upload(&config.hive_dir, "works", tx)?;
+                }
                 completed_tables.push("works".to_string());
                 save_partial_state(&hash, config, &tables, &completed_tables)?;
                 let elapsed = t.elapsed();
@@ -958,6 +994,9 @@ pub fn run_hive(
         match process_child(table, config, &partition_map, &pool, &pb) {
             Ok(()) => {
                 atomic_swap_table(&config.hive_dir, &config.staging_dir, table)?;
+                if let Some(tx) = upload_tx {
+                    enqueue_table_upload(&config.hive_dir, table, tx)?;
+                }
                 completed_tables.push(table.to_string());
                 save_partial_state(&hash, config, &tables, &completed_tables)?;
                 let elapsed = t.elapsed();

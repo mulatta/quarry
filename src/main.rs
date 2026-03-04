@@ -17,6 +17,7 @@ mod schema;
 mod sink;
 mod stream;
 mod transform;
+mod upload;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -98,6 +99,10 @@ struct HiveArgs {
     /// Memory limit for DataFusion (e.g. "32GB", "512MB") [default: 65% of system RAM]
     #[arg(long)]
     memory_limit: Option<String>,
+
+    /// Upload completed parquet files to S3-compatible storage (requires [upload] config)
+    #[arg(long)]
+    upload: bool,
 }
 
 #[derive(clap::Args)]
@@ -1004,7 +1009,22 @@ fn run_auto_hive(
             }
         };
 
-    match hive::run_hive(&resolved, false, false, multi) {
+    let upload_worker = match try_spawn_upload(&file_cfg.upload, false, &resolved.hive_dir) {
+        Ok(w) => w,
+        Err(code) => return code,
+    };
+    let upload_tx = upload_worker.as_ref().map(|(tx, _)| tx);
+
+    let hive_result = hive::run_hive(&resolved, false, false, multi, upload_tx);
+
+    if let Some(worker) = upload_worker
+        && let Err(code) = join_upload_worker(worker)
+        && hive_result.is_ok()
+    {
+        return code;
+    }
+
+    match hive_result {
         Ok(()) => {}
         Err(e) => {
             eprintln!("Hive error: {e:#}");
@@ -1017,6 +1037,65 @@ fn run_auto_hive(
     }
 
     ExitCode::SUCCESS
+}
+
+type UploadWorker = (
+    std::sync::mpsc::SyncSender<PathBuf>,
+    std::thread::JoinHandle<anyhow::Result<()>>,
+);
+
+/// Try to spawn an upload worker if upload is configured.
+///
+/// Upload is enabled when:
+/// - `force` is true (CLI `--upload`), OR
+/// - `[upload].bucket` is set in TOML config
+///
+/// Returns `None` if upload is not configured.
+/// Returns `Err` only when upload IS configured but fails to resolve/spawn.
+fn try_spawn_upload(
+    upload_cfg: &config::UploadConfig,
+    force: bool,
+    hive_dir: &Path,
+) -> Result<Option<UploadWorker>, ExitCode> {
+    let want_upload = force || upload_cfg.bucket.is_some();
+    if !want_upload {
+        return Ok(None);
+    }
+
+    let resolved = config::ResolvedUploadConfig::from_config(upload_cfg).map_err(|e| {
+        eprintln!("Upload config error: {e:#}");
+        ExitCode::from(2)
+    })?;
+
+    tracing::info!(
+        "Upload enabled: bucket={}, endpoint={}",
+        resolved.bucket,
+        resolved.endpoint,
+    );
+
+    upload::spawn_upload_worker(resolved, hive_dir.to_path_buf(), 64)
+        .map_err(|e| {
+            eprintln!("Failed to start upload worker: {e:#}");
+            ExitCode::from(2)
+        })
+        .map(Some)
+}
+
+/// Wait for upload worker to finish. Returns error ExitCode if it failed.
+fn join_upload_worker(worker: UploadWorker) -> Result<(), ExitCode> {
+    let (tx, handle) = worker;
+    drop(tx); // signal completion
+    match handle.join() {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => {
+            eprintln!("Upload error: {e:#}");
+            Err(ExitCode::from(1))
+        }
+        Err(_) => {
+            eprintln!("Upload worker panicked");
+            Err(ExitCode::from(1))
+        }
+    }
 }
 
 /// Remove parquet files from raw table directories, preserving metadata files.
@@ -1090,7 +1169,22 @@ fn cmd_hive(
         }
     };
 
-    match hive::run_hive(&resolved, args.force, args.dry_run, multi) {
+    let upload_worker = match try_spawn_upload(&file_cfg.upload, args.upload, &resolved.hive_dir) {
+        Ok(w) => w,
+        Err(code) => return code,
+    };
+    let upload_tx = upload_worker.as_ref().map(|(tx, _)| tx);
+
+    let hive_result = hive::run_hive(&resolved, args.force, args.dry_run, multi, upload_tx);
+
+    if let Some(worker) = upload_worker
+        && let Err(code) = join_upload_worker(worker)
+        && hive_result.is_ok()
+    {
+        return code;
+    }
+
+    match hive_result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("Error: {e:#}");
