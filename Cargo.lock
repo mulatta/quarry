@@ -1812,25 +1812,40 @@ name = "papeline"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "arrow",
  "assert_cmd",
- "blake3",
  "chrono",
  "clap",
+ "indicatif",
+ "libc",
+ "papeline-core",
+ "predicates",
+ "regex",
+ "rustc-hash",
+ "serde_json",
+ "tempfile",
+ "tracing",
+ "tracing-subscriber",
+ "walkdir",
+]
+
+[[package]]
+name = "papeline-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arrow",
+ "blake3",
+ "chrono",
  "flate2",
  "futures-util",
  "indicatif",
- "libc",
  "num_cpus",
  "parquet",
- "predicates",
  "rayon",
- "regex",
  "reqwest",
  "rust-s3",
  "rustc-hash",
  "serde",
- "serde_json",
  "sha2",
  "sonic-rs",
  "tempfile",
@@ -1839,7 +1854,6 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
- "walkdir",
 ]
 
 [[package]]

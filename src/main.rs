@@ -1,24 +1,6 @@
 //! papeline -- Academic paper data pipeline (OpenAlex).
 
 use std::io::IsTerminal;
-
-mod accumulator;
-mod api;
-mod config;
-mod error;
-mod hive;
-mod id;
-mod manifest;
-mod oa;
-mod progress;
-mod provider;
-mod remote;
-mod retry;
-mod schema;
-mod sink;
-mod stream;
-mod transform;
-
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -26,12 +8,15 @@ use std::sync::Arc;
 use clap::{Parser, Subcommand};
 use rustc_hash::FxHashSet;
 
-use config::{ResolvedConfig, State, SyncLogEntry, build_filter, load_config};
-use manifest::{ManifestDiff, ManifestSnapshot, compute_manifest_diff, delete_shard_files};
-use oa::{OAProvider, OAShard, TABLES, is_shard_complete};
-use progress::{IndicatifMakeWriter, ProgressContext, SharedProgress};
-use provider::{RunContext, run_provider};
-use stream::HttpPool;
+use papeline_core::config::{self, ResolvedConfig, State, SyncLogEntry, build_filter, load_config};
+use papeline_core::manifest::{
+    self, ManifestDiff, ManifestSnapshot, compute_manifest_diff, delete_shard_files,
+};
+use papeline_core::oa::{OAProvider, OAShard, TABLES, is_shard_complete};
+use papeline_core::progress::{IndicatifMakeWriter, ProgressContext, SharedProgress};
+use papeline_core::provider::{RunContext, run_provider};
+use papeline_core::stream::HttpPool;
+use papeline_core::{api, hive, remote, sink, transform};
 
 // ============================================================
 // CLI definition
