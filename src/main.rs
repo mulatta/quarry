@@ -289,26 +289,79 @@ fn cmd_run(
     let auto_hive = plan.auto_hive;
     let auto_clean_raw = plan.auto_clean_raw;
 
-    let Some(result) = execute_run(&plan, multi) else {
+    // output_dir root (parent of raw/ and hive/)
+    let root = plan.resolved.output_dir.parent().unwrap_or(output_dir);
+
+    // Spawn upload worker if [upload] configured — shared across raw download + hive
+    let upload_worker = match try_spawn_upload(&plan.upload_cfg, false, root) {
+        Ok(w) => w,
+        Err(code) => return code,
+    };
+    let upload_tx = upload_worker.as_ref().map(|(tx, _)| tx);
+
+    let Some(result) = execute_run(&plan, multi, upload_tx) else {
         save_snapshot(
             &plan.all_shards,
             &FxHashSet::default(),
             &plan.resolved.output_dir,
         );
-        // No shards processed; still run hive if requested (idempotent check inside)
         if auto_hive {
-            return run_auto_hive(output_dir, config_path, auto_clean_raw, &multi_for_hive);
+            let code = run_auto_hive(
+                output_dir,
+                config_path,
+                auto_clean_raw,
+                &multi_for_hive,
+                upload_tx,
+            );
+            if let Some(worker) = upload_worker
+                && let Err(wc) = join_upload_worker(worker)
+                && code == ExitCode::SUCCESS
+            {
+                return wc;
+            }
+            return code;
+        }
+        if let Some(worker) = upload_worker
+            && let Err(code) = join_upload_worker(worker)
+        {
+            return code;
         }
         return ExitCode::SUCCESS;
     };
 
-    let code = finalize_run(plan, &result);
+    let code = finalize_run(&plan, &result);
+
+    // Push state files after finalize (they are now up-to-date on disk)
+    if let Some(tx) = upload_tx {
+        enqueue_state_files(&plan.resolved.output_dir, tx);
+    }
 
     if code != ExitCode::SUCCESS || !auto_hive {
+        if let Some(worker) = upload_worker
+            && let Err(wc) = join_upload_worker(worker)
+            && code == ExitCode::SUCCESS
+        {
+            return wc;
+        }
         return code;
     }
 
-    run_auto_hive(output_dir, config_path, auto_clean_raw, &multi_for_hive)
+    let hive_code = run_auto_hive(
+        output_dir,
+        config_path,
+        auto_clean_raw,
+        &multi_for_hive,
+        upload_tx,
+    );
+
+    if let Some(worker) = upload_worker
+        && let Err(wc) = join_upload_worker(worker)
+        && hive_code == ExitCode::SUCCESS
+    {
+        return wc;
+    }
+
+    hive_code
 }
 
 // ---- Phase types ----
@@ -324,6 +377,8 @@ struct RunPlan {
     auto_hive: bool,
     /// Clean raw after hive (CLI `--clean-raw` OR config `[hive].clean_raw`).
     auto_clean_raw: bool,
+    /// Upload config from TOML (for streaming push to R2).
+    upload_cfg: config::UploadConfig,
 }
 
 /// Outcome of pipeline execution (only produced when shards were processed).
@@ -508,6 +563,7 @@ fn prepare_run(
         removed: diff.removed,
         auto_hive,
         auto_clean_raw,
+        upload_cfg: file_cfg.upload,
     })
 }
 
@@ -516,7 +572,11 @@ fn prepare_run(
 /// Delete removed shard files and run the processing pipeline with retries.
 ///
 /// Returns `None` when there are no shards to process.
-fn execute_run(plan: &RunPlan, multi: indicatif::MultiProgress) -> Option<RunResult> {
+fn execute_run(
+    plan: &RunPlan,
+    multi: indicatif::MultiProgress,
+    upload_tx: Option<&std::sync::mpsc::SyncSender<PathBuf>>,
+) -> Option<RunResult> {
     // Delete files for removed shards (always, even with --since)
     if !plan.removed.is_empty() {
         delete_shard_files(&plan.resolved.output_dir, &plan.removed);
@@ -576,7 +636,31 @@ fn execute_run(plan: &RunPlan, multi: indicatif::MultiProgress) -> Option<RunRes
             outer_retries
         );
 
-        let summary = run_provider(&provider, &pending, &ctx, &progress);
+        // Build shard-complete callback: push raw parquet files for this shard
+        type ShardCallback = Box<dyn Fn(&OAShard) + Sync>;
+        let on_shard_complete: Option<ShardCallback> = upload_tx.map(|tx| {
+            let tx = tx.clone();
+            let raw_dir = plan.resolved.output_dir.clone();
+            Box::new(move |shard: &OAShard| {
+                for table in TABLES {
+                    let path = raw_dir
+                        .join(table)
+                        .join(format!("shard_{:04}.parquet", shard.shard_idx));
+                    if path.exists()
+                        && let Err(e) = tx.send(path)
+                    {
+                        tracing::warn!("upload enqueue failed: {e}");
+                    }
+                }
+            }) as ShardCallback
+        });
+        let summary = run_provider(
+            &provider,
+            &pending,
+            &ctx,
+            &progress,
+            on_shard_complete.as_deref(),
+        );
         total_completed += summary.completed;
         total_rows += summary.total_rows;
         total_scanned += summary.total_scanned;
@@ -627,7 +711,7 @@ fn execute_run(plan: &RunPlan, multi: indicatif::MultiProgress) -> Option<RunRes
 // ---- Phase 3: Finalize ----
 
 /// Persist state, manifest snapshot, sync log, and print summary.
-fn finalize_run(plan: RunPlan, result: &RunResult) -> ExitCode {
+fn finalize_run(plan: &RunPlan, result: &RunResult) -> ExitCode {
     let failed_count = result.pending.len();
     let removed_indices: Vec<usize> = plan.removed.iter().map(|r| r.shard_idx).collect();
 
@@ -635,7 +719,7 @@ fn finalize_run(plan: RunPlan, result: &RunResult) -> ExitCode {
     let (completed_indices, updated_dates) =
         compute_completed(&plan.shards_to_process, &result.pending);
     let new_state = build_new_state(
-        plan.state,
+        plan.state.clone(),
         &completed_indices,
         &updated_dates,
         failed_count,
@@ -1021,6 +1105,7 @@ fn run_auto_hive(
     config_path: Option<&Path>,
     clean_raw: bool,
     multi: &indicatif::MultiProgress,
+    upload_tx: Option<&std::sync::mpsc::SyncSender<PathBuf>>,
 ) -> ExitCode {
     let file_cfg = match load_config(config_path) {
         Ok(cfg) => cfg,
@@ -1045,22 +1130,7 @@ fn run_auto_hive(
             }
         };
 
-    let upload_worker = match try_spawn_upload(&file_cfg.upload, false, &resolved.hive_dir) {
-        Ok(w) => w,
-        Err(code) => return code,
-    };
-    let upload_tx = upload_worker.as_ref().map(|(tx, _)| tx);
-
-    let hive_result = hive::run_hive(&resolved, false, false, multi, upload_tx);
-
-    if let Some(worker) = upload_worker
-        && let Err(code) = join_upload_worker(worker)
-        && hive_result.is_ok()
-    {
-        return code;
-    }
-
-    match hive_result {
+    match hive::run_hive(&resolved, false, false, multi, upload_tx) {
         Ok(()) => {}
         Err(e) => {
             eprintln!("Hive error: {e:#}");
@@ -1091,7 +1161,7 @@ type UploadWorker = (
 fn try_spawn_upload(
     upload_cfg: &config::UploadConfig,
     force: bool,
-    hive_dir: &Path,
+    base_dir: &Path,
 ) -> Result<Option<UploadWorker>, ExitCode> {
     let want_upload = force || upload_cfg.bucket.is_some();
     if !want_upload {
@@ -1109,7 +1179,7 @@ fn try_spawn_upload(
         resolved.endpoint,
     );
 
-    upload::spawn_upload_worker(resolved, hive_dir.to_path_buf(), 64)
+    upload::spawn_upload_worker(resolved, base_dir.to_path_buf(), 64)
         .map_err(|e| {
             eprintln!("Failed to start upload worker: {e:#}");
             ExitCode::from(2)
@@ -1130,6 +1200,18 @@ fn join_upload_worker(worker: UploadWorker) -> Result<(), ExitCode> {
         Err(_) => {
             eprintln!("Upload worker panicked");
             Err(ExitCode::from(1))
+        }
+    }
+}
+
+/// Send state files (small, mutable) through the upload channel.
+fn enqueue_state_files(raw_dir: &Path, tx: &std::sync::mpsc::SyncSender<PathBuf>) {
+    for name in [".state.json", ".manifest.json", ".sync_log.jsonl"] {
+        let p = raw_dir.join(name);
+        if p.exists()
+            && let Err(e) = tx.send(p)
+        {
+            tracing::warn!("upload enqueue state file failed: {e}");
         }
     }
 }
@@ -1205,7 +1287,7 @@ fn cmd_hive(
         }
     };
 
-    let upload_worker = match try_spawn_upload(&file_cfg.upload, args.upload, &resolved.hive_dir) {
+    let upload_worker = match try_spawn_upload(&file_cfg.upload, args.upload, &output_dir) {
         Ok(w) => w,
         Err(code) => return code,
     };

@@ -370,7 +370,7 @@ pub fn build_filter(
 // State file (.state.json)
 // ============================================================
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct State {
     #[serde(default)]
     pub last_sync_date: Option<String>,
@@ -386,7 +386,7 @@ pub struct State {
     pub finished_at: Option<String>,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct StateFilter {
     #[serde(default)]
     pub domains: Vec<String>,

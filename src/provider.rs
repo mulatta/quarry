@@ -58,11 +58,17 @@ pub trait Provider: Sync {
 }
 
 /// Run a provider's full pipeline: parallel process -> summarise.
+///
+/// `on_complete` is called (from the rayon worker thread) after each shard
+/// succeeds, receiving the shard reference. Use this to trigger background
+/// uploads of newly-created files.
+#[allow(clippy::type_complexity)]
 pub fn run_provider<P: Provider>(
     provider: &P,
     shards: &[P::Shard],
     ctx: &RunContext,
     progress: &SharedProgress,
+    on_complete: Option<&(dyn Fn(&P::Shard) + Sync)>,
 ) -> RunSummary {
     let start = Instant::now();
     let rows = AtomicUsize::new(0);
@@ -88,6 +94,9 @@ pub fn run_provider<P: Provider>(
                     rows.fetch_add(stats.rows_written, Ordering::Relaxed);
                     scanned.fetch_add(stats.lines_scanned, Ordering::Relaxed);
                     completed.fetch_add(1, Ordering::Relaxed);
+                    if let Some(cb) = on_complete {
+                        cb(shard);
+                    }
                 }
                 Err(e) => {
                     failed.fetch_add(1, Ordering::Relaxed);
@@ -176,7 +185,7 @@ mod tests {
             call_count: AtomicUsize::new(0),
         };
         let progress: SharedProgress = Arc::new(ProgressContext::new());
-        let summary = run_provider(&provider, &[0, 1, 2, 3], &test_ctx(), &progress);
+        let summary = run_provider(&provider, &[0, 1, 2, 3], &test_ctx(), &progress, None);
 
         assert_eq!(summary.completed, 4);
         assert_eq!(summary.failed, 0);
@@ -191,7 +200,7 @@ mod tests {
             call_count: AtomicUsize::new(0),
         };
         let progress: SharedProgress = Arc::new(ProgressContext::new());
-        let summary = run_provider(&provider, &[0, 1, 2, 3], &test_ctx(), &progress);
+        let summary = run_provider(&provider, &[0, 1, 2, 3], &test_ctx(), &progress, None);
 
         assert_eq!(summary.completed, 2);
         assert_eq!(summary.failed, 2);
@@ -206,7 +215,7 @@ mod tests {
             call_count: AtomicUsize::new(0),
         };
         let progress: SharedProgress = Arc::new(ProgressContext::new());
-        let summary = run_provider(&provider, &[], &test_ctx(), &progress);
+        let summary = run_provider(&provider, &[], &test_ctx(), &progress, None);
 
         assert_eq!(summary.completed, 0);
     }

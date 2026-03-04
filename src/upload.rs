@@ -1,6 +1,6 @@
-//! Streaming upload of hive parquet files to S3-compatible storage (e.g. Cloudflare R2).
+//! Streaming upload of parquet files to S3-compatible storage (e.g. Cloudflare R2).
 //!
-//! Architecture: hive processing (rayon, CPU-bound) sends completed file paths through
+//! Architecture: processing threads (rayon, CPU-bound) send completed file paths through
 //! a bounded `mpsc::SyncSender`. A dedicated upload thread runs a tokio runtime that
 //! consumes paths and streams them to the bucket, overlapping compression with network I/O.
 
@@ -15,15 +15,17 @@ use crate::config::ResolvedUploadConfig;
 
 /// Spawn a background upload worker thread.
 ///
-/// Returns `(sender, join_handle)`. Send `PathBuf`s of completed parquet files
+/// Returns `(sender, join_handle)`. Send `PathBuf`s of completed files
 /// through the sender. Drop the sender to signal completion; the worker will
 /// drain remaining items and return.
 ///
-/// `hive_dir` is the local hive root — used to compute the S3 object key
+/// `base_dir` is the local root — used to compute the S3 object key
 /// by stripping this prefix from each file path.
+/// e.g. base_dir = `/output`, file = `/output/raw/works/shard_0000.parquet`
+///      → key = `{prefix}/raw/works/shard_0000.parquet`
 pub fn spawn_upload_worker(
     config: ResolvedUploadConfig,
-    hive_dir: PathBuf,
+    base_dir: PathBuf,
     channel_bound: usize,
 ) -> Result<(
     mpsc::SyncSender<PathBuf>,
@@ -33,7 +35,7 @@ pub fn spawn_upload_worker(
 
     let handle = std::thread::Builder::new()
         .name("upload-worker".to_string())
-        .spawn(move || upload_thread(config, hive_dir, rx))?;
+        .spawn(move || upload_thread(config, base_dir, rx))?;
 
     Ok((tx, handle))
 }
@@ -44,7 +46,7 @@ pub fn spawn_upload_worker(
 #[allow(clippy::needless_pass_by_value)]
 fn upload_thread(
     config: ResolvedUploadConfig,
-    hive_dir: PathBuf,
+    base_dir: PathBuf,
     rx: mpsc::Receiver<PathBuf>,
 ) -> Result<()> {
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -58,7 +60,7 @@ fn upload_thread(
         let mut bytes = 0u64;
 
         while let Ok(path) = rx.recv() {
-            match upload_file(&bucket, &config.prefix, &hive_dir, &path).await {
+            match upload_file(&bucket, &config.prefix, &base_dir, &path).await {
                 Ok(size) => {
                     uploaded += 1;
                     bytes += size;
@@ -109,23 +111,23 @@ pub fn create_bucket(config: &ResolvedUploadConfig) -> Result<Box<Bucket>> {
     Ok(bucket)
 }
 
-/// Upload a single parquet file to the bucket via streaming.
+/// Upload a single file to the bucket via streaming.
 ///
 /// Object key = `{prefix}/{relative_path}` where relative_path is
-/// the file path relative to hive_dir (e.g. `works/pub_year=2020/shard_0.parquet`).
+/// the file path relative to base_dir (e.g. `raw/works/shard_0000.parquet`).
 async fn upload_file(
     bucket: &Bucket,
     prefix: &str,
-    hive_dir: &std::path::Path,
+    base_dir: &std::path::Path,
     local_path: &std::path::Path,
 ) -> Result<u64> {
     let relative = local_path
-        .strip_prefix(hive_dir)
+        .strip_prefix(base_dir)
         .with_context(|| {
             format!(
                 "{} is not under {}",
                 local_path.display(),
-                hive_dir.display()
+                base_dir.display()
             )
         })?
         .to_string_lossy();
@@ -145,8 +147,14 @@ async fn upload_file(
         .await
         .with_context(|| format!("Cannot open {}", local_path.display()))?;
 
+    let ct = if key.ends_with(".parquet") {
+        "application/vnd.apache.parquet"
+    } else {
+        "application/json"
+    };
+
     bucket
-        .put_object_stream_with_content_type(&mut file, &key, "application/vnd.apache.parquet")
+        .put_object_stream_with_content_type(&mut file, &key, ct)
         .await
         .map_err(|e| anyhow::anyhow!("S3 put_object_stream failed for {key}: {e}"))?;
 
