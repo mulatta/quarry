@@ -23,7 +23,7 @@ use parquet::arrow::{ArrowWriter, ProjectionMask};
 use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::properties::WriterProperties;
 use rayon::prelude::*;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -121,15 +121,6 @@ fn manifest_hash(raw_dir: &Path) -> Result<String> {
 // Parquet writer properties
 // ============================================================
 
-fn writer_properties(config: &ResolvedHiveConfig) -> WriterProperties {
-    WriterProperties::builder()
-        .set_compression(Compression::ZSTD(
-            ZstdLevel::try_new(config.zstd_level).expect("valid zstd level"),
-        ))
-        .set_max_row_group_size(config.row_group_size)
-        .build()
-}
-
 // ============================================================
 // Work ID helpers
 // ============================================================
@@ -166,6 +157,21 @@ impl WorkPartitionMap {
         self.inner.insert(wid_num, packed);
     }
 
+    fn extend(&mut self, other: Self) {
+        self.inner.extend(other.inner);
+    }
+
+    /// Collect all unique (year, bucket) pairs present in the map.
+    fn unique_partitions(&self) -> Vec<(i32, usize)> {
+        let mut seen = FxHashSet::default();
+        for &packed in self.inner.values() {
+            let year = (packed >> 32) as i32;
+            let bucket = (packed & 0xFFFF_FFFF) as usize;
+            seen.insert((year, bucket));
+        }
+        seen.into_iter().collect()
+    }
+
     fn get(&self, wid_num: i64) -> Option<(i32, usize)> {
         self.inner.get(&wid_num).map(|&packed| {
             let year = (packed >> 32) as i32;
@@ -180,188 +186,10 @@ impl WorkPartitionMap {
 }
 
 // ============================================================
-// Partitioned writer
-// ============================================================
-
-/// Manages per-partition ArrowWriter instances.
-///
-/// Each (pub_year, shard_bucket) combination gets its own parquet file.
-/// Writers are lazily created and auto-flush row groups at the configured size.
-///
-/// Memory tracking uses actual Arrow buffer sizes (not `in_progress_size()` which
-/// returns encoded/compressed sizes that underestimate real memory).
-struct PartitionedWriter {
-    writers: HashMap<(i32, usize), ArrowWriter<BufWriter<fs::File>>>,
-    /// Unflushed rows per partition — reset to 0 on flush.
-    unflushed_rows: HashMap<(i32, usize), usize>,
-    /// Total unflushed rows across all writers.
-    total_unflushed_rows: usize,
-    /// Estimated bytes per row in Arrow memory (computed from first batch).
-    est_bytes_per_row: usize,
-    schema: arrow::datatypes::SchemaRef,
-    props: WriterProperties,
-    base_dir: PathBuf,
-    max_buffer_bytes: usize,
-}
-
-impl PartitionedWriter {
-    fn new(
-        schema: arrow::datatypes::SchemaRef,
-        props: WriterProperties,
-        base_dir: PathBuf,
-        max_buffer_bytes: usize,
-    ) -> Self {
-        Self {
-            writers: HashMap::new(),
-            unflushed_rows: HashMap::new(),
-            total_unflushed_rows: 0,
-            est_bytes_per_row: 0,
-            schema,
-            props,
-            base_dir,
-            max_buffer_bytes,
-        }
-    }
-
-    fn get_or_create(
-        &mut self,
-        year: i32,
-        bucket: usize,
-    ) -> Result<&mut ArrowWriter<BufWriter<fs::File>>> {
-        // Use entry API to avoid double lookup
-        use std::collections::hash_map::Entry;
-        match self.writers.entry((year, bucket)) {
-            Entry::Occupied(entry) => Ok(entry.into_mut()),
-            Entry::Vacant(entry) => {
-                let dir = self.base_dir.join(format!("pub_year={year}"));
-                fs::create_dir_all(&dir)?;
-                let path = dir.join(format!("shard_{bucket}.parquet"));
-                let file = BufWriter::new(fs::File::create(&path)?);
-                let writer =
-                    ArrowWriter::try_new(file, self.schema.clone(), Some(self.props.clone()))?;
-                Ok(entry.insert(writer))
-            }
-        }
-    }
-
-    /// Write a batch, splitting rows by partition assignment.
-    fn write_partitioned(
-        &mut self,
-        batch: &RecordBatch,
-        years: &[i32],
-        buckets: &[usize],
-    ) -> Result<()> {
-        let num_rows = batch.num_rows();
-        debug_assert_eq!(num_rows, years.len());
-        debug_assert_eq!(num_rows, buckets.len());
-
-        // Estimate bytes-per-row from the first batch using actual Arrow buffer sizes
-        if self.est_bytes_per_row == 0 && num_rows > 0 {
-            let total_mem: usize = batch
-                .columns()
-                .iter()
-                .map(|c| c.get_buffer_memory_size())
-                .sum();
-            self.est_bytes_per_row = (total_mem / num_rows).max(64);
-        }
-
-        // Group row indices by (year, bucket)
-        let mut groups: HashMap<(i32, usize), Vec<u32>> = HashMap::new();
-        for i in 0..num_rows {
-            groups
-                .entry((years[i], buckets[i]))
-                .or_default()
-                .push(i as u32);
-        }
-
-        // For each group, take rows and write to the partition's writer
-        for ((year, bucket), indices) in &groups {
-            let n = indices.len();
-            let indices_array = UInt32Array::from(indices.clone());
-            let columns: Vec<ArrayRef> = batch
-                .columns()
-                .iter()
-                .map(|col| compute::take(col.as_ref(), &indices_array, None))
-                .collect::<Result<Vec<_>, _>>()
-                .context("arrow take failed")?;
-            let sub_batch = RecordBatch::try_new(batch.schema(), columns)?;
-            let writer = self.get_or_create(*year, *bucket)?;
-            writer.write(&sub_batch)?;
-
-            // Track unflushed rows
-            *self.unflushed_rows.entry((*year, *bucket)).or_default() += n;
-            self.total_unflushed_rows += n;
-        }
-
-        // Flush largest writers if estimated memory exceeds budget
-        self.maybe_flush()?;
-        Ok(())
-    }
-
-    fn maybe_flush(&mut self) -> Result<()> {
-        let bpr = self.est_bytes_per_row.max(64);
-        loop {
-            let est_bytes = self.total_unflushed_rows * bpr;
-            if est_bytes <= self.max_buffer_bytes {
-                break;
-            }
-            // Find the partition with the most unflushed rows
-            let key = self
-                .unflushed_rows
-                .iter()
-                .filter(|(_, rows)| **rows > 0)
-                .max_by_key(|(_, rows)| **rows)
-                .map(|(k, _)| *k);
-            match key {
-                Some(key) => {
-                    let rows = self.unflushed_rows[&key];
-                    self.writers
-                        .get_mut(&key)
-                        .unwrap()
-                        .flush()
-                        .context("flush failed during memory management")?;
-                    self.total_unflushed_rows -= rows;
-                    *self.unflushed_rows.get_mut(&key).unwrap() = 0;
-                }
-                None => break,
-            }
-        }
-        Ok(())
-    }
-
-    /// Flush all buffers in parallel, then close writers (just footers).
-    fn close_all(self, pool: &rayon::ThreadPool) -> Result<()> {
-        let mut writers: Vec<_> = self.writers.into_iter().collect();
-        if writers.is_empty() {
-            return Ok(());
-        }
-
-        // Phase 1: parallel flush — compress buffered data, free Arrow memory
-        pool.install(|| {
-            writers
-                .par_iter_mut()
-                .try_for_each(|(_, writer)| -> Result<()> {
-                    writer.flush().context("flush failed during close")
-                })
-        })?;
-
-        // Phase 2: parallel close — write footers only (fast, no compression)
-        pool.install(|| {
-            writers
-                .into_par_iter()
-                .try_for_each(|((year, bucket), writer)| {
-                    writer
-                        .close()
-                        .map(|_| ())
-                        .with_context(|| format!("Failed to close pub_year={year}/shard_{bucket}"))
-                })
-        })
-    }
-}
-
-// ============================================================
 // Shard file listing
 // ============================================================
+
+type PartitionWriter = ArrowWriter<BufWriter<fs::File>>;
 
 fn list_shard_files(dir: &Path) -> Result<Vec<PathBuf>> {
     if !dir.exists() {
@@ -377,10 +205,243 @@ fn list_shard_files(dir: &Path) -> Result<Vec<PathBuf>> {
 }
 
 // ============================================================
+// Per-partition parallel write
+// ============================================================
+
+/// Pre-create ArrowWriters for all known partitions.
+///
+/// Each (year, bucket) gets its own file. Writers are wrapped in Mutex so
+/// rayon reader threads can write directly without a channel bottleneck.
+fn create_partition_writers(
+    partitions: &[(i32, usize)],
+    schema: &arrow::datatypes::SchemaRef,
+    props: &WriterProperties,
+    staging: &Path,
+) -> Result<HashMap<(i32, usize), std::sync::Mutex<PartitionWriter>>> {
+    let mut writers = HashMap::with_capacity(partitions.len());
+    for &(year, bucket) in partitions {
+        let dir = staging.join(format!("pub_year={year}"));
+        fs::create_dir_all(&dir)?;
+        let path = dir.join(format!("shard_{bucket}.parquet"));
+        let file = BufWriter::new(fs::File::create(&path)?);
+        let writer = ArrowWriter::try_new(file, schema.clone(), Some(props.clone()))?;
+        writers.insert((year, bucket), std::sync::Mutex::new(writer));
+    }
+    Ok(writers)
+}
+
+/// Parallel flush + close all partition writers.
+fn close_writers_parallel(
+    writers: HashMap<(i32, usize), std::sync::Mutex<PartitionWriter>>,
+    pool: &rayon::ThreadPool,
+) -> Result<()> {
+    let entries: Vec<_> = writers
+        .into_iter()
+        .map(|(key, mutex)| (key, mutex.into_inner().expect("mutex not poisoned")))
+        .collect();
+
+    if entries.is_empty() {
+        return Ok(());
+    }
+
+    // Parallel close — each writer flushes its buffered data (ZSTD compression) and writes footer.
+    // This is the CPU-heavy phase; parallelising across all partitions saturates cores.
+    pool.install(|| {
+        entries
+            .into_par_iter()
+            .try_for_each(|((year, bucket), writer)| {
+                writer
+                    .close()
+                    .map(|_| ())
+                    .with_context(|| format!("Failed to close pub_year={year}/shard_{bucket}"))
+            })
+    })
+}
+
+/// Read one shard, route each batch via `route_fn`, and write sub-batches
+/// directly to the per-partition Mutex writers.
+///
+/// `route_fn` returns a map of (year, bucket) → row indices for each batch.
+fn read_and_write_shard<F>(
+    shard_path: &Path,
+    schema: &arrow::datatypes::SchemaRef,
+    writers: &HashMap<(i32, usize), std::sync::Mutex<PartitionWriter>>,
+    per_writer_mem_limit: usize,
+    route_fn: &F,
+) -> Result<()>
+where
+    F: Fn(&RecordBatch) -> Result<HashMap<(i32, usize), Vec<u32>>>,
+{
+    let file = fs::File::open(shard_path)
+        .with_context(|| format!("Cannot open {}", shard_path.display()))?;
+    let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+        .with_context(|| format!("Invalid parquet: {}", shard_path.display()))?
+        .with_batch_size(READER_BATCH_SIZE)
+        .build()
+        .with_context(|| format!("Cannot build reader: {}", shard_path.display()))?;
+
+    for batch_result in reader {
+        let batch = coerce_batch(batch_result?, schema)?;
+        let groups = route_fn(&batch)?;
+
+        for ((year, bucket), indices) in &groups {
+            let indices_array = UInt32Array::from(indices.clone());
+            let columns: Vec<ArrayRef> = batch
+                .columns()
+                .iter()
+                .map(|col| compute::take(col.as_ref(), &indices_array, None))
+                .collect::<Result<Vec<_>, _>>()
+                .context("arrow take failed")?;
+            let sub_batch = RecordBatch::try_new(batch.schema(), columns)?;
+
+            let writer_mutex = writers
+                .get(&(*year, *bucket))
+                .with_context(|| format!("No writer for pub_year={year}/shard_{bucket}"))?;
+            let mut guard = writer_mutex.lock().expect("mutex not poisoned");
+            guard.write(&sub_batch)?;
+            if guard.memory_size() > per_writer_mem_limit {
+                guard.flush()?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Process shards in parallel: readers decode + route + write directly to
+/// per-partition Mutex<ArrowWriter>. No channel or dedicated writer thread.
+fn parallel_process<F>(
+    shard_files: &[PathBuf],
+    schema: &arrow::datatypes::SchemaRef,
+    writers: &HashMap<(i32, usize), std::sync::Mutex<PartitionWriter>>,
+    per_writer_mem_limit: usize,
+    pool: &rayon::ThreadPool,
+    pb: &ProgressBar,
+    route_fn: F,
+) -> Result<()>
+where
+    F: Fn(&RecordBatch) -> Result<HashMap<(i32, usize), Vec<u32>>> + Send + Sync,
+{
+    pb.set_length(shard_files.len() as u64);
+
+    let read_error: std::sync::Mutex<Option<anyhow::Error>> = std::sync::Mutex::new(None);
+
+    pool.install(|| {
+        shard_files.par_iter().for_each(|shard_path| {
+            if read_error.lock().expect("not poisoned").is_some() {
+                return;
+            }
+
+            if let Err(e) =
+                read_and_write_shard(shard_path, schema, writers, per_writer_mem_limit, &route_fn)
+            {
+                let mut guard = read_error.lock().expect("not poisoned");
+                if guard.is_none() {
+                    *guard = Some(e.context(format!("Failed: {}", shard_path.display())));
+                }
+            }
+            pb.inc(1);
+        });
+    });
+
+    if let Some(e) = read_error.into_inner().expect("not poisoned") {
+        return Err(e);
+    }
+
+    Ok(())
+}
+
+fn writer_properties(config: &ResolvedHiveConfig) -> WriterProperties {
+    WriterProperties::builder()
+        .set_compression(Compression::ZSTD(
+            ZstdLevel::try_new(config.zstd_level).expect("valid zstd level"),
+        ))
+        .set_max_row_group_size(config.row_group_size)
+        .build()
+}
+
+/// Build partition map from raw works shards (projection: 2 columns only).
+///
+/// Parallelised with rayon: each thread builds a thread-local map, then merged.
+fn rebuild_partition_map_from(
+    config: &ResolvedHiveConfig,
+    shard_files: &[PathBuf],
+    pool: &rayon::ThreadPool,
+    pb: &ProgressBar,
+) -> Result<WorkPartitionMap> {
+    let num_shards = config.num_shards;
+
+    pb.set_length(shard_files.len() as u64);
+
+    let map = pool.install(|| {
+        shard_files
+            .par_iter()
+            .map(|shard_path| -> Result<WorkPartitionMap> {
+                let mut local = WorkPartitionMap::new();
+                let file = fs::File::open(shard_path)?;
+                let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+
+                let arrow_schema = builder.schema();
+                let work_id_root = arrow_schema
+                    .index_of("work_id")
+                    .map_err(|e| anyhow::anyhow!("works schema missing work_id: {e}"))?;
+                let pub_year_root = arrow_schema
+                    .index_of("publication_year")
+                    .map_err(|e| anyhow::anyhow!("works schema missing publication_year: {e}"))?;
+                let mask =
+                    ProjectionMask::roots(builder.parquet_schema(), [work_id_root, pub_year_root]);
+
+                let reader = builder
+                    .with_projection(mask)
+                    .with_batch_size(READER_BATCH_SIZE)
+                    .build()?;
+
+                for batch_result in reader {
+                    let batch = batch_result?;
+                    let work_id_col = batch
+                        .column_by_name("work_id")
+                        .context("projected batch missing work_id")?
+                        .as_any()
+                        .downcast_ref::<StringArray>()
+                        .context("work_id must be Utf8")?;
+                    let pub_year_col = batch
+                        .column_by_name("publication_year")
+                        .context("projected batch missing publication_year")?;
+                    let pub_year_array = pub_year_col.as_any().downcast_ref::<Int32Array>();
+
+                    for i in 0..batch.num_rows() {
+                        if work_id_col.is_null(i) {
+                            continue;
+                        }
+                        let year = if pub_year_col.is_null(i) {
+                            0i32
+                        } else {
+                            pub_year_array
+                                .expect("publication_year should be Int32")
+                                .value(i)
+                        };
+                        let wid_num = work_id_num(work_id_col.value(i));
+                        let bucket = (wid_num.unsigned_abs() % num_shards as u64) as usize;
+                        local.insert(wid_num, year, bucket as u32);
+                    }
+                }
+
+                pb.inc(1);
+                Ok(local)
+            })
+            .try_reduce(WorkPartitionMap::new, |mut a, b| {
+                a.extend(b);
+                Ok(a)
+            })
+    })?;
+
+    Ok(map)
+}
+
+// ============================================================
 // Per-table processing
 // ============================================================
 
-/// Process works table: build partition map + write hive parquet.
+/// Process works table: 2-pass (build partition map, then parallel read+write).
 fn process_works(
     config: &ResolvedHiveConfig,
     pool: &rayon::ThreadPool,
@@ -394,7 +455,19 @@ fn process_works(
         anyhow::bail!("No works shard files found in {}", config.raw_dir.display());
     }
 
-    // Read schema from first file
+    // Pass 1: build partition map (projection: work_id + publication_year only)
+    pb.set_message("building partition map...");
+    let t_map = Instant::now();
+    let partition_map = rebuild_partition_map_from(config, &shard_files, pool, pb)?;
+    tracing::info!(
+        "{:<20} partition map: {} entries from {} shards [{}]",
+        "works",
+        partition_map.len(),
+        shard_files.len(),
+        fmt_elapsed(t_map.elapsed()),
+    );
+
+    // Pass 2: parallel read + write via per-partition Mutex writers
     let schema = {
         let file = fs::File::open(&shard_files[0])?;
         ParquetRecordBatchReaderBuilder::try_new(file)?
@@ -408,41 +481,41 @@ fn process_works(
     let work_id_idx = schema
         .index_of("work_id")
         .map_err(|e| anyhow::anyhow!("works schema missing work_id: {e}"))?;
+    let num_shards = config.num_shards;
 
-    let max_buffer = config.memory_limit_bytes * 2 / 5; // 40% for writer buffers
-    let mut writer = PartitionedWriter::new(
-        schema.clone(),
-        writer_properties(config),
-        staging,
-        max_buffer,
+    let props = writer_properties(config);
+    let partitions = partition_map.unique_partitions();
+    let writers = create_partition_writers(&partitions, &schema, &props, &staging)?;
+    let per_writer_mem_limit = config.memory_limit_bytes * 9 / 10 / partitions.len().max(1);
+    tracing::info!(
+        "{:<20} writing {} shards \u{2192} {} partitions (mem limit {}/writer)",
+        "works",
+        shard_files.len(),
+        partitions.len(),
+        format_bytes(per_writer_mem_limit),
     );
-    let mut partition_map = WorkPartitionMap::new();
 
-    pb.set_length(shard_files.len() as u64);
-    for shard_path in &shard_files {
-        let file = fs::File::open(shard_path)
-            .with_context(|| format!("Cannot open {}", shard_path.display()))?;
-        let reader = ParquetRecordBatchReaderBuilder::try_new(file)
-            .with_context(|| format!("Invalid parquet: {}", shard_path.display()))?
-            .with_batch_size(READER_BATCH_SIZE)
-            .build()
-            .with_context(|| format!("Cannot build reader: {}", shard_path.display()))?;
+    pb.set_position(0);
+    pb.set_message("writing partitions...");
 
-        for batch_result in reader {
-            let batch = coerce_batch(batch_result?, &schema)?;
+    parallel_process(
+        &shard_files,
+        &schema,
+        &writers,
+        per_writer_mem_limit,
+        pool,
+        pb,
+        |batch| {
             let num_rows = batch.num_rows();
-
             let work_id_col = batch
                 .column(work_id_idx)
                 .as_any()
                 .downcast_ref::<StringArray>()
                 .context("work_id column must be Utf8")?;
-
             let pub_year_col = batch.column(pub_year_idx);
             let pub_year_array = pub_year_col.as_any().downcast_ref::<Int32Array>();
 
-            let mut years = Vec::with_capacity(num_rows);
-            let mut buckets = Vec::with_capacity(num_rows);
+            let mut groups: HashMap<(i32, usize), Vec<u32>> = HashMap::new();
 
             for i in 0..num_rows {
                 let year = if pub_year_col.is_null(i) {
@@ -452,35 +525,31 @@ fn process_works(
                         .expect("publication_year should be Int32")
                         .value(i)
                 };
-
-                let (wid_num, bucket) = if work_id_col.is_null(i) {
-                    (0i64, 0usize)
+                let bucket = if work_id_col.is_null(i) {
+                    0usize
                 } else {
-                    let wid = work_id_col.value(i);
-                    let num = work_id_num(wid);
-                    let b = (num.unsigned_abs() % config.num_shards as u64) as usize;
-                    (num, b)
+                    let num = work_id_num(work_id_col.value(i));
+                    (num.unsigned_abs() % num_shards as u64) as usize
                 };
-
-                years.push(year);
-                buckets.push(bucket);
-
-                if !work_id_col.is_null(i) {
-                    partition_map.insert(wid_num, year, bucket as u32);
-                }
+                groups.entry((year, bucket)).or_default().push(i as u32);
             }
 
-            writer.write_partitioned(&batch, &years, &buckets)?;
-        }
+            Ok(groups)
+        },
+    )?;
 
-        pb.inc(1);
-    }
+    tracing::info!(
+        "{:<20} read done, compressing {} partitions",
+        "works",
+        partitions.len(),
+    );
+    pb.set_message("compressing...");
+    close_writers_parallel(writers, pool)?;
 
-    writer.close_all(pool)?;
     Ok(partition_map)
 }
 
-/// Process a child table: look up partition assignment from works map.
+/// Process a child table: parallel read with partition_map lookup.
 fn process_child(
     table: &str,
     config: &ResolvedHiveConfig,
@@ -507,84 +576,69 @@ fn process_child(
         .index_of("work_id")
         .map_err(|e| anyhow::anyhow!("{table} schema missing work_id: {e}"))?;
 
-    let max_buffer = config.memory_limit_bytes * 2 / 5;
-    let mut writer = PartitionedWriter::new(
-        schema.clone(),
-        writer_properties(config),
-        staging,
-        max_buffer,
+    let unmatched = std::sync::atomic::AtomicUsize::new(0);
+
+    let props = writer_properties(config);
+    let partitions = partition_map.unique_partitions();
+    let writers = create_partition_writers(&partitions, &schema, &props, &staging)?;
+    let per_writer_mem_limit = config.memory_limit_bytes * 9 / 10 / partitions.len().max(1);
+    tracing::info!(
+        "{:<20} writing {} shards \u{2192} {} partitions",
+        table,
+        shard_files.len(),
+        partitions.len(),
     );
-    let mut unmatched = 0usize;
 
-    pb.set_length(shard_files.len() as u64);
-    for shard_path in &shard_files {
-        let file = fs::File::open(shard_path)
-            .with_context(|| format!("Cannot open {}", shard_path.display()))?;
-        let reader = ParquetRecordBatchReaderBuilder::try_new(file)
-            .with_context(|| format!("Invalid parquet: {}", shard_path.display()))?
-            .with_batch_size(READER_BATCH_SIZE)
-            .build()
-            .with_context(|| format!("Cannot build reader: {}", shard_path.display()))?;
-
-        for batch_result in reader {
-            let batch = coerce_batch(batch_result?, &schema)?;
+    parallel_process(
+        &shard_files,
+        &schema,
+        &writers,
+        per_writer_mem_limit,
+        pool,
+        pb,
+        |batch| {
             let num_rows = batch.num_rows();
-
             let work_id_col = batch
                 .column(work_id_idx)
                 .as_any()
                 .downcast_ref::<StringArray>()
                 .context("work_id column must be Utf8")?;
 
-            let mut years = Vec::with_capacity(num_rows);
-            let mut buckets = Vec::with_capacity(num_rows);
-            let mut matched = Vec::with_capacity(num_rows);
+            let mut groups: HashMap<(i32, usize), Vec<u32>> = HashMap::new();
 
             for i in 0..num_rows {
                 if work_id_col.is_null(i) {
-                    unmatched += 1;
+                    unmatched.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     continue;
                 }
                 let wid_num = work_id_num(work_id_col.value(i));
                 match partition_map.get(wid_num) {
                     Some((year, bucket)) => {
-                        years.push(year);
-                        buckets.push(bucket);
-                        matched.push(i as u32);
+                        groups.entry((year, bucket)).or_default().push(i as u32);
                     }
                     None => {
-                        unmatched += 1;
+                        unmatched.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
                 }
             }
 
-            if matched.len() == num_rows {
-                // All rows matched — write directly
-                writer.write_partitioned(&batch, &years, &buckets)?;
-            } else if !matched.is_empty() {
-                // Filter to matched rows only
-                let indices = UInt32Array::from(matched);
-                let columns: Vec<ArrayRef> = batch
-                    .columns()
-                    .iter()
-                    .map(|col| compute::take(col.as_ref(), &indices, None))
-                    .collect::<Result<Vec<_>, _>>()
-                    .context("arrow take failed")?;
-                let filtered = RecordBatch::try_new(batch.schema(), columns)?;
-                writer.write_partitioned(&filtered, &years, &buckets)?;
-            }
-        }
+            Ok(groups)
+        },
+    )?;
 
-        pb.inc(1);
+    tracing::info!(
+        "{:<20} read done, compressing {} partitions",
+        table,
+        partitions.len(),
+    );
+    pb.set_message("compressing...");
+    close_writers_parallel(writers, pool)?;
+
+    let u = unmatched.load(std::sync::atomic::Ordering::Relaxed);
+    if u > 0 {
+        tracing::warn!("{:<20} {} rows had no matching work_id (skipped)", table, u,);
     }
 
-    if unmatched > 0 {
-        tracing::warn!(
-            "{table}: {unmatched} rows had no matching work_id in works table (skipped)"
-        );
-    }
-
-    writer.close_all(pool)?;
     Ok(())
 }
 
@@ -861,9 +915,10 @@ pub fn run_hive(
                 ));
                 global_bar.inc(1);
                 tracing::info!(
-                    "works completed in {} ({} entries in partition map)",
+                    "{:<20} completed in {} ({} works)",
+                    "works",
                     fmt_elapsed(elapsed),
-                    map.len()
+                    map.len(),
                 );
                 map
             }
@@ -877,7 +932,7 @@ pub fn run_hive(
         // Works already done — rebuild partition map from existing hive works
         let pb = make_table_bar(multi, is_tty, "works (map)");
         let t = Instant::now();
-        let map = rebuild_partition_map(config, &pb)?;
+        let map = rebuild_partition_map(config, &pool, &pb)?;
         let elapsed = t.elapsed();
         pb.finish_with_message(format!(
             "map rebuilt ({}, {} works)",
@@ -885,9 +940,10 @@ pub fn run_hive(
             map.len()
         ));
         tracing::info!(
-            "Partition map rebuilt in {} ({} entries)",
+            "{:<20} partition map rebuilt ({} entries) [{}]",
+            "works",
+            map.len(),
             fmt_elapsed(elapsed),
-            map.len()
         );
         map
     };
@@ -907,7 +963,7 @@ pub fn run_hive(
                 let elapsed = t.elapsed();
                 pb.finish_with_message(format!("done ({})", fmt_elapsed(elapsed)));
                 global_bar.inc(1);
-                tracing::info!("{table} completed in {}", fmt_elapsed(elapsed));
+                tracing::info!("{:<20} completed in {}", table, fmt_elapsed(elapsed));
             }
             Err(e) => {
                 cleanup_staging(&config.staging_dir, table);
@@ -940,70 +996,14 @@ pub fn run_hive(
 
 /// Rebuild partition map from raw works shards (for resume).
 ///
-/// Uses column projection to read only `work_id` + `publication_year` (2 of 84
-/// columns), reducing I/O by ~97% compared to a full read.
+/// Delegates to `rebuild_partition_map_from` which parallelises the read.
 fn rebuild_partition_map(
     config: &ResolvedHiveConfig,
+    pool: &rayon::ThreadPool,
     pb: &ProgressBar,
 ) -> Result<WorkPartitionMap> {
     let shard_files = list_shard_files(&config.raw_dir.join("works"))?;
-    let mut map = WorkPartitionMap::new();
-
-    pb.set_length(shard_files.len() as u64);
-    for shard_path in &shard_files {
-        let file = fs::File::open(shard_path)?;
-        let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
-
-        // Project only the 2 columns needed for partition routing
-        let arrow_schema = builder.schema();
-        let work_id_root = arrow_schema
-            .index_of("work_id")
-            .map_err(|e| anyhow::anyhow!("works schema missing work_id: {e}"))?;
-        let pub_year_root = arrow_schema
-            .index_of("publication_year")
-            .map_err(|e| anyhow::anyhow!("works schema missing publication_year: {e}"))?;
-        let mask = ProjectionMask::roots(builder.parquet_schema(), [work_id_root, pub_year_root]);
-
-        let reader = builder
-            .with_projection(mask)
-            .with_batch_size(READER_BATCH_SIZE)
-            .build()?;
-
-        for batch_result in reader {
-            let batch = batch_result?;
-
-            let work_id_col = batch
-                .column_by_name("work_id")
-                .context("projected batch missing work_id")?
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .context("work_id must be Utf8")?;
-            let pub_year_col = batch
-                .column_by_name("publication_year")
-                .context("projected batch missing publication_year")?;
-            let pub_year_array = pub_year_col.as_any().downcast_ref::<Int32Array>();
-
-            for i in 0..batch.num_rows() {
-                if work_id_col.is_null(i) {
-                    continue;
-                }
-                let year = if pub_year_col.is_null(i) {
-                    0i32
-                } else {
-                    pub_year_array
-                        .expect("publication_year should be Int32")
-                        .value(i)
-                };
-                let wid_num = work_id_num(work_id_col.value(i));
-                let bucket = (wid_num.unsigned_abs() % config.num_shards as u64) as usize;
-                map.insert(wid_num, year, bucket as u32);
-            }
-        }
-
-        pb.inc(1);
-    }
-
-    Ok(map)
+    rebuild_partition_map_from(config, &shard_files, pool, pb)
 }
 
 // ============================================================
@@ -1174,7 +1174,7 @@ mod tests {
     }
 
     #[test]
-    fn partitioned_writer_basic() {
+    fn partition_writers_basic() {
         use arrow::array::Int32Array;
         use arrow::datatypes::{DataType, Field, Schema};
         use std::sync::Arc;
@@ -1187,20 +1187,34 @@ mod tests {
             .build()
             .unwrap();
 
-        let mut writer = PartitionedWriter::new(
-            schema.clone(),
-            props,
-            dir.path().to_path_buf(),
-            1_000_000_000,
-        );
+        let partitions = vec![(2020, 0), (2021, 1)];
+        let writers = create_partition_writers(&partitions, &schema, &props, dir.path()).unwrap();
 
         let batch =
             RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(vec![1, 2, 3]))]).unwrap();
 
-        let years = vec![2020, 2021, 2020];
-        let buckets = vec![0, 1, 0];
-        writer.write_partitioned(&batch, &years, &buckets).unwrap();
-        writer.close_all(&pool).unwrap();
+        // Route rows 0,2 → (2020,0), row 1 → (2021,1)
+        let groups: HashMap<(i32, usize), Vec<u32>> =
+            HashMap::from([((2020, 0), vec![0, 2]), ((2021, 1), vec![1])]);
+
+        for ((year, bucket), indices) in &groups {
+            let indices_array = UInt32Array::from(indices.clone());
+            let columns: Vec<ArrayRef> = batch
+                .columns()
+                .iter()
+                .map(|col| compute::take(col.as_ref(), &indices_array, None).unwrap())
+                .collect();
+            let sub_batch = RecordBatch::try_new(batch.schema(), columns).unwrap();
+            writers
+                .get(&(*year, *bucket))
+                .unwrap()
+                .lock()
+                .unwrap()
+                .write(&sub_batch)
+                .unwrap();
+        }
+
+        close_writers_parallel(writers, &pool).unwrap();
 
         assert!(dir.path().join("pub_year=2020/shard_0.parquet").exists());
         assert!(dir.path().join("pub_year=2021/shard_1.parquet").exists());
