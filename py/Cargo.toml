@@ -1,0 +1,21 @@
+[package]
+name = "papeline-py"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "papeline"
+crate-type = ["cdylib"]
+
+[dependencies]
+papeline-core = { path = "../core" }
+pyo3 = { workspace = true }
+rustc-hash = { workspace = true }
+indicatif = { workspace = true }
+
+[lints]
+workspace = true
+
+[lints.clippy]
+too_many_arguments = "allow"
+needless_pass_by_value = "allow"
