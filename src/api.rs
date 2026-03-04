@@ -8,7 +8,7 @@ use anyhow::Context;
 use serde::Deserialize;
 
 use crate::oa::{OAShard, parse_updated_date};
-use crate::stream::{http_client, shared_runtime};
+use crate::stream::HttpPool;
 
 const MANIFEST_BASE: &str = "https://openalex.s3.amazonaws.com/data";
 
@@ -31,14 +31,14 @@ struct EntryMeta {
 
 /// Fetch the OpenAlex manifest for `entity` (e.g., "works") and return shards
 /// with HTTPS URLs. Shard indices are assigned by manifest array order.
-pub fn fetch_manifest(entity: &str) -> anyhow::Result<Vec<OAShard>> {
+pub fn fetch_manifest(pool: &HttpPool, entity: &str) -> anyhow::Result<Vec<OAShard>> {
     let url = format!("{MANIFEST_BASE}/{entity}/manifest");
     tracing::info!("Fetching OpenAlex {entity} manifest...");
 
-    let body: String = shared_runtime()
+    let body: String = pool
         .handle()
         .block_on(async {
-            http_client()
+            pool.client()
                 .get(&url)
                 .send()
                 .await?

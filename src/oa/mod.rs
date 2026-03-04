@@ -5,11 +5,13 @@
 mod pipeline;
 
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::error::ShardError;
 use crate::progress::ProgressReporter;
 use crate::provider::{RunContext, ShardStats};
 use crate::sink::is_valid_parquet;
+use crate::stream::HttpPool;
 use crate::transform::Filter;
 
 // ============================================================
@@ -92,6 +94,7 @@ pub fn is_shard_complete(output_dir: &Path, shard_idx: usize) -> bool {
 /// OpenAlex provider for the papeline pipeline.
 pub struct OAProvider {
     pub filter: Filter,
+    pub pool: Arc<HttpPool>,
 }
 
 impl crate::provider::Provider for OAProvider {
@@ -108,7 +111,7 @@ impl crate::provider::Provider for OAProvider {
         ctx: &RunContext,
         pb: &dyn ProgressReporter,
     ) -> Result<ShardStats, ShardError> {
-        pipeline::process_works_shard(shard, ctx, &self.filter, pb)
+        pipeline::process_works_shard(shard, ctx, &self.filter, pb, &self.pool)
     }
 }
 

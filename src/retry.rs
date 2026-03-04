@@ -4,7 +4,6 @@ use std::time::Duration;
 
 use crate::error::ShardError;
 use crate::progress::ProgressReporter;
-use crate::stream::http_config;
 
 /// Exponential backoff: 2^attempt seconds (2s, 4s, 8s, ...)
 pub const fn backoff_duration(attempt: u32) -> Duration {
@@ -18,9 +17,9 @@ pub const fn backoff_duration(attempt: u32) -> Duration {
 pub fn retry_with_backoff<T>(
     shard_label: &str,
     pb: &dyn ProgressReporter,
+    max_retries: u32,
     mut attempt_fn: impl FnMut() -> Result<T, ShardError>,
 ) -> Result<T, ShardError> {
-    let max_retries = http_config().max_retries;
     let mut attempt = 0u32;
     loop {
         match attempt_fn() {
@@ -59,7 +58,7 @@ mod tests {
     fn retry_succeeds_first_try() {
         let pb = NoopReporter;
         let mut calls = 0u32;
-        let result = retry_with_backoff("test", &pb, || {
+        let result = retry_with_backoff("test", &pb, 3, || {
             calls += 1;
             Ok::<_, ShardError>(42)
         });
@@ -71,7 +70,7 @@ mod tests {
     fn retry_non_retryable_fails_immediately() {
         let pb = NoopReporter;
         let mut calls = 0u32;
-        let result = retry_with_backoff("test", &pb, || {
+        let result = retry_with_backoff("test", &pb, 3, || {
             calls += 1;
             // HTTP 403 is non-retryable
             Err::<(), _>(ShardError::Stream(StreamError::Http {

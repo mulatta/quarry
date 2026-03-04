@@ -31,7 +31,7 @@ use manifest::{ManifestDiff, ManifestSnapshot, compute_manifest_diff, delete_sha
 use oa::{OAProvider, OAShard, TABLES, is_shard_complete};
 use progress::{IndicatifMakeWriter, ProgressContext, SharedProgress};
 use provider::{RunContext, run_provider};
-use stream::{HttpConfig as StreamHttpConfig, init_http, set_http_config};
+use stream::HttpPool;
 
 // ============================================================
 // CLI definition
@@ -378,6 +378,8 @@ struct RunPlan {
     auto_clean_raw: bool,
     /// Upload config from TOML (for streaming push to R2).
     upload_cfg: config::UploadConfig,
+    /// Shared HTTP pool for shard downloads.
+    pool: Arc<HttpPool>,
 }
 
 /// Outcome of pipeline execution (only produced when shards were processed).
@@ -408,20 +410,21 @@ fn prepare_run(
     })?;
     let resolved = resolve_config(output_dir, &file_cfg, args);
 
-    // 2. Initialize HTTP client
-    init_http(resolved.concurrency).map_err(|e| {
-        tracing::error!("Failed to initialize HTTP: {e}");
-        ExitCode::from(2)
-    })?;
+    // 2. Initialize HTTP pool
+    let pool = Arc::new(
+        HttpPool::new(
+            resolved.concurrency,
+            std::time::Duration::from_secs(resolved.read_timeout),
+            resolved.max_retries,
+        )
+        .map_err(|e| {
+            tracing::error!("Failed to initialize HTTP: {e}");
+            ExitCode::from(2)
+        })?,
+    );
 
-    // 3. Configure HTTP timeouts
-    set_http_config(StreamHttpConfig {
-        read_timeout: std::time::Duration::from_secs(resolved.read_timeout),
-        max_retries: resolved.max_retries,
-    });
-
-    // 4. Fetch manifest
-    let all_shards = api::fetch_manifest("works").map_err(|e| {
+    // 3. Fetch manifest
+    let all_shards = api::fetch_manifest(&pool, "works").map_err(|e| {
         tracing::error!("Failed to fetch manifest: {e}");
         ExitCode::from(2)
     })?;
@@ -563,6 +566,7 @@ fn prepare_run(
         auto_hive,
         auto_clean_raw,
         upload_cfg: file_cfg.upload,
+        pool,
     })
 }
 
@@ -597,6 +601,7 @@ fn execute_run(
 
     let provider = OAProvider {
         filter: plan.resolved.filter.clone(),
+        pool: plan.pool.clone(),
     };
 
     // Log active filter at INFO so non-TTY environments see it
@@ -993,11 +998,14 @@ fn print_dry_run(
 
 fn cmd_status(output_dir: &Path) -> ExitCode {
     let raw_dir = output_dir.join("raw");
-    if let Err(e) = init_http(1) {
-        eprintln!("Failed to initialize HTTP: {e}");
-        return ExitCode::from(2);
-    }
-    match api::fetch_manifest("works") {
+    let pool = match HttpPool::new(1, std::time::Duration::from_secs(30), 3) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("Failed to initialize HTTP: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    match api::fetch_manifest(&pool, "works") {
         Ok(shards) => {
             let total_records: u64 = shards.iter().map(|s| s.record_count).sum();
             let total_bytes: u64 = shards.iter().filter_map(|s| s.content_length).sum();

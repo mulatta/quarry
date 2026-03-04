@@ -11,7 +11,7 @@ use crate::error::ShardError;
 use crate::progress::{ProgressReporter, fmt_num};
 use crate::provider::{RunContext, ShardStats};
 use crate::sink::ParquetSink;
-use crate::stream::ByteCounter;
+use crate::stream::{ByteCounter, HttpPool};
 use arrow::array::RecordBatch;
 
 use crate::schema;
@@ -215,14 +215,15 @@ pub(super) fn process_works_shard(
     ctx: &RunContext,
     filter: &Filter,
     pb: &dyn ProgressReporter,
+    pool: &HttpPool,
 ) -> Result<ShardStats, ShardError> {
     let shard_label = format!("works_{:04}", shard.shard_idx);
 
-    crate::retry::retry_with_backoff(&shard_label, pb, || {
+    crate::retry::retry_with_backoff(&shard_label, pb, pool.max_retries, || {
         let t0 = std::time::Instant::now();
 
         let (mut reader, counter, total_bytes) =
-            crate::stream::open_gzip_reader(&shard.url).map_err(ShardError::Stream)?;
+            crate::stream::open_gzip_reader(pool, &shard.url).map_err(ShardError::Stream)?;
 
         if let Some(total) = total_bytes.or(shard.content_length) {
             pb.upgrade_to_determinate(total);

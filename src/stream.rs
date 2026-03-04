@@ -5,8 +5,8 @@
 
 use std::io::{self, BufReader, Read};
 use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
 use std::task::Context;
 use std::time::Duration;
 
@@ -20,34 +20,58 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Response timeout (connect + headers, not including body download)
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Configurable HTTP settings for timeouts and retries.
-#[derive(Debug, Clone)]
-pub struct HttpConfig {
+// ============================================================
+// HttpPool — shared HTTP client + tokio runtime
+// ============================================================
+
+/// Shared HTTP resources for parallel shard downloads.
+///
+/// Replaces the former global `OnceLock` statics, making the library
+/// safe for multiple concurrent instances (e.g. via PyO3).
+pub struct HttpPool {
+    client: reqwest::Client,
+    runtime: tokio::runtime::Runtime,
     /// Read timeout for stall detection (no data within this duration = stall)
     pub read_timeout: Duration,
     /// Maximum retry attempts for transient failures
     pub max_retries: u32,
 }
 
-impl Default for HttpConfig {
-    fn default() -> Self {
-        Self {
-            read_timeout: Duration::from_secs(30),
-            max_retries: 3,
-        }
+impl HttpPool {
+    /// Create a pool tuned for `concurrency` parallel streams.
+    pub fn new(
+        concurrency: usize,
+        read_timeout: Duration,
+        max_retries: u32,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let client = reqwest::Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .pool_max_idle_per_host(concurrency)
+            .build()?;
+
+        let threads = (concurrency / 4).max(2);
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(threads)
+            .enable_all()
+            .build()?;
+
+        Ok(Self {
+            client,
+            runtime,
+            read_timeout,
+            max_retries,
+        })
     }
-}
 
-static HTTP_CONFIG: OnceLock<HttpConfig> = OnceLock::new();
+    /// Tokio runtime handle (for block_on in sync contexts).
+    pub fn handle(&self) -> tokio::runtime::Handle {
+        self.runtime.handle().clone()
+    }
 
-/// Set global HTTP configuration. Must be called before any HTTP operations.
-pub fn set_http_config(config: HttpConfig) {
-    HTTP_CONFIG.set(config).ok();
-}
-
-/// Get current HTTP configuration.
-pub fn http_config() -> &'static HttpConfig {
-    HTTP_CONFIG.get_or_init(HttpConfig::default)
+    /// Reqwest client reference.
+    pub fn client(&self) -> &reqwest::Client {
+        &self.client
+    }
 }
 
 /// Error types for stream operations
@@ -120,45 +144,6 @@ impl From<std::io::Error> for StreamError {
     }
 }
 
-// ---- Shared HTTP client + tokio runtime (OnceLock) ----
-
-static SHARED_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-static SHARED_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-
-/// Initialize HTTP client and tokio runtime tuned for `concurrency` parallel streams.
-/// Safe to call multiple times — first call wins.
-/// Call before any HTTP operations to override defaults.
-pub fn init_http(concurrency: usize) -> Result<(), Box<dyn std::error::Error>> {
-    let client = reqwest::Client::builder()
-        .connect_timeout(CONNECT_TIMEOUT)
-        .pool_max_idle_per_host(concurrency)
-        .build()?;
-    SHARED_CLIENT.set(client).ok(); // first call wins
-
-    let threads = (concurrency / 4).max(2);
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(threads)
-        .enable_all()
-        .build()?;
-    SHARED_RUNTIME.set(runtime).ok();
-
-    Ok(())
-}
-
-/// Get shared HTTP client. Panics if `init_http` was not called first.
-pub fn http_client() -> &'static reqwest::Client {
-    SHARED_CLIENT
-        .get()
-        .expect("init_http() must be called before http_client()")
-}
-
-/// Get shared tokio runtime. Panics if `init_http` was not called first.
-pub fn shared_runtime() -> &'static tokio::runtime::Runtime {
-    SHARED_RUNTIME
-        .get()
-        .expect("init_http() must be called before shared_runtime()")
-}
-
 /// Buffer size for gzip stream reader (256KB)
 const GZIP_BUF_SIZE: usize = 256 * 1024;
 
@@ -171,12 +156,17 @@ pub type ByteCounter = Arc<AtomicU64>;
 /// HTTP GET -> gunzip -> buffered reader with byte counter
 ///
 /// Returns (reader, byte_counter, total_bytes)
-pub fn open_gzip_reader(url: &str) -> Result<(GzipReader, ByteCounter, Option<u64>), StreamError> {
+pub fn open_gzip_reader(
+    pool: &HttpPool,
+    url: &str,
+) -> Result<(GzipReader, ByteCounter, Option<u64>), StreamError> {
     let url = url.to_string();
+    let handle = pool.handle();
+    let read_timeout = pool.read_timeout;
 
-    let (reader, total_bytes) = shared_runtime().handle().block_on(async {
+    let (reader, total_bytes) = handle.block_on(async {
         let response = tokio::time::timeout(RESPONSE_TIMEOUT, async {
-            http_client()
+            pool.client()
                 .get(&url)
                 .send()
                 .await
@@ -200,7 +190,10 @@ pub fn open_gzip_reader(url: &str) -> Result<(GzipReader, ByteCounter, Option<u6
             stream.map(|result| result.map_err(io::Error::other)),
         );
 
-        Ok::<_, StreamError>((TimeoutReader::new(Box::pin(async_reader)), total_bytes))
+        Ok::<_, StreamError>((
+            TimeoutReader::new(Box::pin(async_reader), handle.clone(), read_timeout),
+            total_bytes,
+        ))
     })?;
 
     let counter = Arc::new(AtomicU64::new(0));
@@ -232,20 +225,31 @@ impl<R: Read> Read for CountingReader<R> {
 ///
 /// Each read operation has a timeout -- if no data arrives within
 /// the configured read_timeout, returns TimedOut error (triggers retry).
+/// Captures the runtime handle and timeout at construction time.
 pub struct TimeoutReader {
     inner: Pin<Box<dyn AsyncRead + Send + Sync>>,
+    handle: tokio::runtime::Handle,
+    read_timeout: Duration,
 }
 
 impl TimeoutReader {
-    fn new(inner: Pin<Box<dyn AsyncRead + Send + Sync>>) -> Self {
-        Self { inner }
+    fn new(
+        inner: Pin<Box<dyn AsyncRead + Send + Sync>>,
+        handle: tokio::runtime::Handle,
+        read_timeout: Duration,
+    ) -> Self {
+        Self {
+            inner,
+            handle,
+            read_timeout,
+        }
     }
 }
 
 impl Read for TimeoutReader {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let read_timeout = http_config().read_timeout;
-        shared_runtime().handle().block_on(async {
+        let read_timeout = self.read_timeout;
+        self.handle.block_on(async {
             let read_future = async {
                 let mut read_buf = ReadBuf::new(buf);
                 std::future::poll_fn(|cx: &mut Context<'_>| {
