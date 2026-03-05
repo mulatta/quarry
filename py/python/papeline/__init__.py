@@ -1,14 +1,19 @@
 """papeline — Academic paper data pipeline (OpenAlex)."""
 
 from papeline._native import (
+    Config,
     Filter,
+    FilterConfig,
+    HiveConfig,
     HttpPool,
     OAShard,
     RunSummary,
     TransferSummary,
+    UploadConfig,
     complete_shards,
     fetch_manifest,
     is_shard_complete,
+    load_config,
     pull,
     push,
     run,
@@ -17,14 +22,19 @@ from papeline._native import (
 )
 
 __all__ = [
+    "Config",
     "Filter",
+    "FilterConfig",
+    "HiveConfig",
     "HttpPool",
     "OAShard",
     "RunSummary",
     "TransferSummary",
+    "UploadConfig",
     "complete_shards",
     "fetch_manifest",
     "is_shard_complete",
+    "load_config",
     "pull",
     "push",
     "run",

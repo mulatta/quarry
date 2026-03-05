@@ -4,9 +4,6 @@ from __future__ import annotations
 
 import os
 import sys
-import tomllib
-from collections.abc import Sequence
-from dataclasses import dataclass, field
 from pathlib import Path
 
 import typer
@@ -21,129 +18,19 @@ app = typer.Typer(
 )
 
 # ============================================================
-# Config loading
+# Config loading (delegates to Rust serde-validated parser)
 # ============================================================
 
-CONFIG_SEARCH = ("papeline.toml", ".papeline.toml")
+
+def _load_config(path: str | None) -> papeline.Config:
+    """Load and validate TOML config via Rust. Aborts on invalid config."""
+    try:
+        return papeline.load_config(path)
+    except RuntimeError as e:
+        _abort(str(e))
 
 
-@dataclass
-class Config:
-    """Parsed TOML configuration with defaults."""
-
-    output: str | None = None
-    zstd_level: int | None = None
-    concurrency: int | None = None
-    max_retries: int | None = None
-    read_timeout: int | None = None
-    outer_retries: int | None = None
-    retry_delay: int | None = None
-    filter: FilterCfg = field(default_factory=lambda: FilterCfg())
-    hive: HiveCfg = field(default_factory=lambda: HiveCfg())
-    upload: UploadCfg = field(default_factory=lambda: UploadCfg())
-
-
-@dataclass
-class FilterCfg:
-    domains: list[str] = field(default_factory=list)
-    topics: list[str] = field(default_factory=list)
-    languages: list[str] = field(default_factory=list)
-    work_types: list[str] = field(default_factory=list)
-    require_abstract: bool = False
-
-
-@dataclass
-class HiveCfg:
-    enable: bool | None = None
-    clean_raw: bool | None = None
-    zstd_level: int | None = None
-    row_group_size: int | None = None
-    num_shards: int | None = None
-    threads: int | None = None
-    memory_limit: str | None = None
-
-
-@dataclass
-class UploadCfg:
-    bucket: str | None = None
-    endpoint: str | None = None
-    region: str | None = None
-    access_key: str | None = None
-    secret_key: str | None = None
-    prefix: str | None = None
-    force: bool | None = None
-    concurrency: int | None = None
-
-
-def load_config(path: str | None) -> Config:
-    """Load TOML config from explicit path or auto-discovered location."""
-    if path is not None:
-        p = Path(path)
-        if not p.exists():
-            _abort(f"Config file not found: {p}")
-        return _parse_config(p)
-
-    for name in CONFIG_SEARCH:
-        p = Path(name)
-        if p.exists():
-            return _parse_config(p)
-
-    return Config()
-
-
-def _parse_config(p: Path) -> Config:
-    with open(p, "rb") as f:
-        raw = tomllib.load(f)
-
-    cfg = Config(
-        output=raw.get("output"),
-        zstd_level=raw.get("zstd_level"),
-        concurrency=raw.get("concurrency"),
-        max_retries=raw.get("max_retries"),
-        read_timeout=raw.get("read_timeout"),
-        outer_retries=raw.get("outer_retries"),
-        retry_delay=raw.get("retry_delay"),
-    )
-
-    if "filter" in raw:
-        f = raw["filter"]
-        cfg.filter = FilterCfg(
-            domains=f.get("domains", []),
-            topics=f.get("topics", []),
-            languages=f.get("languages", []),
-            work_types=f.get("work_types", []),
-            require_abstract=f.get("require_abstract", False),
-        )
-
-    if "hive" in raw:
-        h = raw["hive"]
-        cfg.hive = HiveCfg(
-            enable=h.get("enable"),
-            clean_raw=h.get("clean_raw"),
-            zstd_level=h.get("zstd_level"),
-            row_group_size=h.get("row_group_size"),
-            num_shards=h.get("num_shards"),
-            threads=h.get("threads"),
-            memory_limit=h.get("memory_limit"),
-        )
-
-    if "upload" in raw:
-        u = raw["upload"]
-        cfg.upload = UploadCfg(
-            bucket=u.get("bucket"),
-            endpoint=u.get("endpoint"),
-            region=u.get("region"),
-            access_key=u.get("access_key"),
-            secret_key=u.get("secret_key"),
-            prefix=u.get("prefix"),
-            force=u.get("force"),
-            concurrency=u.get("concurrency"),
-        )
-
-    return cfg
-
-
-def _resolve_upload(cfg: UploadCfg) -> dict[str, str]:
+def _resolve_upload(cfg: papeline.UploadConfig) -> dict[str, str]:
     """Resolve upload config with env var fallback. Raises on missing required fields."""
     bucket = cfg.bucket
     if not bucket:
@@ -225,7 +112,7 @@ def run(
     """Download and process OpenAlex works snapshot to Parquet."""
     import time
 
-    cfg = load_config(config)
+    cfg = _load_config(config)
     root = cfg.output or output_dir
 
     # Resolve parameters: CLI > config > default
@@ -343,7 +230,7 @@ def status(
     config: str | None = typer.Option(None, "-c", "--config", help="Config file (TOML)"),
 ) -> None:
     """Show remote manifest info and local progress."""
-    cfg = load_config(config)
+    cfg = _load_config(config)
     root = cfg.output or output_dir
     raw_dir = str(Path(root) / "raw")
 
@@ -393,7 +280,7 @@ def hive(
     memory_limit: str | None = typer.Option(None, help='Memory limit (e.g. "32GB") [default: 65% RAM]'),
 ) -> None:
     """Repartition raw shards into year-partitioned Hive parquet."""
-    cfg = load_config(config)
+    cfg = _load_config(config)
     root = cfg.output or output_dir
 
     try:
@@ -440,7 +327,7 @@ def push(
     concurrency: int | None = typer.Option(None, help="Max concurrent uploads [default: 8]"),
 ) -> None:
     """Sync local files to S3-compatible storage."""
-    cfg = load_config(config)
+    cfg = _load_config(config)
     root = cfg.output or output_dir
     upload = _resolve_upload(cfg.upload)
     r_force = force or cfg.upload.force or False
@@ -473,7 +360,7 @@ def pull(
     concurrency: int | None = typer.Option(None, help="Max concurrent downloads [default: 8]"),
 ) -> None:
     """Sync S3-compatible storage to local."""
-    cfg = load_config(config)
+    cfg = _load_config(config)
     root = cfg.output or output_dir
     upload = _resolve_upload(cfg.upload)
     r_force = force or cfg.upload.force or False
@@ -526,7 +413,7 @@ def clean(
 
 def _run_hive_with_cfg(
     root: str,
-    cfg: Config,
+    cfg: papeline.Config,
     *,
     clean_raw: bool | None = None,
 ) -> None:
