@@ -102,6 +102,16 @@ fn pending_style() -> ProgressStyle {
         .expect("invalid template")
 }
 
+/// Per-directory progress bar style (file count, used by push/pull)
+fn dir_style(unit: &str) -> ProgressStyle {
+    ProgressStyle::default_bar()
+        .template(&format!(
+            "  {{prefix:<12.bold}} {{bar:25.cyan/black.dim}} {{pos}}/{{len}} {unit} [{{elapsed_precise}}]"
+        ))
+        .expect("invalid template")
+        .progress_chars("=>-")
+}
+
 // ============================================================
 // Tracing ↔ indicatif integration
 // ============================================================
@@ -272,6 +282,34 @@ impl ProgressContext {
         let display = if name.len() > 20 { &name[..20] } else { name };
         pb.set_prefix(display.to_string());
         Box::new(IndicatifReporter(pb))
+    }
+
+    /// Create a per-directory progress bar (file count, `=>-` style).
+    pub fn dir_bar(&self, name: &str, total: u64, unit: &str) -> Box<dyn ProgressReporter> {
+        if !self.is_tty {
+            return Box::new(NoopReporter);
+        }
+
+        let pb = self.multi.add(ProgressBar::new(total));
+        pb.set_style(dir_style(unit));
+        pb.set_prefix(name.to_string());
+        Box::new(IndicatifReporter(pb))
+    }
+
+    /// Create a per-file transfer progress bar (bytes, `--` style).
+    ///
+    /// Returns `Arc` for use in async contexts (across `.await` points).
+    /// Starts in pending mode; caller calls `upgrade_to_determinate(file_size)`.
+    pub fn file_bar(&self, name: &str) -> Arc<dyn ProgressReporter> {
+        if !self.is_tty {
+            return Arc::new(NoopReporter);
+        }
+
+        let pb = self.multi.add(ProgressBar::new(0));
+        pb.set_style(pending_style());
+        let display = if name.len() > 20 { &name[..20] } else { name };
+        pb.set_prefix(display.to_string());
+        Arc::new(IndicatifReporter(pb))
     }
 }
 
