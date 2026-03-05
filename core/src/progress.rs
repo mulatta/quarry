@@ -77,10 +77,12 @@ impl ProgressReporter for NoopReporter {
     fn finish_with_message(&self, _msg: &str) {}
 }
 
-/// Global progress bar style (shard count)
-fn global_style() -> ProgressStyle {
+/// Global progress bar style with configurable unit label.
+fn global_style(unit: &str) -> ProgressStyle {
     ProgressStyle::default_bar()
-        .template("{prefix:.bold} {bar:30.cyan/black.dim} {pos}/{len} shards [{elapsed_precise}] {wide_msg}")
+        .template(&format!(
+            "{{prefix:.bold}} {{bar:30.cyan/black.dim}} {{pos}}/{{len}} {unit} [{{elapsed_precise}}] {{wide_msg}}"
+        ))
         .expect("invalid template")
         .progress_chars("=>-")
 }
@@ -236,12 +238,12 @@ impl ProgressContext {
         }
     }
 
-    /// Initialize the global progress bar with the total shard count.
+    /// Initialize the global progress bar.
     /// Must be called before `shard_bar()` so it stays at the top.
-    pub fn init_global(&self, total: u64) {
+    pub fn init_global(&self, total: u64, label: &str, unit: &str) {
         self.global_bar.set_length(total);
-        self.global_bar.set_style(global_style());
-        self.global_bar.set_prefix("Total");
+        self.global_bar.set_style(global_style(unit));
+        self.global_bar.set_prefix(label.to_string());
     }
 
     /// Increment the global progress bar by one completed shard.

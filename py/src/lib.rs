@@ -10,13 +10,10 @@ use pyo3::exceptions::{PyKeyboardInterrupt, PyRuntimeError};
 use pyo3::prelude::*;
 use rayon::prelude::*;
 use rustc_hash::FxHashSet;
-use tracing_subscriber::EnvFilter;
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
 
 use papeline_core::config::{self, ResolvedHiveConfig, ResolvedUploadConfig};
 use papeline_core::oa::{self, OAProvider, OAShard};
-use papeline_core::progress::{IndicatifMakeWriter, ProgressContext};
+use papeline_core::progress::ProgressContext;
 use papeline_core::provider::{RunContext, run_provider};
 use papeline_core::remote::RemoteTargets;
 use papeline_core::stream::HttpPool;
@@ -28,19 +25,6 @@ use papeline_core::{api, hive, remote, transform};
 
 fn to_pyerr(e: impl std::fmt::Display) -> PyErr {
     PyRuntimeError::new_err(e.to_string())
-}
-
-/// Set up tracing subscriber routed through indicatif for TTY/non-TTY compat.
-fn init_tracing(progress: &ProgressContext) {
-    let writer = IndicatifMakeWriter::new(progress.multi().clone());
-    let _ = tracing_subscriber::registry()
-        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
-        .with(
-            tracing_subscriber::fmt::layer()
-                .with_writer(writer)
-                .without_time(),
-        )
-        .try_init();
 }
 
 // ============================================================
@@ -371,10 +355,18 @@ fn push(
     };
     let output_dir = PathBuf::from(output_dir);
     let targets = RemoteTargets { raw, hive };
+    let cancelled = Arc::new(AtomicBool::new(false));
 
-    py.allow_threads(move || {
+    let sig_flag = Arc::clone(&cancelled);
+    let sig_id = unsafe {
+        signal_hook::low_level::register(signal_hook::consts::SIGINT, move || {
+            sig_flag.store(true, Ordering::Relaxed);
+        })
+    }
+    .map_err(to_pyerr)?;
+
+    let result = py.allow_threads(move || {
         let progress: Arc<ProgressContext> = Arc::new(ProgressContext::new());
-        init_tracing(&progress);
         let summary = remote::run_push(
             &config,
             &output_dir,
@@ -382,15 +374,25 @@ fn push(
             dry_run,
             concurrency,
             &progress,
-        )
-        .map_err(to_pyerr)?;
-        Ok(PyTransferSummary {
-            files_transferred: summary.files_transferred,
-            bytes_transferred: summary.bytes_transferred,
-            files_skipped: summary.files_skipped,
-            files_failed: summary.files_failed,
-            failed_keys: summary.failed_keys,
-        })
+            &cancelled,
+        );
+        (summary, cancelled)
+    });
+
+    signal_hook::low_level::unregister(sig_id);
+
+    let (summary, cancelled) = result;
+    if cancelled.load(Ordering::Relaxed) {
+        return Err(PyKeyboardInterrupt::new_err("interrupted"));
+    }
+
+    let summary = summary.map_err(to_pyerr)?;
+    Ok(PyTransferSummary {
+        files_transferred: summary.files_transferred,
+        bytes_transferred: summary.bytes_transferred,
+        files_skipped: summary.files_skipped,
+        files_failed: summary.files_failed,
+        failed_keys: summary.failed_keys,
     })
 }
 
@@ -433,10 +435,18 @@ fn pull(
     };
     let output_dir = PathBuf::from(output_dir);
     let targets = RemoteTargets { raw, hive };
+    let cancelled = Arc::new(AtomicBool::new(false));
 
-    py.allow_threads(move || {
+    let sig_flag = Arc::clone(&cancelled);
+    let sig_id = unsafe {
+        signal_hook::low_level::register(signal_hook::consts::SIGINT, move || {
+            sig_flag.store(true, Ordering::Relaxed);
+        })
+    }
+    .map_err(to_pyerr)?;
+
+    let result = py.allow_threads(move || {
         let progress: Arc<ProgressContext> = Arc::new(ProgressContext::new());
-        init_tracing(&progress);
         let summary = remote::run_pull(
             &config,
             &output_dir,
@@ -444,15 +454,25 @@ fn pull(
             dry_run,
             concurrency,
             &progress,
-        )
-        .map_err(to_pyerr)?;
-        Ok(PyTransferSummary {
-            files_transferred: summary.files_transferred,
-            bytes_transferred: summary.bytes_transferred,
-            files_skipped: summary.files_skipped,
-            files_failed: summary.files_failed,
-            failed_keys: summary.failed_keys,
-        })
+            &cancelled,
+        );
+        (summary, cancelled)
+    });
+
+    signal_hook::low_level::unregister(sig_id);
+
+    let (summary, cancelled) = result;
+    if cancelled.load(Ordering::Relaxed) {
+        return Err(PyKeyboardInterrupt::new_err("interrupted"));
+    }
+
+    let summary = summary.map_err(to_pyerr)?;
+    Ok(PyTransferSummary {
+        files_transferred: summary.files_transferred,
+        bytes_transferred: summary.bytes_transferred,
+        files_skipped: summary.files_skipped,
+        files_failed: summary.files_failed,
+        failed_keys: summary.failed_keys,
     })
 }
 

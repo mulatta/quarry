@@ -79,7 +79,7 @@ pub fn run_provider<P: Provider>(
     let failed = AtomicUsize::new(0);
     let failed_indices: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
 
-    progress.init_global(shards.len() as u64);
+    progress.init_global(shards.len() as u64, "Total", "shards");
 
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(ctx.concurrency)

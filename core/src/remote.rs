@@ -10,7 +10,8 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
 
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
@@ -395,11 +396,6 @@ async fn push_file(
         .await
         .map_err(|e| anyhow::anyhow!("S3 upload failed for {key}: {e}"))?;
 
-    tracing::info!(
-        "pushed {} ({})",
-        lf.relative,
-        format_bytes(lf.size as usize)
-    );
     Ok(lf.size)
 }
 
@@ -450,7 +446,6 @@ async fn pull_file(
             )
         })?;
 
-    tracing::info!("pulled {} ({})", ro.relative, format_bytes(total as usize));
     Ok(total)
 }
 
@@ -466,6 +461,7 @@ pub fn run_push(
     dry_run: bool,
     concurrency: usize,
     progress: &crate::progress::SharedProgress,
+    cancelled: &Arc<AtomicBool>,
 ) -> Result<TransferSummary> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -488,13 +484,13 @@ pub fn run_push(
         let push_count = to_push.len();
 
         if dry_run {
-            tracing::info!(
-                "Push dry run: {} to transfer, {} up to date",
+            eprintln!(
+                "Push: {} to transfer, {} up to date",
                 push_count,
                 total_files - push_count
             );
             for f in &to_push {
-                tracing::info!("  + {} ({})", f.relative, format_bytes(f.size as usize));
+                eprintln!("  + {} ({})", f.relative, format_bytes(f.size as usize));
             }
             return Ok(TransferSummary {
                 files_transferred: 0,
@@ -515,24 +511,29 @@ pub fn run_push(
             });
         }
 
-        progress.init_global(push_count as u64);
+        progress.init_global(push_count as u64, "Push", "files");
         progress.set_global_message(format!("{} up to date", total_files - push_count));
 
-        let keys: Vec<String> = to_push.iter().map(|lf| lf.relative.clone()).collect();
-        let results: Vec<Result<u64>> = futures_util::stream::iter(to_push.into_iter().map(|lf| {
+        let mut stream = futures_util::stream::iter(to_push.into_iter().map(|lf| {
             let bucket = &bucket;
             let prefix = &config.prefix;
-            async move { push_file(bucket, prefix, output_dir, lf).await }
+            let key = lf.relative.clone();
+            async move {
+                let result = push_file(bucket, prefix, output_dir, lf).await;
+                (key, result)
+            }
         }))
-        .buffer_unordered(concurrency)
-        .collect()
-        .await;
+        .buffer_unordered(concurrency);
 
         let mut bytes = 0u64;
         let mut transferred = 0usize;
         let mut failed_keys_out = Vec::new();
-        for (r, key) in results.into_iter().zip(keys) {
-            match r {
+
+        while let Some((key, result)) = stream.next().await {
+            if cancelled.load(Ordering::Relaxed) {
+                break;
+            }
+            match result {
                 Ok(size) => {
                     bytes += size;
                     transferred += 1;
@@ -543,6 +544,10 @@ pub fn run_push(
                 }
             }
             progress.inc_global();
+        }
+
+        if cancelled.load(Ordering::Relaxed) {
+            progress.set_global_message("cancelled");
         }
         progress.finish_global();
 
@@ -564,6 +569,7 @@ pub fn run_pull(
     dry_run: bool,
     concurrency: usize,
     progress: &crate::progress::SharedProgress,
+    cancelled: &Arc<AtomicBool>,
 ) -> Result<TransferSummary> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -586,13 +592,13 @@ pub fn run_pull(
         let pull_count = to_pull.len();
 
         if dry_run {
-            tracing::info!(
-                "Pull dry run: {} to transfer, {} up to date",
+            eprintln!(
+                "Pull: {} to transfer, {} up to date",
                 pull_count,
                 total_files - pull_count
             );
             for f in &to_pull {
-                tracing::info!("  + {} ({})", f.relative, format_bytes(f.size as usize));
+                eprintln!("  + {} ({})", f.relative, format_bytes(f.size as usize));
             }
             return Ok(TransferSummary {
                 files_transferred: 0,
@@ -613,24 +619,29 @@ pub fn run_pull(
             });
         }
 
-        progress.init_global(pull_count as u64);
+        progress.init_global(pull_count as u64, "Pull", "files");
         progress.set_global_message(format!("{} up to date", total_files - pull_count));
 
-        let keys: Vec<String> = to_pull.iter().map(|ro| ro.relative.clone()).collect();
-        let results: Vec<Result<u64>> = futures_util::stream::iter(to_pull.into_iter().map(|ro| {
+        let mut stream = futures_util::stream::iter(to_pull.into_iter().map(|ro| {
             let bucket = &bucket;
             let prefix = &config.prefix;
-            async move { pull_file(bucket, prefix, output_dir, ro).await }
+            let key = ro.relative.clone();
+            async move {
+                let result = pull_file(bucket, prefix, output_dir, ro).await;
+                (key, result)
+            }
         }))
-        .buffer_unordered(concurrency)
-        .collect()
-        .await;
+        .buffer_unordered(concurrency);
 
         let mut bytes = 0u64;
         let mut transferred = 0usize;
         let mut failed_keys_out = Vec::new();
-        for (r, key) in results.into_iter().zip(keys) {
-            match r {
+
+        while let Some((key, result)) = stream.next().await {
+            if cancelled.load(Ordering::Relaxed) {
+                break;
+            }
+            match result {
                 Ok(size) => {
                     bytes += size;
                     transferred += 1;
@@ -641,6 +652,10 @@ pub fn run_pull(
                 }
             }
             progress.inc_global();
+        }
+
+        if cancelled.load(Ordering::Relaxed) {
+            progress.set_global_message("cancelled");
         }
         progress.finish_global();
 
