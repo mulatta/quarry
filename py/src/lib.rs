@@ -15,7 +15,7 @@ use papeline_core::config::{self, ResolvedHiveConfig, ResolvedUploadConfig};
 use papeline_core::oa::{self, OAProvider, OAShard};
 use papeline_core::progress::ProgressContext;
 use papeline_core::provider::{RunContext, run_provider};
-use papeline_core::remote::RemoteTargets;
+use papeline_core::remote::{RemoteTargets, TransferOpts};
 use papeline_core::stream::HttpPool;
 use papeline_core::{api, hive, remote, transform};
 
@@ -329,6 +329,7 @@ fn run_hive(
     raw = true,
     hive = true,
     dry_run = false,
+    force = false,
     concurrency = 4,
 ))]
 fn push(
@@ -343,6 +344,7 @@ fn push(
     raw: bool,
     hive: bool,
     dry_run: bool,
+    force: bool,
     concurrency: usize,
 ) -> PyResult<PyTransferSummary> {
     let config = ResolvedUploadConfig {
@@ -354,7 +356,12 @@ fn push(
         prefix: prefix.to_owned(),
     };
     let output_dir = PathBuf::from(output_dir);
-    let targets = RemoteTargets { raw, hive };
+    let opts = TransferOpts {
+        targets: RemoteTargets { raw, hive },
+        dry_run,
+        force,
+        concurrency,
+    };
     let cancelled = Arc::new(AtomicBool::new(false));
 
     let sig_flag = Arc::clone(&cancelled);
@@ -367,15 +374,7 @@ fn push(
 
     let result = py.allow_threads(move || {
         let progress: Arc<ProgressContext> = Arc::new(ProgressContext::new());
-        let summary = remote::run_push(
-            &config,
-            &output_dir,
-            &targets,
-            dry_run,
-            concurrency,
-            &progress,
-            &cancelled,
-        );
+        let summary = remote::run_push(&config, &output_dir, &opts, &progress, &cancelled);
         (summary, cancelled)
     });
 
@@ -409,6 +408,7 @@ fn push(
     raw = true,
     hive = true,
     dry_run = false,
+    force = false,
     concurrency = 4,
 ))]
 fn pull(
@@ -423,6 +423,7 @@ fn pull(
     raw: bool,
     hive: bool,
     dry_run: bool,
+    force: bool,
     concurrency: usize,
 ) -> PyResult<PyTransferSummary> {
     let config = ResolvedUploadConfig {
@@ -434,7 +435,12 @@ fn pull(
         prefix: prefix.to_owned(),
     };
     let output_dir = PathBuf::from(output_dir);
-    let targets = RemoteTargets { raw, hive };
+    let opts = TransferOpts {
+        targets: RemoteTargets { raw, hive },
+        dry_run,
+        force,
+        concurrency,
+    };
     let cancelled = Arc::new(AtomicBool::new(false));
 
     let sig_flag = Arc::clone(&cancelled);
@@ -447,15 +453,7 @@ fn pull(
 
     let result = py.allow_threads(move || {
         let progress: Arc<ProgressContext> = Arc::new(ProgressContext::new());
-        let summary = remote::run_pull(
-            &config,
-            &output_dir,
-            &targets,
-            dry_run,
-            concurrency,
-            &progress,
-            &cancelled,
-        );
+        let summary = remote::run_pull(&config, &output_dir, &opts, &progress, &cancelled);
         (summary, cancelled)
     });
 

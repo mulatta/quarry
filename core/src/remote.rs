@@ -208,6 +208,14 @@ pub struct RemoteTargets {
     pub hive: bool,
 }
 
+/// Options for push/pull operations.
+pub struct TransferOpts {
+    pub targets: RemoteTargets,
+    pub dry_run: bool,
+    pub force: bool,
+    pub concurrency: usize,
+}
+
 /// Result summary after push/pull completes.
 pub struct TransferSummary {
     pub files_transferred: usize,
@@ -351,7 +359,15 @@ fn is_state_file(relative: &str) -> bool {
 }
 
 /// Files that need to be pushed (local → remote).
-fn compute_push_diff<'a>(local: &'a [LocalFile], remote: &[RemoteObject]) -> Vec<&'a LocalFile> {
+fn compute_push_diff<'a>(
+    local: &'a [LocalFile],
+    remote: &[RemoteObject],
+    force: bool,
+) -> Vec<&'a LocalFile> {
+    if force {
+        return local.iter().collect();
+    }
+
     let remote_index: HashMap<&str, u64> = remote
         .iter()
         .map(|r| (r.relative.as_str(), r.size))
@@ -372,7 +388,15 @@ fn compute_push_diff<'a>(local: &'a [LocalFile], remote: &[RemoteObject]) -> Vec
 }
 
 /// Files that need to be pulled (remote → local).
-fn compute_pull_diff<'a>(remote: &'a [RemoteObject], local: &[LocalFile]) -> Vec<&'a RemoteObject> {
+fn compute_pull_diff<'a>(
+    remote: &'a [RemoteObject],
+    local: &[LocalFile],
+    force: bool,
+) -> Vec<&'a RemoteObject> {
+    if force {
+        return remote.iter().collect();
+    }
+
     let local_index: HashMap<&str, u64> = local
         .iter()
         .map(|lf| (lf.relative.as_str(), lf.size))
@@ -501,9 +525,7 @@ async fn pull_file(
 pub fn run_push(
     config: &ResolvedUploadConfig,
     output_dir: &Path,
-    targets: &RemoteTargets,
-    dry_run: bool,
-    concurrency: usize,
+    opts: &TransferOpts,
     progress: &crate::progress::SharedProgress,
     cancelled: &Arc<AtomicBool>,
 ) -> Result<TransferSummary> {
@@ -514,16 +536,16 @@ pub fn run_push(
 
     rt.block_on(async {
         let bucket = create_bucket(config)?;
-        let subs = target_subs(targets);
+        let subs = target_subs(&opts.targets);
 
         // Dry-run: collect across all subs, print, return early
-        if dry_run {
+        if opts.dry_run {
             let mut total = 0usize;
             let mut diff_count = 0usize;
             for sub in &subs {
                 let local = list_local(output_dir, sub)?;
                 let remote = list_remote(&bucket, &config.prefix, sub).await?;
-                let diff = compute_push_diff(&local, &remote);
+                let diff = compute_push_diff(&local, &remote, opts.force);
                 total += local.len();
                 diff_count += diff.len();
                 if !diff.is_empty() {
@@ -560,7 +582,7 @@ pub fn run_push(
             let local = list_local(output_dir, sub)?;
             let remote = list_remote(&bucket, &config.prefix, sub).await?;
             let sub_total = local.len();
-            let to_push = compute_push_diff(&local, &remote);
+            let to_push = compute_push_diff(&local, &remote, opts.force);
             let push_count = to_push.len();
             total_skipped += sub_total - push_count;
 
@@ -586,7 +608,7 @@ pub fn run_push(
                     (key, result)
                 }
             }))
-            .buffer_unordered(concurrency);
+            .buffer_unordered(opts.concurrency);
 
             while let Some((key, result)) = stream.next().await {
                 if cancelled.load(Ordering::Relaxed) {
@@ -622,9 +644,7 @@ pub fn run_push(
 pub fn run_pull(
     config: &ResolvedUploadConfig,
     output_dir: &Path,
-    targets: &RemoteTargets,
-    dry_run: bool,
-    concurrency: usize,
+    opts: &TransferOpts,
     progress: &crate::progress::SharedProgress,
     cancelled: &Arc<AtomicBool>,
 ) -> Result<TransferSummary> {
@@ -635,15 +655,15 @@ pub fn run_pull(
 
     rt.block_on(async {
         let bucket = create_bucket(config)?;
-        let subs = target_subs(targets);
+        let subs = target_subs(&opts.targets);
 
-        if dry_run {
+        if opts.dry_run {
             let mut total = 0usize;
             let mut diff_count = 0usize;
             for sub in &subs {
                 let remote = list_remote(&bucket, &config.prefix, sub).await?;
                 let local = list_local(output_dir, sub)?;
-                let diff = compute_pull_diff(&remote, &local);
+                let diff = compute_pull_diff(&remote, &local, opts.force);
                 total += remote.len();
                 diff_count += diff.len();
                 if !diff.is_empty() {
@@ -679,7 +699,7 @@ pub fn run_pull(
             let remote = list_remote(&bucket, &config.prefix, sub).await?;
             let local = list_local(output_dir, sub)?;
             let sub_total = remote.len();
-            let to_pull = compute_pull_diff(&remote, &local);
+            let to_pull = compute_pull_diff(&remote, &local, opts.force);
             let pull_count = to_pull.len();
             total_skipped += sub_total - pull_count;
 
@@ -700,7 +720,7 @@ pub fn run_pull(
                     (key, result)
                 }
             }))
-            .buffer_unordered(concurrency);
+            .buffer_unordered(opts.concurrency);
 
             while let Some((key, result)) = stream.next().await {
                 if cancelled.load(Ordering::Relaxed) {
@@ -770,7 +790,7 @@ mod tests {
     fn push_diff_new_file() {
         let local_files = vec![local("raw/works/shard_0000.parquet", 1000)];
         let remote_files = vec![];
-        let diff = compute_push_diff(&local_files, &remote_files);
+        let diff = compute_push_diff(&local_files, &remote_files, false);
         assert_eq!(diff.len(), 1);
     }
 
@@ -778,7 +798,7 @@ mod tests {
     fn push_diff_same_file_skipped() {
         let local_files = vec![local("raw/works/shard_0000.parquet", 1000)];
         let remote_files = vec![remote("raw/works/shard_0000.parquet", 1000)];
-        let diff = compute_push_diff(&local_files, &remote_files);
+        let diff = compute_push_diff(&local_files, &remote_files, false);
         assert!(diff.is_empty());
     }
 
@@ -786,7 +806,7 @@ mod tests {
     fn push_diff_size_mismatch() {
         let local_files = vec![local("raw/works/shard_0000.parquet", 2000)];
         let remote_files = vec![remote("raw/works/shard_0000.parquet", 1000)];
-        let diff = compute_push_diff(&local_files, &remote_files);
+        let diff = compute_push_diff(&local_files, &remote_files, false);
         assert_eq!(diff.len(), 1);
     }
 
@@ -794,15 +814,23 @@ mod tests {
     fn push_diff_state_always_pushed() {
         let local_files = vec![local("raw/.manifest.json", 500)];
         let remote_files = vec![remote("raw/.manifest.json", 500)];
-        let diff = compute_push_diff(&local_files, &remote_files);
+        let diff = compute_push_diff(&local_files, &remote_files, false);
         assert_eq!(diff.len(), 1, "state files should always be pushed");
+    }
+
+    #[test]
+    fn push_diff_force_includes_all() {
+        let local_files = vec![local("raw/works/shard_0000.parquet", 1000)];
+        let remote_files = vec![remote("raw/works/shard_0000.parquet", 1000)];
+        let diff = compute_push_diff(&local_files, &remote_files, true);
+        assert_eq!(diff.len(), 1, "force should include all files");
     }
 
     #[test]
     fn pull_diff_new_file() {
         let remote_files = vec![remote("raw/works/shard_0000.parquet", 1000)];
         let local_files = vec![];
-        let diff = compute_pull_diff(&remote_files, &local_files);
+        let diff = compute_pull_diff(&remote_files, &local_files, false);
         assert_eq!(diff.len(), 1);
     }
 
@@ -810,7 +838,7 @@ mod tests {
     fn pull_diff_same_file_skipped() {
         let remote_files = vec![remote("raw/works/shard_0000.parquet", 1000)];
         let local_files = vec![local("raw/works/shard_0000.parquet", 1000)];
-        let diff = compute_pull_diff(&remote_files, &local_files);
+        let diff = compute_pull_diff(&remote_files, &local_files, false);
         assert!(diff.is_empty());
     }
 
@@ -818,8 +846,16 @@ mod tests {
     fn pull_diff_state_always_pulled() {
         let remote_files = vec![remote("hive/.hive_state.json", 200)];
         let local_files = vec![local("hive/.hive_state.json", 200)];
-        let diff = compute_pull_diff(&remote_files, &local_files);
+        let diff = compute_pull_diff(&remote_files, &local_files, false);
         assert_eq!(diff.len(), 1, "state files should always be pulled");
+    }
+
+    #[test]
+    fn pull_diff_force_includes_all() {
+        let remote_files = vec![remote("raw/works/shard_0000.parquet", 1000)];
+        let local_files = vec![local("raw/works/shard_0000.parquet", 1000)];
+        let diff = compute_pull_diff(&remote_files, &local_files, true);
+        assert_eq!(diff.len(), 1, "force should include all files");
     }
 
     #[test]

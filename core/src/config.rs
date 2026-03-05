@@ -80,6 +80,8 @@ pub struct UploadConfig {
     pub secret_key: Option<String>,
     /// Key prefix in bucket (e.g. "papeline/hive")
     pub prefix: Option<String>,
+    /// Force re-transfer all files, ignoring size-based diff
+    pub force: Option<bool>,
 }
 
 /// Fully resolved upload configuration.
@@ -729,6 +731,7 @@ prefix = "papeline/hive"
             access_key: Some("AK".to_string()),
             secret_key: Some("SK".to_string()),
             prefix: Some("data/hive".to_string()),
+            force: None,
         };
         let resolved = ResolvedUploadConfig::from_config(&cfg).unwrap();
         assert_eq!(resolved.bucket, "test-bucket");
@@ -748,6 +751,7 @@ prefix = "papeline/hive"
             access_key: Some("AK".to_string()),
             secret_key: Some("SK".to_string()),
             prefix: None,
+            force: None,
         };
         let resolved = ResolvedUploadConfig::from_config(&cfg).unwrap();
         assert_eq!(resolved.region, "auto");
