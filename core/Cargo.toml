@@ -1,5 +1,5 @@
 [package]
-name = "papeline-core"
+name = "quarry-etl-core"
 version = "0.1.0"
 edition = "2024"
 

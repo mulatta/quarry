@@ -1,4 +1,4 @@
-//! papeline-core — Academic paper data pipeline library (OpenAlex).
+//! quarry-etl-core — Academic paper data pipeline library (OpenAlex).
 
 pub mod accumulator;
 pub mod api;

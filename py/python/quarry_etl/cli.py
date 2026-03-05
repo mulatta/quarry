@@ -1,4 +1,4 @@
-"""papeline CLI — Academic paper data pipeline (OpenAlex)."""
+"""quarry-etl CLI — Academic paper data pipeline (OpenAlex)."""
 
 from __future__ import annotations
 
@@ -9,10 +9,10 @@ from pathlib import Path
 import typer
 from rich import print as rprint
 
-import papeline
+import quarry_etl
 
 app = typer.Typer(
-    name="papeline",
+    name="quarry-etl",
     help="Academic paper data pipeline (OpenAlex)",
     no_args_is_help=True,
 )
@@ -22,15 +22,15 @@ app = typer.Typer(
 # ============================================================
 
 
-def _load_config(path: str | None) -> papeline.Config:
+def _load_config(path: str | None) -> quarry_etl.Config:
     """Load and validate TOML config via Rust. Aborts on invalid config."""
     try:
-        return papeline.load_config(path)
+        return quarry_etl.load_config(path)
     except RuntimeError as e:
         _abort(str(e))
 
 
-def _resolve_upload(cfg: papeline.UploadConfig) -> dict[str, str]:
+def _resolve_upload(cfg: quarry_etl.UploadConfig) -> dict[str, str]:
     """Resolve upload config with env var fallback. Raises on missing required fields."""
     bucket = cfg.bucket
     if not bucket:
@@ -130,7 +130,7 @@ def run(
     work_types = work_type or cfg.filter.work_types
     r_require_abstract = require_abstract or cfg.filter.require_abstract
 
-    filt = papeline.Filter(
+    filt = quarry_etl.Filter(
         domains=domains,
         topics=topics,
         languages=languages,
@@ -142,13 +142,13 @@ def run(
     os.makedirs(raw_dir, exist_ok=True)
 
     # Fetch manifest
-    pool = papeline.HttpPool(
+    pool = quarry_etl.HttpPool(
         concurrency=r_concurrency,
         read_timeout_secs=r_read_timeout,
         max_retries=r_max_retries,
     )
     rprint("[bold]Fetching manifest...[/bold]")
-    shards = papeline.fetch_manifest(pool, "works")
+    shards = quarry_etl.fetch_manifest(pool, "works")
     rprint(f"  {len(shards)} shards, ~{sum(s.record_count for s in shards):,} records")
 
     # Filter by --since
@@ -158,7 +158,7 @@ def run(
 
     # Filter completed (unless --force)
     if not force:
-        done = set(papeline.complete_shards(raw_dir, [s.shard_idx for s in shards]))
+        done = set(quarry_etl.complete_shards(raw_dir, [s.shard_idx for s in shards]))
         shards = [s for s in shards if s.shard_idx not in done]
         rprint(f"  Pending: {len(shards)} shards")
 
@@ -193,7 +193,7 @@ def run(
             rprint(f"\n[yellow]Retry pass {pass_num}/{r_outer_retries} ({len(pending)} shards)[/yellow]")
             time.sleep(r_retry_delay)
 
-        result = papeline.run(
+        result = quarry_etl.run(
             shards=pending,
             output_dir=raw_dir,
             pool=pool,
@@ -238,10 +238,10 @@ def status(
     root = cfg.output or output_dir
     raw_dir = str(Path(root) / "raw")
 
-    pool = papeline.HttpPool(concurrency=1, read_timeout_secs=30, max_retries=3)
+    pool = quarry_etl.HttpPool(concurrency=1, read_timeout_secs=30, max_retries=3)
 
     try:
-        shards = papeline.fetch_manifest(pool, "works")
+        shards = quarry_etl.fetch_manifest(pool, "works")
     except RuntimeError as e:
         _abort(f"Failed to fetch manifest: {e}")
 
@@ -257,7 +257,7 @@ def status(
     rprint(f"  Partitions: updated_date={date_range}")
     rprint()
 
-    done = set(papeline.complete_shards(raw_dir, [s.shard_idx for s in shards]))
+    done = set(quarry_etl.complete_shards(raw_dir, [s.shard_idx for s in shards]))
     completed = len(done)
     rprint(f"[bold]Local ({root}):[/bold]")
     rprint(f"  Completed:  {completed}/{len(shards)} shards")
@@ -291,7 +291,7 @@ def hive(
     upload_kw = _auto_push_kwargs(cfg)
 
     try:
-        papeline.run_hive(
+        quarry_etl.run_hive(
             output_dir=root,
             zstd_level=zstd_level or cfg.hive.zstd_level or cfg.zstd_level or 8,
             row_group_size=row_group_size or cfg.hive.row_group_size or 500_000,
@@ -308,7 +308,7 @@ def hive(
     rprint("[green]Hive partitioning complete.[/green]")
 
 
-def _transfer_summary(label: str, summary: papeline.TransferSummary) -> None:
+def _transfer_summary(label: str, summary: quarry_etl.TransferSummary) -> None:
     """Print transfer summary and exit with error if there were failures."""
     rprint(
         f"{label}: {summary.files_transferred} transferred "
@@ -342,7 +342,7 @@ def push(
     r_concurrency = concurrency or cfg.upload.concurrency or 8
 
     try:
-        summary = papeline.push(
+        summary = quarry_etl.push(
             output_dir=root,
             raw=not no_raw,
             hive=not no_hive,
@@ -375,7 +375,7 @@ def pull(
     r_concurrency = concurrency or cfg.upload.concurrency or 8
 
     try:
-        summary = papeline.pull(
+        summary = quarry_etl.pull(
             output_dir=root,
             raw=not no_raw,
             hive=not no_hive,
@@ -401,7 +401,7 @@ def clean(
         raise typer.Exit()
 
     total = 0
-    for table in papeline.tables():
+    for table in quarry_etl.tables():
         table_dir = raw_dir / table
         if table_dir.exists():
             for f in table_dir.glob("*.tmp"):
@@ -419,7 +419,7 @@ def clean(
 # ============================================================
 
 
-def _auto_push_kwargs(cfg: papeline.Config) -> dict:
+def _auto_push_kwargs(cfg: quarry_etl.Config) -> dict:
     """Return upload kwargs if [upload] section has bucket configured, else empty dict."""
     if not cfg.upload.bucket:
         return {}
@@ -432,7 +432,7 @@ def _auto_push_kwargs(cfg: papeline.Config) -> dict:
 
 def _run_hive_with_cfg(
     root: str,
-    cfg: papeline.Config,
+    cfg: quarry_etl.Config,
     *,
     clean_raw: bool | None = None,
 ) -> None:
@@ -440,7 +440,7 @@ def _run_hive_with_cfg(
     upload_kw = _auto_push_kwargs(cfg)
 
     try:
-        papeline.run_hive(
+        quarry_etl.run_hive(
             output_dir=root,
             zstd_level=cfg.hive.zstd_level or cfg.zstd_level or 8,
             row_group_size=cfg.hive.row_group_size or 500_000,

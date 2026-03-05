@@ -3,7 +3,7 @@ requires = ["maturin>=1.7,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "papeline"
+name = "quarry-etl"
 version = "0.1.0"
 description = "Academic paper data pipeline (OpenAlex) — Python bindings"
 requires-python = ">=3.10"
@@ -13,9 +13,9 @@ dependencies = [
 ]
 
 [project.scripts]
-papeline = "papeline.cli:app"
+quarry-etl = "quarry_etl.cli:app"
 
 [tool.maturin]
 python-source = "python"
-module-name = "papeline._native"
+module-name = "quarry_etl._native"
 features = ["pyo3/extension-module"]

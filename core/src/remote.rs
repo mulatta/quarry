@@ -2,8 +2,8 @@
 //!
 //! Three modes of remote access:
 //! - **Streaming upload**: background worker fed via `mpsc` channel during fetch/hive
-//! - **Push**: diff-based local → remote sync (`papeline push`)
-//! - **Pull**: diff-based remote → local sync (`papeline pull`)
+//! - **Push**: diff-based local → remote sync (`quarry-etl push`)
+//! - **Pull**: diff-based remote → local sync (`quarry-etl pull`)
 //!
 //! Sync strategy: filename + file_size comparison (no checksums needed because
 //! parquet files are immutable in our append-only pipeline).

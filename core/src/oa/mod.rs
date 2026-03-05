@@ -91,7 +91,7 @@ pub fn is_shard_complete(output_dir: &Path, shard_idx: usize) -> bool {
 // Provider
 // ============================================================
 
-/// OpenAlex provider for the papeline pipeline.
+/// OpenAlex provider for the quarry-etl pipeline.
 pub struct OAProvider {
     pub filter: Filter,
     pub pool: Arc<HttpPool>,

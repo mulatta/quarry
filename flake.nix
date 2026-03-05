@@ -1,5 +1,5 @@
 {
-  description = "papeline: paper ETL pipeline for biology domain";
+  description = "quarry-etl: academic paper ETL pipeline (OpenAlex)";
 
   inputs = {
     # keep-sorted start

@@ -1,4 +1,4 @@
-//! PyO3 bindings for papeline-core.
+//! PyO3 bindings for quarry-etl-core.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -11,13 +11,13 @@ use pyo3::prelude::*;
 use rayon::prelude::*;
 use rustc_hash::FxHashSet;
 
-use papeline_core::config::{self, ResolvedHiveConfig, ResolvedUploadConfig};
-use papeline_core::oa::{self, OAProvider, OAShard};
-use papeline_core::progress::ProgressContext;
-use papeline_core::provider::{RunContext, run_provider};
-use papeline_core::remote::{RemoteTargets, TransferOpts};
-use papeline_core::stream::HttpPool;
-use papeline_core::{api, hive, remote, transform};
+use quarry_etl_core::config::{self, ResolvedHiveConfig, ResolvedUploadConfig};
+use quarry_etl_core::oa::{self, OAProvider, OAShard};
+use quarry_etl_core::progress::ProgressContext;
+use quarry_etl_core::provider::{RunContext, run_provider};
+use quarry_etl_core::remote::{RemoteTargets, TransferOpts};
+use quarry_etl_core::stream::HttpPool;
+use quarry_etl_core::{api, hive, remote, transform};
 
 // ============================================================
 // Helper
@@ -734,7 +734,7 @@ fn complete_shards(py: Python<'_>, output_dir: &str, shard_indices: Vec<usize>) 
 /// List of all output table names.
 #[pyfunction]
 fn tables() -> Vec<&'static str> {
-    papeline_core::oa::TABLES.to_vec()
+    quarry_etl_core::oa::TABLES.to_vec()
 }
 
 // ============================================================

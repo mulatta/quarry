@@ -1,5 +1,5 @@
 [package]
-name = "papeline-py"
+name = "quarry-etl-py"
 version = "0.1.0"
 edition = "2024"
 
@@ -8,7 +8,7 @@ name = "_native"
 crate-type = ["cdylib"]
 
 [dependencies]
-papeline-core = { path = "../core" }
+quarry-etl-core = { path = "../core" }
 pyo3 = { workspace = true }
 rustc-hash = { workspace = true }
 indicatif = { workspace = true }

@@ -1,6 +1,6 @@
-"""papeline — Academic paper data pipeline (OpenAlex)."""
+"""quarry-etl — Academic paper data pipeline (OpenAlex)."""
 
-from papeline._native import (
+from quarry_etl._native import (
     Config,
     Filter,
     FilterConfig,

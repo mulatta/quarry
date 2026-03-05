@@ -11,7 +11,7 @@ use crate::transform::Filter;
 // TOML config file
 // ============================================================
 
-/// Parsed from `papeline.toml`.
+/// Parsed from `quarry-etl.toml`.
 ///
 /// Run settings live at the top level (no `[run]` section).
 /// Hive settings live under `[hive]`, filter settings under `[filter]`.
@@ -34,11 +34,11 @@ pub struct FileConfig {
     pub upload: UploadConfig,
 }
 
-/// `[hive]` section — settings for `papeline hive`.
+/// `[hive]` section — settings for `quarry-etl hive`.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HiveConfig {
-    /// Auto-run hive after `papeline run` (same as `--hive` CLI flag).
+    /// Auto-run hive after `quarry-etl run` (same as `--hive` CLI flag).
     pub enable: Option<bool>,
     /// Remove raw parquet after hive (same as `--clean-raw` CLI flag).
     pub clean_raw: Option<bool>,
@@ -78,7 +78,7 @@ pub struct UploadConfig {
     pub access_key: Option<String>,
     /// Secret key (or use $R2_SECRET_ACCESS_KEY / $AWS_SECRET_ACCESS_KEY env var)
     pub secret_key: Option<String>,
-    /// Key prefix in bucket (e.g. "papeline/hive")
+    /// Key prefix in bucket (e.g. "quarry-etl/hive")
     pub prefix: Option<String>,
     /// Force re-transfer all files, ignoring size-based diff
     pub force: Option<bool>,
@@ -153,7 +153,7 @@ impl ResolvedUploadConfig {
     }
 }
 
-/// Try loading config from explicit `--config` path or `./papeline.toml` in CWD.
+/// Try loading config from explicit `--config` path or `./quarry-etl.toml` in CWD.
 pub fn load_config(explicit: Option<&Path>) -> anyhow::Result<FileConfig> {
     let path = if let Some(p) = explicit {
         if !p.exists() {
@@ -161,7 +161,7 @@ pub fn load_config(explicit: Option<&Path>) -> anyhow::Result<FileConfig> {
         }
         Some(p.to_path_buf())
     } else {
-        let auto = PathBuf::from("./papeline.toml");
+        let auto = PathBuf::from("./quarry-etl.toml");
         if auto.exists() {
             tracing::info!("Using config: {}", auto.display());
             Some(auto)
@@ -557,7 +557,7 @@ memory_limit = "32GB"
 [upload]
 bucket = "my-bucket"
 endpoint = "https://acct.r2.cloudflarestorage.com"
-prefix = "papeline/hive"
+prefix = "quarry-etl/hive"
 "#,
         )
         .unwrap();
@@ -572,7 +572,7 @@ prefix = "papeline/hive"
             cfg.upload.endpoint.as_deref(),
             Some("https://acct.r2.cloudflarestorage.com")
         );
-        assert_eq!(cfg.upload.prefix.as_deref(), Some("papeline/hive"));
+        assert_eq!(cfg.upload.prefix.as_deref(), Some("quarry-etl/hive"));
         assert_eq!(cfg.hive.zstd_level, Some(8));
         assert_eq!(cfg.hive.threads, Some(12));
         assert_eq!(cfg.hive.memory_limit.as_deref(), Some("32GB"));
@@ -609,7 +609,7 @@ prefix = "papeline/hive"
         // No explicit path, and CWD auto-discovery may or may not find a file.
         // Just verify that None doesn't panic.
         let cfg = load_config(None).unwrap();
-        // If CWD has no papeline.toml, we get defaults.
+        // If CWD has no quarry-etl.toml, we get defaults.
         // If it does (e.g. repo root), we get that file's config.
         // Either way, it must succeed.
         let _ = cfg;
