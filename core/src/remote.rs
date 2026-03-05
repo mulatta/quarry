@@ -10,16 +10,48 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
+use std::task::{Context as TaskContext, Poll};
 
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
 use s3::creds::Credentials;
 use s3::{Bucket, Region};
+use tokio::io::{AsyncRead, ReadBuf};
 
 use crate::config::{ResolvedUploadConfig, format_bytes};
 use crate::oa::TABLES;
+use crate::progress::ProgressReporter;
+
+// ============================================================
+// AsyncRead progress adapter
+// ============================================================
+
+/// Wraps an `AsyncRead` to report bytes read through a `ProgressReporter`.
+struct ProgressReader<R> {
+    inner: R,
+    reporter: Arc<dyn ProgressReporter>,
+}
+
+impl<R: AsyncRead + Unpin> AsyncRead for ProgressReader<R> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let before = buf.filled().len();
+        let result = Pin::new(&mut self.inner).poll_read(cx, buf);
+        if let Poll::Ready(Ok(())) = &result {
+            let delta = buf.filled().len() - before;
+            if delta > 0 {
+                self.reporter.inc(delta as u64);
+            }
+        }
+        result
+    }
+}
 
 // ============================================================
 // Bucket creation
@@ -382,20 +414,27 @@ fn make_key(prefix: &str, relative: &str) -> String {
 async fn push_file(
     bucket: &Bucket,
     prefix: &str,
-    _output_dir: &Path,
     lf: &LocalFile,
+    reporter: &Arc<dyn ProgressReporter>,
 ) -> Result<u64> {
     let key = make_key(prefix, &lf.relative);
 
-    let mut file = tokio::fs::File::open(&lf.absolute)
+    let file = tokio::fs::File::open(&lf.absolute)
         .await
         .with_context(|| format!("Cannot open {}", lf.absolute.display()))?;
 
+    reporter.upgrade_to_determinate(lf.size);
+    let mut reader = ProgressReader {
+        inner: file,
+        reporter: Arc::clone(reporter),
+    };
+
     bucket
-        .put_object_stream_with_content_type(&mut file, &key, content_type(&lf.relative))
+        .put_object_stream_with_content_type(&mut reader, &key, content_type(&lf.relative))
         .await
         .map_err(|e| anyhow::anyhow!("S3 upload failed for {key}: {e}"))?;
 
+    reporter.finish_and_clear();
     Ok(lf.size)
 }
 
@@ -405,6 +444,7 @@ async fn pull_file(
     prefix: &str,
     output_dir: &Path,
     ro: &RemoteObject,
+    reporter: &Arc<dyn ProgressReporter>,
 ) -> Result<u64> {
     let local_path = output_dir.join(&ro.relative);
     let tmp_path = local_path.with_extension("tmp");
@@ -416,6 +456,7 @@ async fn pull_file(
     }
 
     let key = make_key(prefix, &ro.relative);
+    reporter.upgrade_to_determinate(ro.size);
 
     let response = bucket
         .get_object_stream(&key)
@@ -430,7 +471,9 @@ async fn pull_file(
     let mut stream = response.bytes;
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.with_context(|| format!("Stream read error for {key}"))?;
-        total += chunk.len() as u64;
+        let len = chunk.len() as u64;
+        total += len;
+        reporter.inc(len);
         tokio::io::AsyncWriteExt::write_all(&mut file, &chunk)
             .await
             .with_context(|| format!("Write error for {}", tmp_path.display()))?;
@@ -446,6 +489,7 @@ async fn pull_file(
             )
         })?;
 
+    reporter.finish_and_clear();
     Ok(total)
 }
 
@@ -472,89 +516,102 @@ pub fn run_push(
         let bucket = create_bucket(config)?;
         let subs = target_subs(targets);
 
-        let mut all_local = Vec::new();
-        let mut all_remote = Vec::new();
-        for sub in &subs {
-            all_local.extend(list_local(output_dir, sub)?);
-            all_remote.extend(list_remote(&bucket, &config.prefix, sub).await?);
-        }
-
-        let to_push = compute_push_diff(&all_local, &all_remote);
-        let total_files = all_local.len();
-        let push_count = to_push.len();
-
+        // Dry-run: collect across all subs, print, return early
         if dry_run {
+            let mut total = 0usize;
+            let mut diff_count = 0usize;
+            for sub in &subs {
+                let local = list_local(output_dir, sub)?;
+                let remote = list_remote(&bucket, &config.prefix, sub).await?;
+                let diff = compute_push_diff(&local, &remote);
+                total += local.len();
+                diff_count += diff.len();
+                if !diff.is_empty() {
+                    eprintln!("{sub}/: {} to transfer", diff.len());
+                    for f in &diff {
+                        eprintln!("  + {} ({})", f.relative, format_bytes(f.size as usize));
+                    }
+                }
+            }
             eprintln!(
-                "Push: {} to transfer, {} up to date",
-                push_count,
-                total_files - push_count
+                "Push: {diff_count} to transfer, {} up to date",
+                total - diff_count
             );
-            for f in &to_push {
-                eprintln!("  + {} ({})", f.relative, format_bytes(f.size as usize));
-            }
             return Ok(TransferSummary {
                 files_transferred: 0,
                 bytes_transferred: 0,
-                files_skipped: total_files,
+                files_skipped: total,
                 files_failed: 0,
                 failed_keys: Vec::new(),
             });
         }
 
-        if push_count == 0 {
-            return Ok(TransferSummary {
-                files_transferred: 0,
-                bytes_transferred: 0,
-                files_skipped: total_files,
-                files_failed: 0,
-                failed_keys: Vec::new(),
-            });
-        }
-
-        progress.init_global(push_count as u64, "Push", "files");
-        progress.set_global_message(format!("{} up to date", total_files - push_count));
-
-        let mut stream = futures_util::stream::iter(to_push.into_iter().map(|lf| {
-            let bucket = &bucket;
-            let prefix = &config.prefix;
-            let key = lf.relative.clone();
-            async move {
-                let result = push_file(bucket, prefix, output_dir, lf).await;
-                (key, result)
-            }
-        }))
-        .buffer_unordered(concurrency);
-
-        let mut bytes = 0u64;
-        let mut transferred = 0usize;
+        // Transfer: per-sub loop with dir_bar + file_bar
+        let mut total_bytes = 0u64;
+        let mut total_transferred = 0usize;
+        let mut total_skipped = 0usize;
         let mut failed_keys_out = Vec::new();
 
-        while let Some((key, result)) = stream.next().await {
+        for sub in &subs {
             if cancelled.load(Ordering::Relaxed) {
                 break;
             }
-            match result {
-                Ok(size) => {
-                    bytes += size;
-                    transferred += 1;
-                }
-                Err(e) => {
-                    tracing::error!("{key}: {e}");
-                    failed_keys_out.push(key);
-                }
-            }
-            progress.inc_global();
-        }
 
-        if cancelled.load(Ordering::Relaxed) {
-            progress.set_global_message("cancelled");
+            let local = list_local(output_dir, sub)?;
+            let remote = list_remote(&bucket, &config.prefix, sub).await?;
+            let sub_total = local.len();
+            let to_push = compute_push_diff(&local, &remote);
+            let push_count = to_push.len();
+            total_skipped += sub_total - push_count;
+
+            if push_count == 0 {
+                continue;
+            }
+
+            let dir_bar = progress.dir_bar(&format!("{sub}/"), push_count as u64, "files");
+
+            let mut stream = futures_util::stream::iter(to_push.into_iter().map(|lf| {
+                let bucket = &bucket;
+                let prefix = &config.prefix;
+                let key = lf.relative.clone();
+                let file_bar = progress.file_bar(
+                    lf.absolute
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_str()
+                        .unwrap_or("?"),
+                );
+                async move {
+                    let result = push_file(bucket, prefix, lf, &file_bar).await;
+                    (key, result)
+                }
+            }))
+            .buffer_unordered(concurrency);
+
+            while let Some((key, result)) = stream.next().await {
+                if cancelled.load(Ordering::Relaxed) {
+                    break;
+                }
+                match result {
+                    Ok(size) => {
+                        total_bytes += size;
+                        total_transferred += 1;
+                    }
+                    Err(e) => {
+                        tracing::error!("{key}: {e}");
+                        failed_keys_out.push(key);
+                    }
+                }
+                dir_bar.inc(1);
+            }
+
+            dir_bar.finish_and_clear();
         }
-        progress.finish_global();
 
         Ok(TransferSummary {
-            files_transferred: transferred,
-            bytes_transferred: bytes,
-            files_skipped: total_files - push_count,
+            files_transferred: total_transferred,
+            bytes_transferred: total_bytes,
+            files_skipped: total_skipped,
             files_failed: failed_keys_out.len(),
             failed_keys: failed_keys_out,
         })
@@ -580,89 +637,95 @@ pub fn run_pull(
         let bucket = create_bucket(config)?;
         let subs = target_subs(targets);
 
-        let mut all_local = Vec::new();
-        let mut all_remote = Vec::new();
-        for sub in &subs {
-            all_remote.extend(list_remote(&bucket, &config.prefix, sub).await?);
-            all_local.extend(list_local(output_dir, sub)?);
-        }
-
-        let to_pull = compute_pull_diff(&all_remote, &all_local);
-        let total_files = all_remote.len();
-        let pull_count = to_pull.len();
-
         if dry_run {
+            let mut total = 0usize;
+            let mut diff_count = 0usize;
+            for sub in &subs {
+                let remote = list_remote(&bucket, &config.prefix, sub).await?;
+                let local = list_local(output_dir, sub)?;
+                let diff = compute_pull_diff(&remote, &local);
+                total += remote.len();
+                diff_count += diff.len();
+                if !diff.is_empty() {
+                    eprintln!("{sub}/: {} to transfer", diff.len());
+                    for f in &diff {
+                        eprintln!("  + {} ({})", f.relative, format_bytes(f.size as usize));
+                    }
+                }
+            }
             eprintln!(
-                "Pull: {} to transfer, {} up to date",
-                pull_count,
-                total_files - pull_count
+                "Pull: {diff_count} to transfer, {} up to date",
+                total - diff_count
             );
-            for f in &to_pull {
-                eprintln!("  + {} ({})", f.relative, format_bytes(f.size as usize));
-            }
             return Ok(TransferSummary {
                 files_transferred: 0,
                 bytes_transferred: 0,
-                files_skipped: total_files,
+                files_skipped: total,
                 files_failed: 0,
                 failed_keys: Vec::new(),
             });
         }
 
-        if pull_count == 0 {
-            return Ok(TransferSummary {
-                files_transferred: 0,
-                bytes_transferred: 0,
-                files_skipped: total_files,
-                files_failed: 0,
-                failed_keys: Vec::new(),
-            });
-        }
-
-        progress.init_global(pull_count as u64, "Pull", "files");
-        progress.set_global_message(format!("{} up to date", total_files - pull_count));
-
-        let mut stream = futures_util::stream::iter(to_pull.into_iter().map(|ro| {
-            let bucket = &bucket;
-            let prefix = &config.prefix;
-            let key = ro.relative.clone();
-            async move {
-                let result = pull_file(bucket, prefix, output_dir, ro).await;
-                (key, result)
-            }
-        }))
-        .buffer_unordered(concurrency);
-
-        let mut bytes = 0u64;
-        let mut transferred = 0usize;
+        let mut total_bytes = 0u64;
+        let mut total_transferred = 0usize;
+        let mut total_skipped = 0usize;
         let mut failed_keys_out = Vec::new();
 
-        while let Some((key, result)) = stream.next().await {
+        for sub in &subs {
             if cancelled.load(Ordering::Relaxed) {
                 break;
             }
-            match result {
-                Ok(size) => {
-                    bytes += size;
-                    transferred += 1;
-                }
-                Err(e) => {
-                    tracing::error!("{key}: {e}");
-                    failed_keys_out.push(key);
-                }
-            }
-            progress.inc_global();
-        }
 
-        if cancelled.load(Ordering::Relaxed) {
-            progress.set_global_message("cancelled");
+            let remote = list_remote(&bucket, &config.prefix, sub).await?;
+            let local = list_local(output_dir, sub)?;
+            let sub_total = remote.len();
+            let to_pull = compute_pull_diff(&remote, &local);
+            let pull_count = to_pull.len();
+            total_skipped += sub_total - pull_count;
+
+            if pull_count == 0 {
+                continue;
+            }
+
+            let dir_bar = progress.dir_bar(&format!("{sub}/"), pull_count as u64, "files");
+
+            let mut stream = futures_util::stream::iter(to_pull.into_iter().map(|ro| {
+                let bucket = &bucket;
+                let prefix = &config.prefix;
+                let key = ro.relative.clone();
+                let file_bar =
+                    progress.file_bar(ro.relative.rsplit('/').next().unwrap_or(&ro.relative));
+                async move {
+                    let result = pull_file(bucket, prefix, output_dir, ro, &file_bar).await;
+                    (key, result)
+                }
+            }))
+            .buffer_unordered(concurrency);
+
+            while let Some((key, result)) = stream.next().await {
+                if cancelled.load(Ordering::Relaxed) {
+                    break;
+                }
+                match result {
+                    Ok(size) => {
+                        total_bytes += size;
+                        total_transferred += 1;
+                    }
+                    Err(e) => {
+                        tracing::error!("{key}: {e}");
+                        failed_keys_out.push(key);
+                    }
+                }
+                dir_bar.inc(1);
+            }
+
+            dir_bar.finish_and_clear();
         }
-        progress.finish_global();
 
         Ok(TransferSummary {
-            files_transferred: transferred,
-            bytes_transferred: bytes,
-            files_skipped: total_files - pull_count,
+            files_transferred: total_transferred,
+            bytes_transferred: total_bytes,
+            files_skipped: total_skipped,
             files_failed: failed_keys_out.len(),
             failed_keys: failed_keys_out,
         })
