@@ -3,6 +3,7 @@ result
 result-*
 target/
 outputs/
+results/
 __pycache__/
 *.so
 *.pyd

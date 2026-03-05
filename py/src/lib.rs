@@ -2,15 +2,17 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use indicatif::MultiProgress;
-use pyo3::exceptions::PyRuntimeError;
+use pyo3::exceptions::{PyKeyboardInterrupt, PyRuntimeError};
 use pyo3::prelude::*;
+use rayon::prelude::*;
 use rustc_hash::FxHashSet;
 
 use papeline_core::config::{self, ResolvedHiveConfig, ResolvedUploadConfig};
-use papeline_core::oa::{OAProvider, OAShard};
+use papeline_core::oa::{self, OAProvider, OAShard};
 use papeline_core::progress::ProgressContext;
 use papeline_core::provider::{RunContext, run_provider};
 use papeline_core::remote::RemoteTargets;
@@ -219,12 +221,24 @@ fn run(
     let pool_arc = Arc::clone(&pool.inner);
     let output_dir = PathBuf::from(output_dir);
 
-    py.allow_threads(move || {
+    let cancelled = Arc::new(AtomicBool::new(false));
+
+    // Register SIGINT handler so Ctrl+C sets the flag while GIL is released
+    let sig_flag = Arc::clone(&cancelled);
+    let sig_id = unsafe {
+        signal_hook::low_level::register(signal_hook::consts::SIGINT, move || {
+            sig_flag.store(true, Ordering::Relaxed);
+        })
+    }
+    .map_err(to_pyerr)?;
+
+    let result = py.allow_threads(move || {
         let progress: Arc<ProgressContext> = Arc::new(ProgressContext::new());
         let ctx = RunContext {
             output_dir,
             zstd_level,
             concurrency,
+            cancelled: Arc::clone(&cancelled),
         };
         let provider = OAProvider {
             filter,
@@ -233,14 +247,24 @@ fn run(
 
         let summary = run_provider(&provider, &oa_shards, &ctx, &progress, None);
 
-        Ok(PyRunSummary {
-            completed: summary.completed,
-            failed: summary.failed,
-            total_rows: summary.total_rows,
-            total_scanned: summary.total_scanned,
-            elapsed_secs: summary.elapsed.as_secs_f64(),
-            failed_indices: summary.failed_indices,
-        })
+        (summary, cancelled)
+    });
+
+    // Unregister our signal handler, restore default Python SIGINT handling
+    signal_hook::low_level::unregister(sig_id);
+
+    let (summary, cancelled) = result;
+    if cancelled.load(Ordering::Relaxed) {
+        return Err(PyKeyboardInterrupt::new_err("interrupted"));
+    }
+
+    Ok(PyRunSummary {
+        completed: summary.completed,
+        failed: summary.failed,
+        total_rows: summary.total_rows,
+        total_scanned: summary.total_scanned,
+        elapsed_secs: summary.elapsed.as_secs_f64(),
+        failed_indices: summary.failed_indices,
     })
 }
 
@@ -393,7 +417,19 @@ fn pull(
 /// Check if a shard has all 12 output tables.
 #[pyfunction]
 fn is_shard_complete(output_dir: &str, shard_idx: usize) -> bool {
-    papeline_core::oa::is_shard_complete(&PathBuf::from(output_dir), shard_idx)
+    oa::is_shard_complete(&PathBuf::from(output_dir), shard_idx)
+}
+
+/// Return set of shard indices that are complete (parallel check using rayon).
+#[pyfunction]
+fn complete_shards(py: Python<'_>, output_dir: &str, shard_indices: Vec<usize>) -> Vec<usize> {
+    let output_dir = PathBuf::from(output_dir);
+    py.allow_threads(move || {
+        shard_indices
+            .into_par_iter()
+            .filter(|&idx| oa::is_shard_complete(&output_dir, idx))
+            .collect()
+    })
 }
 
 /// List of all output table names.
@@ -429,6 +465,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(push, m)?)?;
     m.add_function(wrap_pyfunction!(pull, m)?)?;
     m.add_function(wrap_pyfunction!(is_shard_complete, m)?)?;
+    m.add_function(wrap_pyfunction!(complete_shards, m)?)?;
     m.add_function(wrap_pyfunction!(tables, m)?)?;
     Ok(())
 }

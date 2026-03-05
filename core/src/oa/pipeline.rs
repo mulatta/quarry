@@ -470,6 +470,7 @@ mod tests {
             output_dir: dir.path().to_path_buf(),
             zstd_level: 3,
             concurrency: 1,
+            cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
 
         let mut pipeline =
@@ -667,6 +668,7 @@ mod tests {
             output_dir: dir.path().to_path_buf(),
             zstd_level: 3,
             concurrency: 1,
+            cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
 
         let mut pipeline = ShardPipeline::create(0, &ctx, None, 0u16).unwrap();

@@ -267,7 +267,8 @@ def run(
 
     # Filter completed (unless --force)
     if not force:
-        shards = [s for s in shards if not papeline.is_shard_complete(raw_dir, s.shard_idx)]
+        done = set(papeline.complete_shards(raw_dir, [s.shard_idx for s in shards]))
+        shards = [s for s in shards if s.shard_idx not in done]
         rprint(f"  Pending: {len(shards)} shards")
 
     if max_shards:
@@ -361,7 +362,8 @@ def status(
     rprint(f"  Partitions: updated_date={date_range}")
     rprint()
 
-    completed = sum(1 for s in shards if papeline.is_shard_complete(raw_dir, s.shard_idx))
+    done = set(papeline.complete_shards(raw_dir, [s.shard_idx for s in shards]))
+    completed = len(done)
     rprint(f"[bold]Local ({root}):[/bold]")
     rprint(f"  Completed:  {completed}/{len(shards)} shards")
 

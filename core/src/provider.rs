@@ -1,7 +1,8 @@
 //! Generic provider trait and unified runner for shard-based pipelines.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
@@ -35,6 +36,8 @@ pub struct RunContext {
     pub zstd_level: i32,
     /// Number of concurrent shard workers (rayon thread pool size).
     pub concurrency: usize,
+    /// Cancellation flag (e.g. set by SIGINT handler).
+    pub cancelled: Arc<AtomicBool>,
 }
 
 /// Trait implemented by each data-source provider.
@@ -85,6 +88,17 @@ pub fn run_provider<P: Provider>(
 
     pool.install(|| {
         shards.par_iter().enumerate().for_each(|(idx, shard)| {
+            // Check cancellation before starting each shard
+            if ctx.cancelled.load(Ordering::Relaxed) {
+                failed.fetch_add(1, Ordering::Relaxed);
+                failed_indices
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(idx);
+                progress.inc_global();
+                return;
+            }
+
             let label = provider.shard_label(shard);
             let pb = progress.shard_bar(&label);
 
@@ -174,6 +188,7 @@ mod tests {
             output_dir: PathBuf::from("/tmp/test"),
             zstd_level: 3,
             concurrency: 2,
+            cancelled: Arc::new(AtomicBool::new(false)),
         }
     }
 
