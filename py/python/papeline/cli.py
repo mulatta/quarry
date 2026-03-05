@@ -72,6 +72,7 @@ class UploadCfg:
     secret_key: str | None = None
     prefix: str | None = None
     force: bool | None = None
+    concurrency: int | None = None
 
 
 def load_config(path: str | None) -> Config:
@@ -136,6 +137,7 @@ def _parse_config(p: Path) -> Config:
             secret_key=u.get("secret_key"),
             prefix=u.get("prefix"),
             force=u.get("force"),
+            concurrency=u.get("concurrency"),
         )
 
     return cfg
@@ -435,13 +437,14 @@ def push(
     no_hive: bool = typer.Option(False, help="Exclude hive/"),
     dry_run: bool = typer.Option(False, help="Show what would be pushed"),
     force: bool = typer.Option(False, help="Force push all files (skip diff)"),
-    concurrency: int = typer.Option(8, help="Max concurrent uploads"),
+    concurrency: int | None = typer.Option(None, help="Max concurrent uploads [default: 8]"),
 ) -> None:
     """Sync local files to S3-compatible storage."""
     cfg = load_config(config)
     root = cfg.output or output_dir
     upload = _resolve_upload(cfg.upload)
     r_force = force or cfg.upload.force or False
+    r_concurrency = concurrency or cfg.upload.concurrency or 8
 
     try:
         summary = papeline.push(
@@ -450,7 +453,7 @@ def push(
             hive=not no_hive,
             dry_run=dry_run,
             force=r_force,
-            concurrency=concurrency,
+            concurrency=r_concurrency,
             **upload,
         )
     except RuntimeError as e:
@@ -467,13 +470,14 @@ def pull(
     no_hive: bool = typer.Option(False, help="Exclude hive/"),
     dry_run: bool = typer.Option(False, help="Show what would be pulled"),
     force: bool = typer.Option(False, help="Force pull all files (skip diff)"),
-    concurrency: int = typer.Option(8, help="Max concurrent downloads"),
+    concurrency: int | None = typer.Option(None, help="Max concurrent downloads [default: 8]"),
 ) -> None:
     """Sync S3-compatible storage to local."""
     cfg = load_config(config)
     root = cfg.output or output_dir
     upload = _resolve_upload(cfg.upload)
     r_force = force or cfg.upload.force or False
+    r_concurrency = concurrency or cfg.upload.concurrency or 8
 
     try:
         summary = papeline.pull(
@@ -482,7 +486,7 @@ def pull(
             hive=not no_hive,
             dry_run=dry_run,
             force=r_force,
-            concurrency=concurrency,
+            concurrency=r_concurrency,
             **upload,
         )
     except RuntimeError as e:

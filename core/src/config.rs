@@ -82,6 +82,8 @@ pub struct UploadConfig {
     pub prefix: Option<String>,
     /// Force re-transfer all files, ignoring size-based diff
     pub force: Option<bool>,
+    /// Max concurrent transfers for push/pull (default: 8)
+    pub concurrency: Option<usize>,
 }
 
 /// Fully resolved upload configuration.
@@ -732,6 +734,7 @@ prefix = "papeline/hive"
             secret_key: Some("SK".to_string()),
             prefix: Some("data/hive".to_string()),
             force: None,
+            concurrency: None,
         };
         let resolved = ResolvedUploadConfig::from_config(&cfg).unwrap();
         assert_eq!(resolved.bucket, "test-bucket");
@@ -752,6 +755,7 @@ prefix = "papeline/hive"
             secret_key: Some("SK".to_string()),
             prefix: None,
             force: None,
+            concurrency: None,
         };
         let resolved = ResolvedUploadConfig::from_config(&cfg).unwrap();
         assert_eq!(resolved.region, "auto");
