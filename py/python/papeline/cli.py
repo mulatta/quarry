@@ -177,6 +177,9 @@ def run(
             rprint(f"  ... and {len(shards) - 10} more")
         raise typer.Exit()
 
+    # Auto-push: resolve upload config if enabled
+    upload_kw = _auto_push_kwargs(cfg)
+
     # Process with outer retry loop
     pending = shards
     total_completed = 0
@@ -197,6 +200,7 @@ def run(
             filter=filt,
             zstd_level=r_zstd_level,
             concurrency=r_concurrency,
+            **upload_kw,
         )
         total_completed += result.completed
         total_rows += result.total_rows
@@ -416,13 +420,13 @@ def clean(
 
 
 def _auto_push_kwargs(cfg: papeline.Config) -> dict:
-    """Return upload kwargs for auto-push if enabled, else empty dict."""
-    if not cfg.upload.auto_push:
+    """Return upload kwargs if [upload] section has bucket configured, else empty dict."""
+    if not cfg.upload.bucket:
         return {}
     try:
         return _resolve_upload(cfg.upload)
     except SystemExit:
-        # Missing upload config — skip auto-push silently
+        # Missing required fields — skip auto-push silently
         return {}
 
 

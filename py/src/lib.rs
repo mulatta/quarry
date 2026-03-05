@@ -109,8 +109,6 @@ struct PyUploadConfig {
     force: Option<bool>,
     #[pyo3(get)]
     concurrency: Option<usize>,
-    #[pyo3(get)]
-    auto_push: Option<bool>,
 }
 
 impl From<config::FileConfig> for PyConfig {
@@ -148,7 +146,6 @@ impl From<config::FileConfig> for PyConfig {
                 prefix: c.upload.prefix,
                 force: c.upload.force,
                 concurrency: c.upload.concurrency,
-                auto_push: c.upload.auto_push,
             },
         }
     }
@@ -345,8 +342,24 @@ fn fetch_manifest(py: Python<'_>, pool: &PyHttpPool, entity: &str) -> PyResult<V
 }
 
 /// Run the OpenAlex pipeline: download, transform, and write Parquet files.
+///
+/// When upload params are provided, completed shard files are auto-pushed
+/// to remote in background (best-effort).
 #[pyfunction]
-#[pyo3(signature = (shards, output_dir, pool, filter=None, zstd_level=3, concurrency=8))]
+#[pyo3(signature = (
+    shards,
+    output_dir,
+    pool,
+    filter = None,
+    zstd_level = 3,
+    concurrency = 8,
+    bucket = None,
+    endpoint = None,
+    access_key = None,
+    secret_key = None,
+    region = None,
+    prefix = None,
+))]
 fn run(
     py: Python<'_>,
     shards: Vec<PyRef<'_, PyOAShard>>,
@@ -355,11 +368,30 @@ fn run(
     filter: Option<&PyFilter>,
     zstd_level: i32,
     concurrency: usize,
+    bucket: Option<&str>,
+    endpoint: Option<&str>,
+    access_key: Option<&str>,
+    secret_key: Option<&str>,
+    region: Option<&str>,
+    prefix: Option<&str>,
 ) -> PyResult<PyRunSummary> {
     let oa_shards: Vec<OAShard> = shards.iter().map(|s| s.inner.clone()).collect();
     let filter = filter.map_or_else(transform::Filter::default, |f| f.inner.clone());
     let pool_arc = Arc::clone(&pool.inner);
     let output_dir = PathBuf::from(output_dir);
+
+    // Build upload config if all required fields are present
+    let upload_config = match (bucket, endpoint, access_key, secret_key) {
+        (Some(b), Some(e), Some(ak), Some(sk)) => Some(ResolvedUploadConfig {
+            bucket: b.to_owned(),
+            endpoint: e.to_owned(),
+            region: region.unwrap_or("auto").to_owned(),
+            access_key: ak.to_owned(),
+            secret_key: sk.to_owned(),
+            prefix: prefix.unwrap_or("").to_owned(),
+        }),
+        _ => None,
+    };
 
     let cancelled = Arc::new(AtomicBool::new(false));
 
@@ -375,7 +407,7 @@ fn run(
     let result = py.allow_threads(move || {
         let progress: Arc<ProgressContext> = Arc::new(ProgressContext::new());
         let ctx = RunContext {
-            output_dir,
+            output_dir: output_dir.clone(),
             zstd_level,
             concurrency,
             cancelled: Arc::clone(&cancelled),
@@ -385,9 +417,37 @@ fn run(
             pool: pool_arc,
         };
 
-        let summary = run_provider(&provider, &oa_shards, &ctx, &progress, None);
+        // output_dir here is the raw dir (e.g. /outputs/raw).
+        // For auto-push, base_dir should be its parent (e.g. /outputs)
+        // so keys become raw/{table}/shard_XXXX.parquet.
+        let base_dir = output_dir.parent().unwrap_or(&output_dir).to_path_buf();
 
-        (summary, cancelled)
+        if let Some(ucfg) = upload_config {
+            let (tx, handle) = remote::spawn_upload_worker(ucfg, base_dir, 64)
+                .expect("failed to spawn upload worker");
+
+            let on_complete = |shard: &OAShard| {
+                for table in oa::TABLES {
+                    let path =
+                        output_dir.join(format!("{table}/shard_{:04}.parquet", shard.shard_idx,));
+                    if path.exists() {
+                        let _ = tx.send(path);
+                    }
+                }
+            };
+
+            let summary = run_provider(&provider, &oa_shards, &ctx, &progress, Some(&on_complete));
+            drop(tx);
+            match handle.join() {
+                Ok(Ok(s)) => eprintln!("Auto-push: {} uploaded, {} failed", s.uploaded, s.failed),
+                Ok(Err(e)) => eprintln!("Auto-push worker error: {e:#}"),
+                Err(_) => eprintln!("Auto-push worker panicked"),
+            }
+            (summary, cancelled)
+        } else {
+            let summary = run_provider(&provider, &oa_shards, &ctx, &progress, None);
+            (summary, cancelled)
+        }
     });
 
     // Unregister our signal handler, restore default Python SIGINT handling

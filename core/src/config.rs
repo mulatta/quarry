@@ -84,8 +84,6 @@ pub struct UploadConfig {
     pub force: Option<bool>,
     /// Max concurrent transfers for push/pull (default: 8)
     pub concurrency: Option<usize>,
-    /// Auto-push files to remote during run/hive (best-effort, non-blocking)
-    pub auto_push: Option<bool>,
 }
 
 /// Fully resolved upload configuration.
@@ -737,7 +735,6 @@ prefix = "papeline/hive"
             prefix: Some("data/hive".to_string()),
             force: None,
             concurrency: None,
-            auto_push: None,
         };
         let resolved = ResolvedUploadConfig::from_config(&cfg).unwrap();
         assert_eq!(resolved.bucket, "test-bucket");
@@ -759,7 +756,6 @@ prefix = "papeline/hive"
             prefix: None,
             force: None,
             concurrency: None,
-            auto_push: None,
         };
         let resolved = ResolvedUploadConfig::from_config(&cfg).unwrap();
         assert_eq!(resolved.region, "auto");
