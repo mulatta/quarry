@@ -109,6 +109,8 @@ struct PyUploadConfig {
     force: Option<bool>,
     #[pyo3(get)]
     concurrency: Option<usize>,
+    #[pyo3(get)]
+    auto_push: Option<bool>,
 }
 
 impl From<config::FileConfig> for PyConfig {
@@ -146,6 +148,7 @@ impl From<config::FileConfig> for PyConfig {
                 prefix: c.upload.prefix,
                 force: c.upload.force,
                 concurrency: c.upload.concurrency,
+                auto_push: c.upload.auto_push,
             },
         }
     }
