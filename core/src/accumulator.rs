@@ -16,6 +16,11 @@ pub trait Accumulator {
     /// Number of rows currently buffered
     fn len(&self) -> usize;
 
+    /// Whether the buffer is empty
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// Check if buffer is full and should be flushed
     fn is_full(&self) -> bool {
         self.len() >= DEFAULT_BATCH_SIZE

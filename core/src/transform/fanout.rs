@@ -62,6 +62,10 @@ macro_rules! fanout_accumulator {
                 self.$first.len()
             }
 
+            pub fn is_empty(&self) -> bool {
+                self.$first.is_empty()
+            }
+
             pub fn is_full(&self) -> bool {
                 self.$first.len() >= DEFAULT_BATCH_SIZE
             }
