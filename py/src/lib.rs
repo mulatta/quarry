@@ -10,10 +10,13 @@ use pyo3::exceptions::{PyKeyboardInterrupt, PyRuntimeError};
 use pyo3::prelude::*;
 use rayon::prelude::*;
 use rustc_hash::FxHashSet;
+use tracing_subscriber::EnvFilter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 use papeline_core::config::{self, ResolvedHiveConfig, ResolvedUploadConfig};
 use papeline_core::oa::{self, OAProvider, OAShard};
-use papeline_core::progress::ProgressContext;
+use papeline_core::progress::{IndicatifMakeWriter, ProgressContext};
 use papeline_core::provider::{RunContext, run_provider};
 use papeline_core::remote::RemoteTargets;
 use papeline_core::stream::HttpPool;
@@ -25,6 +28,19 @@ use papeline_core::{api, hive, remote, transform};
 
 fn to_pyerr(e: impl std::fmt::Display) -> PyErr {
     PyRuntimeError::new_err(e.to_string())
+}
+
+/// Set up tracing subscriber routed through indicatif for TTY/non-TTY compat.
+fn init_tracing(progress: &ProgressContext) {
+    let writer = IndicatifMakeWriter::new(progress.multi().clone());
+    let _ = tracing_subscriber::registry()
+        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(writer)
+                .without_time(),
+        )
+        .try_init();
 }
 
 // ============================================================
@@ -175,14 +191,18 @@ struct PyTransferSummary {
     bytes_transferred: u64,
     #[pyo3(get)]
     files_skipped: usize,
+    #[pyo3(get)]
+    files_failed: usize,
+    #[pyo3(get)]
+    failed_keys: Vec<String>,
 }
 
 #[pymethods]
 impl PyTransferSummary {
     fn __repr__(&self) -> String {
         format!(
-            "TransferSummary(transferred={}, skipped={}, bytes={})",
-            self.files_transferred, self.files_skipped, self.bytes_transferred,
+            "TransferSummary(transferred={}, skipped={}, failed={}, bytes={})",
+            self.files_transferred, self.files_skipped, self.files_failed, self.bytes_transferred,
         )
     }
 }
@@ -353,12 +373,23 @@ fn push(
     let targets = RemoteTargets { raw, hive };
 
     py.allow_threads(move || {
-        let summary = remote::run_push(&config, &output_dir, &targets, dry_run, concurrency)
-            .map_err(to_pyerr)?;
+        let progress: Arc<ProgressContext> = Arc::new(ProgressContext::new());
+        init_tracing(&progress);
+        let summary = remote::run_push(
+            &config,
+            &output_dir,
+            &targets,
+            dry_run,
+            concurrency,
+            &progress,
+        )
+        .map_err(to_pyerr)?;
         Ok(PyTransferSummary {
             files_transferred: summary.files_transferred,
             bytes_transferred: summary.bytes_transferred,
             files_skipped: summary.files_skipped,
+            files_failed: summary.files_failed,
+            failed_keys: summary.failed_keys,
         })
     })
 }
@@ -404,12 +435,23 @@ fn pull(
     let targets = RemoteTargets { raw, hive };
 
     py.allow_threads(move || {
-        let summary = remote::run_pull(&config, &output_dir, &targets, dry_run, concurrency)
-            .map_err(to_pyerr)?;
+        let progress: Arc<ProgressContext> = Arc::new(ProgressContext::new());
+        init_tracing(&progress);
+        let summary = remote::run_pull(
+            &config,
+            &output_dir,
+            &targets,
+            dry_run,
+            concurrency,
+            &progress,
+        )
+        .map_err(to_pyerr)?;
         Ok(PyTransferSummary {
             files_transferred: summary.files_transferred,
             bytes_transferred: summary.bytes_transferred,
             files_skipped: summary.files_skipped,
+            files_failed: summary.files_failed,
+            failed_keys: summary.failed_keys,
         })
     })
 }

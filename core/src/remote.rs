@@ -180,6 +180,8 @@ pub struct TransferSummary {
     pub files_transferred: usize,
     pub bytes_transferred: u64,
     pub files_skipped: usize,
+    pub files_failed: usize,
+    pub failed_keys: Vec<String>,
 }
 
 /// State files that are always overwritten (small, mutable).
@@ -401,7 +403,7 @@ async fn push_file(
     Ok(lf.size)
 }
 
-/// Download a single file from the bucket. Atomic: write to .tmp then rename.
+/// Download a single file from the bucket via streaming. Atomic: write to .tmp then rename.
 async fn pull_file(
     bucket: &Bucket,
     prefix: &str,
@@ -420,13 +422,23 @@ async fn pull_file(
     let key = make_key(prefix, &ro.relative);
 
     let response = bucket
-        .get_object(&key)
+        .get_object_stream(&key)
         .await
         .map_err(|e| anyhow::anyhow!("S3 download failed for {key}: {e}"))?;
 
-    tokio::fs::write(&tmp_path, response.bytes())
+    let mut file = tokio::fs::File::create(&tmp_path)
         .await
-        .with_context(|| format!("Cannot write {}", tmp_path.display()))?;
+        .with_context(|| format!("Cannot create {}", tmp_path.display()))?;
+
+    let mut total = 0u64;
+    let mut stream = response.bytes;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.with_context(|| format!("Stream read error for {key}"))?;
+        total += chunk.len() as u64;
+        tokio::io::AsyncWriteExt::write_all(&mut file, &chunk)
+            .await
+            .with_context(|| format!("Write error for {}", tmp_path.display()))?;
+    }
 
     tokio::fs::rename(&tmp_path, &local_path)
         .await
@@ -438,12 +450,8 @@ async fn pull_file(
             )
         })?;
 
-    tracing::info!(
-        "pulled {} ({})",
-        ro.relative,
-        format_bytes(ro.size as usize)
-    );
-    Ok(ro.size)
+    tracing::info!("pulled {} ({})", ro.relative, format_bytes(total as usize));
+    Ok(total)
 }
 
 // ============================================================
@@ -457,6 +465,7 @@ pub fn run_push(
     targets: &RemoteTargets,
     dry_run: bool,
     concurrency: usize,
+    progress: &crate::progress::SharedProgress,
 ) -> Result<TransferSummary> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -479,18 +488,20 @@ pub fn run_push(
         let push_count = to_push.len();
 
         if dry_run {
-            println!(
+            tracing::info!(
                 "Push dry run: {} to transfer, {} up to date",
                 push_count,
                 total_files - push_count
             );
             for f in &to_push {
-                println!("  + {} ({})", f.relative, format_bytes(f.size as usize));
+                tracing::info!("  + {} ({})", f.relative, format_bytes(f.size as usize));
             }
             return Ok(TransferSummary {
                 files_transferred: 0,
                 bytes_transferred: 0,
                 files_skipped: total_files,
+                files_failed: 0,
+                failed_keys: Vec::new(),
             });
         }
 
@@ -499,15 +510,15 @@ pub fn run_push(
                 files_transferred: 0,
                 bytes_transferred: 0,
                 files_skipped: total_files,
+                files_failed: 0,
+                failed_keys: Vec::new(),
             });
         }
 
-        tracing::info!(
-            "Pushing {} files ({} up to date)",
-            push_count,
-            total_files - push_count
-        );
+        progress.init_global(push_count as u64);
+        progress.set_global_message(format!("{} up to date", total_files - push_count));
 
+        let keys: Vec<String> = to_push.iter().map(|lf| lf.relative.clone()).collect();
         let results: Vec<Result<u64>> = futures_util::stream::iter(to_push.into_iter().map(|lf| {
             let bucket = &bucket;
             let prefix = &config.prefix;
@@ -519,15 +530,28 @@ pub fn run_push(
 
         let mut bytes = 0u64;
         let mut transferred = 0usize;
-        for r in results {
-            bytes += r?;
-            transferred += 1;
+        let mut failed_keys_out = Vec::new();
+        for (r, key) in results.into_iter().zip(keys) {
+            match r {
+                Ok(size) => {
+                    bytes += size;
+                    transferred += 1;
+                }
+                Err(e) => {
+                    tracing::error!("{key}: {e}");
+                    failed_keys_out.push(key);
+                }
+            }
+            progress.inc_global();
         }
+        progress.finish_global();
 
         Ok(TransferSummary {
             files_transferred: transferred,
             bytes_transferred: bytes,
-            files_skipped: total_files - transferred,
+            files_skipped: total_files - push_count,
+            files_failed: failed_keys_out.len(),
+            failed_keys: failed_keys_out,
         })
     })
 }
@@ -539,6 +563,7 @@ pub fn run_pull(
     targets: &RemoteTargets,
     dry_run: bool,
     concurrency: usize,
+    progress: &crate::progress::SharedProgress,
 ) -> Result<TransferSummary> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -561,18 +586,20 @@ pub fn run_pull(
         let pull_count = to_pull.len();
 
         if dry_run {
-            println!(
+            tracing::info!(
                 "Pull dry run: {} to transfer, {} up to date",
                 pull_count,
                 total_files - pull_count
             );
             for f in &to_pull {
-                println!("  + {} ({})", f.relative, format_bytes(f.size as usize));
+                tracing::info!("  + {} ({})", f.relative, format_bytes(f.size as usize));
             }
             return Ok(TransferSummary {
                 files_transferred: 0,
                 bytes_transferred: 0,
                 files_skipped: total_files,
+                files_failed: 0,
+                failed_keys: Vec::new(),
             });
         }
 
@@ -581,15 +608,15 @@ pub fn run_pull(
                 files_transferred: 0,
                 bytes_transferred: 0,
                 files_skipped: total_files,
+                files_failed: 0,
+                failed_keys: Vec::new(),
             });
         }
 
-        tracing::info!(
-            "Pulling {} files ({} up to date)",
-            pull_count,
-            total_files - pull_count
-        );
+        progress.init_global(pull_count as u64);
+        progress.set_global_message(format!("{} up to date", total_files - pull_count));
 
+        let keys: Vec<String> = to_pull.iter().map(|ro| ro.relative.clone()).collect();
         let results: Vec<Result<u64>> = futures_util::stream::iter(to_pull.into_iter().map(|ro| {
             let bucket = &bucket;
             let prefix = &config.prefix;
@@ -601,15 +628,28 @@ pub fn run_pull(
 
         let mut bytes = 0u64;
         let mut transferred = 0usize;
-        for r in results {
-            bytes += r?;
-            transferred += 1;
+        let mut failed_keys_out = Vec::new();
+        for (r, key) in results.into_iter().zip(keys) {
+            match r {
+                Ok(size) => {
+                    bytes += size;
+                    transferred += 1;
+                }
+                Err(e) => {
+                    tracing::error!("{key}: {e}");
+                    failed_keys_out.push(key);
+                }
+            }
+            progress.inc_global();
         }
+        progress.finish_global();
 
         Ok(TransferSummary {
             files_transferred: transferred,
             bytes_transferred: bytes,
-            files_skipped: total_files - transferred,
+            files_skipped: total_files - pull_count,
+            files_failed: failed_keys_out.len(),
+            failed_keys: failed_keys_out,
         })
     })
 }

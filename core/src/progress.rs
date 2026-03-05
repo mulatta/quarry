@@ -201,6 +201,11 @@ pub struct ProgressContext {
 }
 
 impl ProgressContext {
+    /// Access the underlying `MultiProgress` (for tracing writer integration).
+    pub fn multi(&self) -> &MultiProgress {
+        &self.multi
+    }
+
     pub fn new() -> Self {
         let is_tty = std::io::stderr().is_terminal();
         let multi = MultiProgress::new();

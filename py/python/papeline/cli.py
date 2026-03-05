@@ -409,19 +409,32 @@ def hive(
     rprint("[green]Hive partitioning complete.[/green]")
 
 
+def _transfer_summary(label: str, summary: papeline.TransferSummary) -> None:
+    """Print transfer summary and exit with error if there were failures."""
+    rprint(
+        f"{label}: {summary.files_transferred} transferred "
+        f"({_format_bytes(summary.bytes_transferred)}), "
+        f"{summary.files_skipped} skipped"
+    )
+    if summary.files_failed > 0:
+        rprint(f"[red]Failed: {summary.files_failed} files[/red]")
+        for key in summary.failed_keys[:20]:
+            rprint(f"  {key}")
+        if len(summary.failed_keys) > 20:
+            rprint(f"  ... and {len(summary.failed_keys) - 20} more")
+        raise typer.Exit(code=1)
+
+
 @app.command()
 def push(
     output_dir: str = typer.Option("./outputs", "-o", "--output-dir", help="Output directory"),
     config: str | None = typer.Option(None, "-c", "--config", help="Config file (TOML)"),
-    raw_only: bool = typer.Option(False, help="Push raw/ only"),
-    hive_only: bool = typer.Option(False, help="Push hive/ only"),
+    no_raw: bool = typer.Option(False, help="Exclude raw/"),
+    no_hive: bool = typer.Option(False, help="Exclude hive/"),
     dry_run: bool = typer.Option(False, help="Show what would be pushed"),
     concurrency: int = typer.Option(8, help="Max concurrent uploads"),
 ) -> None:
     """Sync local files to S3-compatible storage."""
-    if raw_only and hive_only:
-        _abort("Cannot use --raw-only and --hive-only together")
-
     cfg = load_config(config)
     root = cfg.output or output_dir
     upload = _resolve_upload(cfg.upload)
@@ -429,8 +442,8 @@ def push(
     try:
         summary = papeline.push(
             output_dir=root,
-            raw=not hive_only,
-            hive=not raw_only,
+            raw=not no_raw,
+            hive=not no_hive,
             dry_run=dry_run,
             concurrency=concurrency,
             **upload,
@@ -438,18 +451,15 @@ def push(
     except RuntimeError as e:
         _abort(str(e))
 
-    rprint(
-        f"Push: {summary.files_transferred} transferred "
-        f"({_format_bytes(summary.bytes_transferred)}), "
-        f"{summary.files_skipped} skipped"
-    )
+    _transfer_summary("Push", summary)
 
 
 @app.command()
 def pull(
     output_dir: str = typer.Option("./outputs", "-o", "--output-dir", help="Output directory"),
     config: str | None = typer.Option(None, "-c", "--config", help="Config file (TOML)"),
-    include_hive: bool = typer.Option(False, help="Also pull hive/"),
+    no_raw: bool = typer.Option(False, help="Exclude raw/"),
+    no_hive: bool = typer.Option(False, help="Exclude hive/"),
     dry_run: bool = typer.Option(False, help="Show what would be pulled"),
     concurrency: int = typer.Option(8, help="Max concurrent downloads"),
 ) -> None:
@@ -461,8 +471,8 @@ def pull(
     try:
         summary = papeline.pull(
             output_dir=root,
-            raw=True,
-            hive=include_hive,
+            raw=not no_raw,
+            hive=not no_hive,
             dry_run=dry_run,
             concurrency=concurrency,
             **upload,
@@ -470,11 +480,7 @@ def pull(
     except RuntimeError as e:
         _abort(str(e))
 
-    rprint(
-        f"Pull: {summary.files_transferred} transferred "
-        f"({_format_bytes(summary.bytes_transferred)}), "
-        f"{summary.files_skipped} skipped"
-    )
+    _transfer_summary("Pull", summary)
 
 
 @app.command()

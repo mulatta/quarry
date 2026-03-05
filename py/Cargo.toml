@@ -14,6 +14,7 @@ rustc-hash = { workspace = true }
 indicatif = { workspace = true }
 rayon = { workspace = true }
 signal-hook = "0.3"
+tracing-subscriber = { workspace = true }
 
 [lints.clippy]
 needless_pass_by_value = "allow"

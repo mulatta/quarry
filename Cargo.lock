@@ -1708,6 +1708,7 @@ dependencies = [
  "rayon",
  "rustc-hash",
  "signal-hook",
+ "tracing-subscriber",
 ]
 
 [[package]]
