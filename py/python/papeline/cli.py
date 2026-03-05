@@ -283,6 +283,9 @@ def hive(
     cfg = _load_config(config)
     root = cfg.output or output_dir
 
+    # Auto-push: resolve upload config if enabled
+    upload_kw = _auto_push_kwargs(cfg)
+
     try:
         papeline.run_hive(
             output_dir=root,
@@ -293,6 +296,7 @@ def hive(
             memory_limit=memory_limit or cfg.hive.memory_limit or "32GB",
             force=force,
             dry_run=dry_run,
+            **upload_kw,
         )
     except RuntimeError as e:
         _abort(str(e))
@@ -411,6 +415,17 @@ def clean(
 # ============================================================
 
 
+def _auto_push_kwargs(cfg: papeline.Config) -> dict:
+    """Return upload kwargs for auto-push if enabled, else empty dict."""
+    if not cfg.upload.auto_push:
+        return {}
+    try:
+        return _resolve_upload(cfg.upload)
+    except SystemExit:
+        # Missing upload config — skip auto-push silently
+        return {}
+
+
 def _run_hive_with_cfg(
     root: str,
     cfg: papeline.Config,
@@ -418,6 +433,8 @@ def _run_hive_with_cfg(
     clean_raw: bool | None = None,
 ) -> None:
     """Run hive with config defaults (used by auto-hive in `run`)."""
+    upload_kw = _auto_push_kwargs(cfg)
+
     try:
         papeline.run_hive(
             output_dir=root,
@@ -426,6 +443,7 @@ def _run_hive_with_cfg(
             num_shards=cfg.hive.num_shards or 4,
             threads=cfg.hive.threads or 0,
             memory_limit=cfg.hive.memory_limit or "32GB",
+            **upload_kw,
         )
     except RuntimeError as e:
         rprint(f"[red]Hive error:[/red] {e}", file=sys.stderr)

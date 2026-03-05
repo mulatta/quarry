@@ -84,6 +84,13 @@ pub fn create_bucket(config: &ResolvedUploadConfig) -> Result<Box<Bucket>> {
 // Streaming upload worker (used by fetch --hive and hive --upload)
 // ============================================================
 
+/// Summary from the background upload worker.
+pub struct UploadWorkerSummary {
+    pub uploaded: usize,
+    pub bytes: u64,
+    pub failed: usize,
+}
+
 /// Spawn a background upload worker thread.
 ///
 /// Returns `(sender, join_handle)`. Send `PathBuf`s of completed files
@@ -100,7 +107,7 @@ pub fn spawn_upload_worker(
     channel_bound: usize,
 ) -> Result<(
     mpsc::SyncSender<PathBuf>,
-    std::thread::JoinHandle<Result<()>>,
+    std::thread::JoinHandle<Result<UploadWorkerSummary>>,
 )> {
     let (tx, rx) = mpsc::sync_channel::<PathBuf>(channel_bound);
 
@@ -119,7 +126,7 @@ fn upload_thread(
     config: ResolvedUploadConfig,
     base_dir: PathBuf,
     rx: mpsc::Receiver<PathBuf>,
-) -> Result<()> {
+) -> Result<UploadWorkerSummary> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -129,6 +136,7 @@ fn upload_thread(
         let bucket = create_bucket(&config)?;
         let mut uploaded = 0usize;
         let mut bytes = 0u64;
+        let mut failed = 0usize;
 
         while let Ok(path) = rx.recv() {
             match stream_upload_file(&bucket, &config.prefix, &base_dir, &path).await {
@@ -136,26 +144,31 @@ fn upload_thread(
                     uploaded += 1;
                     bytes += size;
                     tracing::info!(
-                        "uploaded {}: {} bytes (total: {} files, {} bytes)",
+                        "auto-push: {} ({}) [{} files, {}]",
                         path.display(),
-                        size,
+                        format_bytes(size as usize),
                         uploaded,
-                        bytes,
+                        format_bytes(bytes as usize),
                     );
                 }
                 Err(e) => {
-                    tracing::error!("upload failed for {}: {e:#}", path.display());
-                    return Err(e);
+                    failed += 1;
+                    tracing::error!("auto-push failed for {}: {e:#}", path.display());
                 }
             }
         }
 
         tracing::info!(
-            "Upload complete: {} files, {} bytes",
+            "Auto-push complete: {} uploaded, {} failed, {}",
             uploaded,
+            failed,
             format_bytes(bytes as usize),
         );
-        Ok(())
+        Ok(UploadWorkerSummary {
+            uploaded,
+            bytes,
+            failed,
+        })
     })
 }
 

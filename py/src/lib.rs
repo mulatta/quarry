@@ -409,6 +409,9 @@ fn run(
 }
 
 /// Run hive partitioning on raw Parquet files.
+///
+/// When upload params (bucket, endpoint, access_key, secret_key) are provided,
+/// completed hive tables are auto-pushed to remote in background (best-effort).
 #[pyfunction]
 #[pyo3(signature = (
     output_dir,
@@ -419,6 +422,12 @@ fn run(
     memory_limit = "32GB",
     force = false,
     dry_run = false,
+    bucket = None,
+    endpoint = None,
+    access_key = None,
+    secret_key = None,
+    region = None,
+    prefix = None,
 ))]
 fn run_hive(
     py: Python<'_>,
@@ -430,9 +439,28 @@ fn run_hive(
     memory_limit: &str,
     force: bool,
     dry_run: bool,
+    bucket: Option<&str>,
+    endpoint: Option<&str>,
+    access_key: Option<&str>,
+    secret_key: Option<&str>,
+    region: Option<&str>,
+    prefix: Option<&str>,
 ) -> PyResult<()> {
     let output_dir = PathBuf::from(output_dir);
     let memory_limit = memory_limit.to_owned();
+
+    // Build upload config if all required fields are present
+    let upload_config = match (bucket, endpoint, access_key, secret_key) {
+        (Some(b), Some(e), Some(ak), Some(sk)) => Some(ResolvedUploadConfig {
+            bucket: b.to_owned(),
+            endpoint: e.to_owned(),
+            region: region.unwrap_or("auto").to_owned(),
+            access_key: ak.to_owned(),
+            secret_key: sk.to_owned(),
+            prefix: prefix.unwrap_or("").to_owned(),
+        }),
+        _ => None,
+    };
 
     py.allow_threads(move || {
         let threads = if threads == 0 { num_cpus() } else { threads };
@@ -448,7 +476,22 @@ fn run_hive(
             memory_limit_bytes,
         };
         let multi = MultiProgress::new();
-        hive::run_hive(&hive_config, force, dry_run, &multi, None).map_err(to_pyerr)
+
+        if let Some(ucfg) = upload_config {
+            // Spawn background upload worker
+            let (tx, handle) =
+                remote::spawn_upload_worker(ucfg, output_dir.clone(), 64).map_err(to_pyerr)?;
+            let result = hive::run_hive(&hive_config, force, dry_run, &multi, Some(&tx));
+            drop(tx); // signal worker to drain and finish
+            match handle.join() {
+                Ok(Ok(s)) => eprintln!("Auto-push: {} uploaded, {} failed", s.uploaded, s.failed),
+                Ok(Err(e)) => eprintln!("Auto-push worker error: {e:#}"),
+                Err(_) => eprintln!("Auto-push worker panicked"),
+            }
+            result.map_err(to_pyerr)
+        } else {
+            hive::run_hive(&hive_config, force, dry_run, &multi, None).map_err(to_pyerr)
+        }
     })
 }
 
