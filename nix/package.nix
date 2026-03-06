@@ -1,3 +1,4 @@
+{ inputs, ... }:
 {
   perSystem =
     {
@@ -6,17 +7,16 @@
       ...
     }:
     let
-      src = lib.cleanSourceWith {
-        src = lib.cleanSource ../.;
-        filter =
-          path: type:
-          let
-            baseName = baseNameOf path;
-          in
-          type == "directory"
-          || (lib.hasSuffix ".rs" path)
-          || baseName == "Cargo.toml"
-          || baseName == "Cargo.lock";
+      craneLib = inputs.crane.mkLib pkgs;
+
+      src = lib.fileset.toSource {
+        root = ../.;
+        fileset = lib.fileset.unions [
+          ../Cargo.toml
+          ../Cargo.lock
+          (craneLib.fileset.commonCargoSources ../core)
+          (craneLib.fileset.commonCargoSources ../cli)
+        ];
       };
 
       # Prebuilt ONNX Runtime v1.24.2 — matches ort-sys 2.0.0-rc.12.
@@ -70,40 +70,56 @@
         ];
       };
 
+      # Two-phase crane build: deps are cached separately from source.
+      # Each variant (CPU/CUDA) gets its own cargoArtifacts because
+      # ORT_LIB_LOCATION and features differ → different derivation inputs.
       mkQuarryEtl =
         {
-          features ? null,
+          features ? [ ],
           ort,
           extraBuildInputs ? [ ],
         }:
-        pkgs.rustPlatform.buildRustPackage {
-          pname = "quarry-etl";
-          version = "0.1.0";
+        let
+          featureArgs = lib.optionalString (
+            features != [ ]
+          ) " --features ${lib.concatStringsSep "," features}";
 
-          inherit src;
+          commonArgs = {
+            inherit src;
+            pname = "quarry-etl";
+            version = "0.1.0";
+            strictDeps = true;
+            dontUseCmakeConfigure = true;
 
-          cargoHash = "sha256-IsCmL2XCPzxMSfQxM9esH/eFe/nH9RAL8zB2bxRdJD0=";
+            nativeBuildInputs = with pkgs; [
+              cmake
+              pkg-config
+              autoPatchelfHook
+            ];
 
-          buildFeatures = features;
+            buildInputs = [
+              pkgs.openssl
+              pkgs.stdenv.cc.cc.lib
+              ort
+            ]
+            ++ extraBuildInputs;
 
-          dontUseCmakeConfigure = true;
+            cargoExtraArgs = "-p quarry-etl" + featureArgs;
+            ORT_LIB_LOCATION = "${ort}/lib";
+            ORT_PREFER_DYNAMIC_LINK = "1";
+          };
 
-          nativeBuildInputs = with pkgs; [
-            cmake
-            pkg-config
-            autoPatchelfHook
-          ];
-
-          buildInputs = [
-            pkgs.openssl
-            pkgs.stdenv.cc.cc.lib
-            ort
-          ]
-          ++ extraBuildInputs;
-
-          ORT_LIB_LOCATION = "${ort}/lib";
-          ORT_PREFER_DYNAMIC_LINK = "1";
-        };
+          # Phase 1: compile dependencies only (cached until Cargo.lock changes)
+          cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+        in
+        # Phase 2: compile project source (reuses cached deps)
+        craneLib.buildPackage (
+          commonArgs
+          // {
+            inherit cargoArtifacts;
+            doCheck = false;
+          }
+        );
     in
     {
       packages =
