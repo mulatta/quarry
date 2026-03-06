@@ -1,11 +1,18 @@
-//! Hive-partitioned Parquet output via streaming arrow-rs writers.
+//! Hive-partitioned Parquet output via 2-pass arrow-rs writers.
 //!
 //! Raw shard parquets → `pub_year=YYYY/shard_N.parquet` layout with
 //! deterministic `work_id % num_shards` assignment.
 //!
-//! Uses direct `ArrowWriter` for bounded memory: reads raw shards one at a time,
-//! routes each batch to per-partition writers that flush at `row_group_size`.
-//! Memory ≈ O(partition_map + writer_buffers) instead of O(total_data).
+//! **2-pass approach** for optimal row_group_size:
+//!
+//! - Step 1: raw → temp/ partitioned by `pub_year` only (~300 writers).
+//!   Row group size is small here, but this is just intermediate data.
+//! - Step 2: temp/pub_year=YYYY → staging/ repartitioned by `work_id % num_shards`
+//!   (4 writers per year, processed in parallel). With only 4 concurrent writers,
+//!   each can buffer up to `row_group_size` rows before flushing.
+//!
+//! Bounded memory: each pass reads one shard/file at a time, routes batches
+//! to per-partition writers that flush at memory limit.
 
 use std::collections::HashMap;
 use std::fs;
@@ -163,23 +170,22 @@ impl WorkPartitionMap {
         self.inner.extend(other.inner);
     }
 
-    /// Collect all unique (year, bucket) pairs present in the map.
-    fn unique_partitions(&self) -> Vec<(i32, usize)> {
-        let mut seen = FxHashSet::default();
-        for &packed in self.inner.values() {
-            let year = (packed >> 32) as i32;
-            let bucket = (packed & 0xFFFF_FFFF) as usize;
-            seen.insert((year, bucket));
-        }
-        seen.into_iter().collect()
+    /// Get the year for a work_id.
+    fn get_year(&self, wid_num: i64) -> Option<i32> {
+        self.inner
+            .get(&wid_num)
+            .map(|&packed| (packed >> 32) as i32)
     }
 
-    fn get(&self, wid_num: i64) -> Option<(i32, usize)> {
-        self.inner.get(&wid_num).map(|&packed| {
-            let year = (packed >> 32) as i32;
-            let bucket = (packed & 0xFFFF_FFFF) as usize;
-            (year, bucket)
-        })
+    /// Collect all unique years present in the map.
+    fn unique_years(&self) -> Vec<i32> {
+        let mut seen = FxHashSet::default();
+        for &packed in self.inner.values() {
+            seen.insert((packed >> 32) as i32);
+        }
+        let mut years: Vec<i32> = seen.into_iter().collect();
+        years.sort_unstable();
+        years
     }
 
     fn len(&self) -> usize {
@@ -443,21 +449,27 @@ fn rebuild_partition_map_from(
 // Per-table processing
 // ============================================================
 
-/// Process works table: 2-pass (build partition map, then parallel read+write).
+/// Process works table: 2-step (year partition → shard repartition).
+///
+/// Step 1: Read raw shards → write to temp/ partitioned by pub_year only (~300 writers).
+/// Step 2: Read temp/pub_year=YYYY → repartition by work_id % num_shards → staging/ (4 writers per year).
+///
+/// This achieves large row_group_size in the final output because step 2 has very few
+/// concurrent writers (num_shards), allowing each writer to buffer more rows before flushing.
 fn process_works(
     config: &ResolvedHiveConfig,
     pool: &rayon::ThreadPool,
     pb: &dyn ProgressReporter,
 ) -> Result<WorkPartitionMap> {
-    let staging = config.staging_dir.join("works");
-    fs::create_dir_all(&staging)?;
+    let temp_table = config.temp_dir.join("works");
+    fs::create_dir_all(&temp_table)?;
 
     let shard_files = list_shard_files(&config.raw_dir.join("works"))?;
     if shard_files.is_empty() {
         anyhow::bail!("No works shard files found in {}", config.raw_dir.display());
     }
 
-    // Pass 1: build partition map (projection: work_id + publication_year only)
+    // Scan: build partition map (projection: work_id + publication_year only)
     pb.set_message("building partition map...");
     let t_map = Instant::now();
     let partition_map = rebuild_partition_map_from(config, &shard_files, pool, pb)?;
@@ -469,7 +481,7 @@ fn process_works(
         fmt_elapsed(t_map.elapsed()),
     );
 
-    // Pass 2: parallel read + write via per-partition Mutex writers
+    // Step 1: Write to temp by year only
     let schema = {
         let file = fs::File::open(&shard_files[0])?;
         ParquetRecordBatchReaderBuilder::try_new(file)?
@@ -480,40 +492,32 @@ fn process_works(
     let pub_year_idx = schema
         .index_of("publication_year")
         .map_err(|e| anyhow::anyhow!("works schema missing publication_year: {e}"))?;
-    let work_id_idx = schema
-        .index_of("work_id")
-        .map_err(|e| anyhow::anyhow!("works schema missing work_id: {e}"))?;
-    let num_shards = config.num_shards;
 
     let props = writer_properties(config);
-    let partitions = partition_map.unique_partitions();
-    let writers = create_partition_writers(&partitions, &schema, &props, &staging)?;
-    let per_writer_mem_limit = config.memory_limit_bytes * 9 / 10 / partitions.len().max(1);
+    let years = partition_map.unique_years();
+    let partitions: Vec<(i32, usize)> = years.iter().map(|&y| (y, 0)).collect();
+    let writers = create_partition_writers(&partitions, &schema, &props, &temp_table)?;
+    let per_writer_mem = config.memory_limit_bytes * 9 / 10 / partitions.len().max(1);
     tracing::info!(
-        "{:<20} writing {} shards \u{2192} {} partitions (mem limit {}/writer)",
+        "{:<20} step 1: {} shards \u{2192} {} year partitions (mem {}/writer)",
         "works",
         shard_files.len(),
         partitions.len(),
-        format_bytes(per_writer_mem_limit),
+        format_bytes(per_writer_mem),
     );
 
     pb.set_position(0);
-    pb.set_message("writing partitions...");
+    pb.set_message("step 1: partitioning by year...");
 
     parallel_process(
         &shard_files,
         &schema,
         &writers,
-        per_writer_mem_limit,
+        per_writer_mem,
         pool,
         pb,
         |batch| {
             let num_rows = batch.num_rows();
-            let work_id_col = batch
-                .column(work_id_idx)
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .context("work_id column must be Utf8")?;
             let pub_year_col = batch.column(pub_year_idx);
             let pub_year_array = pub_year_col.as_any().downcast_ref::<Int32Array>();
 
@@ -527,31 +531,220 @@ fn process_works(
                         .expect("publication_year should be Int32")
                         .value(i)
                 };
-                let bucket = if work_id_col.is_null(i) {
-                    0usize
-                } else {
-                    let num = work_id_num(work_id_col.value(i));
-                    (num.unsigned_abs() % num_shards as u64) as usize
-                };
-                groups.entry((year, bucket)).or_default().push(i as u32);
+                groups.entry((year, 0)).or_default().push(i as u32);
             }
 
             Ok(groups)
         },
     )?;
 
-    tracing::info!(
-        "{:<20} read done, compressing {} partitions",
-        "works",
-        partitions.len(),
-    );
-    pb.set_message("compressing...");
+    pb.set_message("step 1: compressing...");
     close_writers_parallel(writers, pool)?;
+
+    // Step 2: Repartition by shard
+    let staging_table = config.staging_dir.join("works");
+    fs::create_dir_all(&staging_table)?;
+
+    pb.set_position(0);
+    pb.set_message("step 2: repartitioning by shard...");
+
+    repartition_by_shard("works", config, pool, pb)?;
+
+    // Cleanup temp
+    if let Err(e) = fs::remove_dir_all(&temp_table) {
+        tracing::warn!("Failed to clean temp/works: {e}");
+    }
 
     Ok(partition_map)
 }
 
-/// Process a child table: parallel read with partition_map lookup.
+// ============================================================
+// Step 2: Repartition temp → staging by shard
+// ============================================================
+
+/// List `pub_year=YYYY` directories under a temp table path.
+fn list_year_dirs(temp_table: &Path) -> Result<Vec<(i32, PathBuf)>> {
+    let mut dirs = Vec::new();
+    for entry in
+        fs::read_dir(temp_table).with_context(|| format!("Cannot read {}", temp_table.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        if let Some(name) = path.file_name().and_then(|n| n.to_str())
+            && let Some(year_str) = name.strip_prefix("pub_year=")
+            && let Ok(year) = year_str.parse::<i32>()
+        {
+            dirs.push((year, path));
+        }
+    }
+    dirs.sort_by_key(|(y, _)| *y);
+    Ok(dirs)
+}
+
+/// Repartition a single year's temp data into `num_shards` files by `work_id % num_shards`.
+///
+/// Reads temp/pub_year=YYYY/shard_0.parquet, routes by work_id, writes to
+/// staging/{table}/pub_year=YYYY/shard_{0..N}.parquet.
+fn repartition_year(
+    year: i32,
+    temp_year_dir: &Path,
+    staging_table: &Path,
+    props: &WriterProperties,
+    num_shards: usize,
+    per_writer_mem: usize,
+) -> Result<()> {
+    let files = list_shard_files(temp_year_dir)?;
+    if files.is_empty() {
+        return Ok(());
+    }
+
+    let schema = {
+        let file = fs::File::open(&files[0])?;
+        ParquetRecordBatchReaderBuilder::try_new(file)?
+            .schema()
+            .clone()
+    };
+
+    let work_id_idx = schema
+        .index_of("work_id")
+        .map_err(|e| anyhow::anyhow!("schema missing work_id: {e}"))?;
+
+    // Create num_shards writers for this year
+    let staging_year = staging_table.join(format!("pub_year={year}"));
+    fs::create_dir_all(&staging_year)?;
+
+    let mut writers: Vec<PartitionWriter> = Vec::with_capacity(num_shards);
+    for shard in 0..num_shards {
+        let path = staging_year.join(format!("shard_{shard}.parquet"));
+        let file = BufWriter::new(fs::File::create(&path)?);
+        let writer = ArrowWriter::try_new(file, schema.clone(), Some(props.clone()))?;
+        writers.push(writer);
+    }
+
+    // Read and route by work_id % num_shards
+    for file_path in &files {
+        let file = fs::File::open(file_path)?;
+        let reader = ParquetRecordBatchReaderBuilder::try_new(file)?
+            .with_batch_size(READER_BATCH_SIZE)
+            .build()?;
+
+        for batch_result in reader {
+            let batch = coerce_batch(batch_result?, &schema)?;
+            let work_id_col = batch
+                .column(work_id_idx)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .context("work_id must be Utf8")?;
+
+            let mut groups: Vec<Vec<u32>> = vec![Vec::new(); num_shards];
+            for i in 0..batch.num_rows() {
+                let shard = if work_id_col.is_null(i) {
+                    0
+                } else {
+                    let wid_num = work_id_num(work_id_col.value(i));
+                    (wid_num.unsigned_abs() % num_shards as u64) as usize
+                };
+                groups[shard].push(i as u32);
+            }
+
+            for (shard, indices) in groups.iter().enumerate() {
+                if indices.is_empty() {
+                    continue;
+                }
+                let indices_array = UInt32Array::from(indices.clone());
+                let columns: Vec<ArrayRef> = batch
+                    .columns()
+                    .iter()
+                    .map(|col| compute::take(col.as_ref(), &indices_array, None))
+                    .collect::<Result<Vec<_>, _>>()
+                    .context("arrow take failed")?;
+                let sub_batch = RecordBatch::try_new(batch.schema(), columns)?;
+                writers[shard].write(&sub_batch)?;
+                if writers[shard].memory_size() > per_writer_mem {
+                    writers[shard].flush()?;
+                }
+            }
+        }
+    }
+
+    // Close writers (sequential — only num_shards writers, not worth parallelising)
+    for (shard, writer) in writers.into_iter().enumerate() {
+        writer
+            .close()
+            .with_context(|| format!("Failed to close pub_year={year}/shard_{shard}"))?;
+    }
+
+    Ok(())
+}
+
+/// Repartition all year directories from temp → staging by shard.
+///
+/// Processes years in parallel via rayon pool. Each year has `num_shards`
+/// writers, so total concurrent writers = min(pool_threads, num_years) × num_shards.
+fn repartition_by_shard(
+    table: &str,
+    config: &ResolvedHiveConfig,
+    pool: &rayon::ThreadPool,
+    pb: &dyn ProgressReporter,
+) -> Result<()> {
+    let temp_table = config.temp_dir.join(table);
+    let staging_table = config.staging_dir.join(table);
+    fs::create_dir_all(&staging_table)?;
+
+    let year_dirs = list_year_dirs(&temp_table)?;
+    pb.set_length(year_dirs.len() as u64);
+
+    let props = writer_properties(config);
+    let num_shards = config.num_shards;
+    // Memory budget: at most `threads` years processed concurrently, each with num_shards writers.
+    let per_writer_mem = config.memory_limit_bytes * 9 / 10 / (config.threads * num_shards).max(1);
+
+    tracing::info!(
+        "{:<20} step 2: {} years \u{2192} {} shards/year (mem {}/writer)",
+        table,
+        year_dirs.len(),
+        num_shards,
+        format_bytes(per_writer_mem),
+    );
+
+    let error: std::sync::Mutex<Option<anyhow::Error>> = std::sync::Mutex::new(None);
+
+    pool.install(|| {
+        year_dirs.par_iter().for_each(|(year, dir)| {
+            if error.lock().expect("not poisoned").is_some() {
+                return;
+            }
+            if let Err(e) = repartition_year(
+                *year,
+                dir,
+                &staging_table,
+                &props,
+                num_shards,
+                per_writer_mem,
+            ) {
+                let mut guard = error.lock().expect("not poisoned");
+                if guard.is_none() {
+                    *guard = Some(e.context(format!("repartition pub_year={year}")));
+                }
+            }
+            pb.inc(1);
+        });
+    });
+
+    if let Some(e) = error.into_inner().expect("not poisoned") {
+        return Err(e);
+    }
+
+    Ok(())
+}
+
+/// Process a child table: 2-step (year partition → shard repartition).
+///
+/// Step 1: Read raw shards → write to temp/ partitioned by pub_year via partition_map.
+/// Step 2: Read temp/pub_year=YYYY → repartition by work_id % num_shards → staging/.
 fn process_child(
     table: &str,
     config: &ResolvedHiveConfig,
@@ -559,8 +752,8 @@ fn process_child(
     pool: &rayon::ThreadPool,
     pb: &dyn ProgressReporter,
 ) -> Result<()> {
-    let staging = config.staging_dir.join(table);
-    fs::create_dir_all(&staging)?;
+    let temp_table = config.temp_dir.join(table);
+    fs::create_dir_all(&temp_table)?;
 
     let shard_files = list_shard_files(&config.raw_dir.join(table))?;
     if shard_files.is_empty() {
@@ -580,22 +773,28 @@ fn process_child(
 
     let unmatched = std::sync::atomic::AtomicUsize::new(0);
 
+    // Step 1: Write to temp by year only (using partition_map for year lookup)
     let props = writer_properties(config);
-    let partitions = partition_map.unique_partitions();
-    let writers = create_partition_writers(&partitions, &schema, &props, &staging)?;
-    let per_writer_mem_limit = config.memory_limit_bytes * 9 / 10 / partitions.len().max(1);
+    let years = partition_map.unique_years();
+    let partitions: Vec<(i32, usize)> = years.iter().map(|&y| (y, 0)).collect();
+    let writers = create_partition_writers(&partitions, &schema, &props, &temp_table)?;
+    let per_writer_mem = config.memory_limit_bytes * 9 / 10 / partitions.len().max(1);
     tracing::info!(
-        "{:<20} writing {} shards \u{2192} {} partitions",
+        "{:<20} step 1: {} shards \u{2192} {} year partitions (mem {}/writer)",
         table,
         shard_files.len(),
         partitions.len(),
+        format_bytes(per_writer_mem),
     );
+
+    pb.set_position(0);
+    pb.set_message("step 1: partitioning by year...");
 
     parallel_process(
         &shard_files,
         &schema,
         &writers,
-        per_writer_mem_limit,
+        per_writer_mem,
         pool,
         pb,
         |batch| {
@@ -614,9 +813,9 @@ fn process_child(
                     continue;
                 }
                 let wid_num = work_id_num(work_id_col.value(i));
-                match partition_map.get(wid_num) {
-                    Some((year, bucket)) => {
-                        groups.entry((year, bucket)).or_default().push(i as u32);
+                match partition_map.get_year(wid_num) {
+                    Some(year) => {
+                        groups.entry((year, 0)).or_default().push(i as u32);
                     }
                     None => {
                         unmatched.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -628,17 +827,23 @@ fn process_child(
         },
     )?;
 
-    tracing::info!(
-        "{:<20} read done, compressing {} partitions",
-        table,
-        partitions.len(),
-    );
-    pb.set_message("compressing...");
+    pb.set_message("step 1: compressing...");
     close_writers_parallel(writers, pool)?;
 
     let u = unmatched.load(std::sync::atomic::Ordering::Relaxed);
     if u > 0 {
-        tracing::warn!("{:<20} {} rows had no matching work_id (skipped)", table, u,);
+        tracing::warn!("{:<20} {} rows had no matching work_id (skipped)", table, u);
+    }
+
+    // Step 2: Repartition by shard
+    pb.set_position(0);
+    pb.set_message("step 2: repartitioning by shard...");
+
+    repartition_by_shard(table, config, pool, pb)?;
+
+    // Cleanup temp
+    if let Err(e) = fs::remove_dir_all(&temp_table) {
+        tracing::warn!("Failed to clean temp/{table}: {e}");
     }
 
     Ok(())
@@ -926,12 +1131,16 @@ pub fn run_hive(
         .build()
         .context("Failed to build thread pool")?;
 
-    // Clean stale staging from any previous interrupted run, then create fresh
+    // Clean stale staging/temp from any previous interrupted run, then create fresh
     if config.staging_dir.exists() {
         fs::remove_dir_all(&config.staging_dir)
             .context("Failed to clean stale staging directory")?;
     }
     fs::create_dir_all(&config.staging_dir)?;
+    if config.temp_dir.exists() {
+        fs::remove_dir_all(&config.temp_dir).context("Failed to clean stale temp directory")?;
+    }
+    fs::create_dir_all(&config.temp_dir)?;
 
     // 8. Process works first (builds partition map for child tables)
     let partition_map = if remaining.contains(&"works") {
@@ -1017,11 +1226,16 @@ pub fn run_hive(
     // 10. Save final state (marks run as complete)
     save_final_state(&hash, config, &tables)?;
 
-    // 11. Cleanup staging dir
+    // 11. Cleanup staging and temp dirs
     if config.staging_dir.exists()
         && let Err(e) = fs::remove_dir_all(&config.staging_dir)
     {
         tracing::warn!("Failed to remove staging dir: {e}");
+    }
+    if config.temp_dir.exists()
+        && let Err(e) = fs::remove_dir_all(&config.temp_dir)
+    {
+        tracing::warn!("Failed to remove temp dir: {e}");
     }
 
     global_bar.finish_and_clear();
@@ -1208,10 +1422,14 @@ mod tests {
         map.insert(12345, 2023, 2);
         map.insert(99999, 0, 0); // year=0 for null pub_year
 
-        assert_eq!(map.get(12345), Some((2023, 2)));
-        assert_eq!(map.get(99999), Some((0, 0)));
-        assert_eq!(map.get(11111), None);
+        assert_eq!(map.get_year(12345), Some(2023));
+        assert_eq!(map.get_year(99999), Some(0));
+        assert_eq!(map.get_year(11111), None);
         assert_eq!(map.len(), 2);
+
+        let years = map.unique_years();
+        assert!(years.contains(&2023));
+        assert!(years.contains(&0));
     }
 
     #[test]

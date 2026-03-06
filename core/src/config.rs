@@ -209,6 +209,8 @@ pub struct ResolvedHiveConfig {
     pub raw_dir: PathBuf,
     pub hive_dir: PathBuf,
     pub staging_dir: PathBuf,
+    /// Intermediate directory for year-only partitions (step 1 of 2-pass).
+    pub temp_dir: PathBuf,
     pub zstd_level: i32,
     pub row_group_size: usize,
     pub num_shards: usize,
@@ -230,6 +232,7 @@ impl ResolvedHiveConfig {
         let raw_dir = output_dir.join("raw");
         let hive_dir = output_dir.join("hive");
         let staging_dir = hive_dir.join(".staging");
+        let temp_dir = hive_dir.join(".temp");
 
         let memory_limit_bytes = match &hive.memory_limit {
             Some(s) => parse_memory_limit(s)?,
@@ -245,6 +248,7 @@ impl ResolvedHiveConfig {
             raw_dir,
             hive_dir,
             staging_dir,
+            temp_dir,
             zstd_level: hive.zstd_level.or(fallback_zstd).unwrap_or(8),
             row_group_size: hive.row_group_size.unwrap_or(500_000),
             num_shards: hive.num_shards.unwrap_or(4),
