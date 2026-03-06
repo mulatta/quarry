@@ -191,32 +191,55 @@ impl Embedder for OrtEmbedder {
         bar: &ProgressBar,
     ) -> Result<(Vec<f32>, usize)> {
         let n = texts.len();
-        let mut all: Vec<f32> = Vec::new();
-        let mut dim = 0usize;
 
-        for start in (0..n).step_by(batch_size) {
-            let end = (start + batch_size).min(n);
-            let batch_texts: Vec<String> = if self.prompt.is_empty() {
-                texts[start..end].to_vec()
-            } else {
-                texts[start..end]
-                    .iter()
-                    .map(|t| format!("{}{t}", self.prompt))
-                    .collect()
-            };
+        // Pipeline: tokenize batch N+1 on a worker thread while GPU runs batch N.
+        // sync_channel(1) keeps at most 1 pre-tokenized batch buffered.
+        std::thread::scope(|s| {
+            let (tx, rx) = std::sync::mpsc::sync_channel::<Result<(usize, BatchEncoding)>>(1);
 
-            let encoding = tokenize_batch(&self.tokenizer, &batch_texts, self.max_length)?;
-            let (emb, d) = self.run_batch(&encoding)?;
+            // Borrow fields for the producer (references are Copy, moved into closure)
+            let tokenizer = &self.tokenizer;
+            let prompt = &self.prompt;
+            let max_length = self.max_length;
 
-            if dim == 0 {
-                dim = d;
-                all.reserve(n * dim);
+            s.spawn(move || {
+                for start in (0..n).step_by(batch_size) {
+                    let end = (start + batch_size).min(n);
+                    let batch_texts: Vec<String> = if prompt.is_empty() {
+                        texts[start..end].to_vec()
+                    } else {
+                        texts[start..end]
+                            .iter()
+                            .map(|t| format!("{prompt}{t}"))
+                            .collect()
+                    };
+
+                    let count = end - start;
+                    let result =
+                        tokenize_batch(tokenizer, &batch_texts, max_length).map(|enc| (count, enc));
+                    if tx.send(result).is_err() {
+                        break; // consumer dropped rx (error or done)
+                    }
+                }
+            });
+
+            let mut all: Vec<f32> = Vec::new();
+            let mut dim = 0usize;
+
+            for received in rx {
+                let (count, encoding) = received?;
+                let (emb, d) = self.run_batch(&encoding)?;
+
+                if dim == 0 {
+                    dim = d;
+                    all.reserve(n * dim);
+                }
+                all.extend_from_slice(&emb);
+                bar.inc(count as u64);
             }
-            all.extend_from_slice(&emb);
-            bar.inc((end - start) as u64);
-        }
 
-        Ok((all, dim))
+            Ok((all, dim))
+        })
     }
 }
 
