@@ -29,7 +29,4 @@ pub trait Embedder {
         batch_size: usize,
         bar: &ProgressBar,
     ) -> Result<(Vec<f32>, usize)>;
-
-    /// Embedding dimension (0 if unknown until first encode call).
-    fn dim(&self) -> usize;
 }

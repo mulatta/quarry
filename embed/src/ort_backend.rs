@@ -185,10 +185,6 @@ impl Embedder for OrtEmbedder {
 
         Ok((all, dim))
     }
-
-    fn dim(&self) -> usize {
-        0 // unknown until first encode
-    }
 }
 
 // ============================================================

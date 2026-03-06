@@ -108,8 +108,4 @@ impl Embedder for HttpEmbedder {
         let rt = tokio::runtime::Handle::current();
         rt.block_on(self.encode_async(texts, batch_size, bar))
     }
-
-    fn dim(&self) -> usize {
-        0 // unknown until first encode call
-    }
 }

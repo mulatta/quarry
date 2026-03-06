@@ -18,11 +18,18 @@ use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::embedder::Embedder;
-use crate::http_backend::HttpEmbedder;
 
 // ============================================================
 // CLI
 // ============================================================
+
+#[derive(Clone, clap::ValueEnum)]
+enum Backend {
+    /// OpenAI-compatible HTTP API
+    Http,
+    /// Local ONNX Runtime inference
+    Local,
+}
 
 #[derive(Parser)]
 #[command(about = "Generate embeddings for academic paper hive data")]
@@ -34,21 +41,47 @@ struct Cli {
     #[arg(short, long)]
     output: PathBuf,
 
-    /// Embedding API endpoint (e.g. http://localhost:8080/embed)
-    #[arg(long, env = "EMBED_ENDPOINT")]
-    endpoint: String,
+    /// Embedding backend
+    #[arg(long, value_enum, default_value_t = Backend::Http)]
+    backend: Backend,
 
-    /// Model name passed to the API
-    #[arg(long, default_value = "jina-embeddings-v3")]
-    model: String,
-
-    /// Batch size for embedding API calls
+    /// Batch size for embedding calls
     #[arg(long, default_value_t = 64)]
     batch_size: usize,
 
     /// Max rows to process (for testing)
     #[arg(long)]
     max_rows: Option<usize>,
+
+    // --- HTTP backend options ---
+    /// Embedding API endpoint (http backend)
+    #[arg(long, env = "EMBED_ENDPOINT")]
+    endpoint: Option<String>,
+
+    /// Model name passed to the API (http backend)
+    #[arg(long, default_value = "jina-embeddings-v3")]
+    model: String,
+
+    // --- Local backend options ---
+    /// Path to ONNX model directory containing model.onnx + tokenizer.json
+    #[arg(long)]
+    model_dir: Option<PathBuf>,
+
+    /// Execution device (local backend)
+    #[arg(long, default_value = "cpu")]
+    device: String,
+
+    /// Pooling strategy (local backend)
+    #[arg(long, value_enum, default_value_t = crate::embedder::PoolingStrategy::Mean)]
+    pooling: crate::embedder::PoolingStrategy,
+
+    /// Prompt prefix prepended to each text (local backend, e.g. "Document: ")
+    #[arg(long, default_value = "")]
+    prompt: String,
+
+    /// Max token length for tokenizer (local backend)
+    #[arg(long, default_value_t = 512)]
+    max_length: usize,
 }
 
 fn encode_bar(n: u64) -> ProgressBar {
@@ -83,7 +116,32 @@ async fn main() -> Result<()> {
     }
 
     // Phase 2: Encode
-    let embedder = HttpEmbedder::new(cli.endpoint, cli.model);
+    let embedder: Box<dyn Embedder> = match cli.backend {
+        Backend::Http => {
+            let endpoint = cli
+                .endpoint
+                .ok_or_else(|| anyhow::anyhow!("--endpoint is required for http backend"))?;
+            Box::new(http_backend::HttpEmbedder::new(endpoint, cli.model))
+        }
+        Backend::Local => {
+            #[cfg(feature = "local")]
+            {
+                let model_dir = cli
+                    .model_dir
+                    .ok_or_else(|| anyhow::anyhow!("--model-dir is required for local backend"))?;
+                Box::new(ort_backend::OrtEmbedder::new(
+                    &model_dir,
+                    cli.pooling,
+                    cli.max_length,
+                    cli.prompt,
+                    &cli.device,
+                )?)
+            }
+            #[cfg(not(feature = "local"))]
+            anyhow::bail!("local backend not compiled — rebuild with --features local")
+        }
+    };
+
     let bar = encode_bar(texts.len() as u64);
     let (embeddings, dim) = embedder.encode(&texts, cli.batch_size, &bar)?;
     bar.finish_and_clear();
