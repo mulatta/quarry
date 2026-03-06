@@ -310,11 +310,18 @@ fn resolve_upload(cfg: &FileConfig) -> Result<Option<ResolvedUploadConfig>> {
 
 /// Install tracing with indicatif-aware writer.
 fn init_tracing(multi: &MultiProgress) {
+    init_tracing_with_level(multi, "info");
+}
+
+/// Install tracing with a custom default level filter.
+///
+/// `default_level` is used when `RUST_LOG` is not set (e.g. `"warn,ort=error"`).
+fn init_tracing_with_level(multi: &MultiProgress, default_level: &str) {
     use tracing_subscriber::EnvFilter;
     let writer = IndicatifMakeWriter::new(multi.clone());
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_level)),
         )
         .with_writer(writer)
         .with_target(false)
@@ -708,15 +715,26 @@ fn cmd_clean(args: &CleanArgs) -> Result<()> {
 }
 
 fn cmd_embed(args: &EmbedArgs) -> Result<()> {
+    use std::io::IsTerminal;
+
     let cfg = load_cfg(args.common.config.as_deref())?;
     let root = resolve_root(&args.common, &cfg);
     let ecfg = &cfg.embed;
+    let is_tty = std::io::stderr().is_terminal();
 
+    // TTY: progress bar only (suppress INFO), non-TTY: structured logs
+    // ort=error: suppress ORT C++ WARN/INFO (Memcpy, unassigned node warnings)
     let multi = MultiProgress::new();
-    init_tracing(&multi);
+    let default_level = if is_tty {
+        "warn,ort=error"
+    } else {
+        "info,ort=error"
+    };
+    init_tracing_with_level(&multi, default_level);
 
     // Resolve: CLI > config > default
     let batch_size = args.batch_size.or(ecfg.batch_size).unwrap_or(64);
+    let chunk_size = 50_000usize;
     let max_rows = args.max_rows.or(ecfg.max_rows);
     let model_name = args
         .model
@@ -738,14 +756,26 @@ fn cmd_embed(args: &EmbedArgs) -> Result<()> {
     };
     let backend_str = ecfg.backend.as_deref().unwrap_or(backend_str);
 
-    // Phase 1: Read
-    let (work_ids, texts) = embed::io::read_inputs(&hive_dir, max_rows)?;
-    if work_ids.is_empty() {
+    // Count total rows (fast metadata-only scan)
+    let (total_rows, num_files) = embed::io::count_hive_rows(&hive_dir)?;
+    let effective_total = max_rows.map(|m| m.min(total_rows)).unwrap_or(total_rows);
+
+    if effective_total == 0 {
         eprintln!("No works to embed");
         return Ok(());
     }
 
-    // Phase 2: Encode
+    let summary = format!(
+        "{num_files} hive files, ~{} rows, backend={backend_str}, batch_size={batch_size}",
+        quarry_etl_core::progress::fmt_num(effective_total),
+    );
+    if is_tty {
+        eprintln!("{summary}");
+    } else {
+        tracing::info!("{summary}");
+    }
+
+    // Build embedder
     let embedder: Box<dyn embed::Embedder> = match backend_str {
         "http" => {
             let endpoint = args
@@ -770,7 +800,6 @@ fn cmd_embed(args: &EmbedArgs) -> Result<()> {
                             "--model-dir or [embed].model_dir required for local backend"
                         )
                     })?;
-                // CLI > config > auto-detect from model dir JSON files
                 let pooling_override = args.pooling.or_else(|| {
                     ecfg.pooling
                         .as_deref()
@@ -799,22 +828,61 @@ fn cmd_embed(args: &EmbedArgs) -> Result<()> {
         other => anyhow::bail!("unknown embed backend: {other} (expected http|local)"),
     };
 
-    let bar = indicatif::ProgressBar::new(texts.len() as u64);
-    bar.set_style(
-        indicatif::ProgressStyle::default_bar()
-            .template("{prefix:.bold} {bar:30.cyan/black.dim} {pos}/{len} rows [{elapsed}]")
-            .expect("valid template")
-            .progress_chars("=>-"),
-    );
-    bar.set_prefix("Encoding");
+    // Progress bar: TTY shows bar with speed, non-TTY hidden
+    let bar = if is_tty {
+        let b = multi.add(indicatif::ProgressBar::new(effective_total as u64));
+        b.set_style(
+            indicatif::ProgressStyle::default_bar()
+                .template(
+                    "{prefix:.bold} {bar:30.cyan/black.dim} {pos}/{len} rows [{elapsed}] {per_sec}",
+                )
+                .expect("valid template")
+                .progress_chars("=>-"),
+        );
+        b.set_prefix("Embedding");
+        b
+    } else {
+        indicatif::ProgressBar::hidden()
+    };
 
-    let (embeddings, dim) = embedder.encode(&texts, batch_size, &bar)?;
+    // Stream: read chunks → encode → write (bounded memory)
+    let mut writer: Option<embed::io::EmbedWriter> = None;
+    let start = std::time::Instant::now();
+
+    let processed =
+        embed::io::process_hive_chunks(&hive_dir, chunk_size, max_rows, |work_ids, texts| {
+            let (embeddings, dim) = embedder.encode(texts, batch_size, &bar)?;
+            if writer.is_none() {
+                writer = Some(embed::io::EmbedWriter::new(&out_path, dim)?);
+            }
+            writer.as_mut().unwrap().write_chunk(work_ids, embeddings)?;
+            Ok(())
+        })?;
+
     bar.finish_and_clear();
 
-    // Phase 3: Write
-    embed::io::write_output(&out_path, &work_ids, embeddings, dim)?;
+    if let Some(w) = writer {
+        w.close()?;
+    }
 
-    eprintln!("Done: {} works embedded (dim={dim})", work_ids.len());
+    // Final summary
+    let elapsed = start.elapsed();
+    let rps = processed as f64 / elapsed.as_secs_f64();
+    let size = out_path.metadata().map(|m| m.len()).unwrap_or(0);
+    let done_msg = format!(
+        "{} rows → {} ({:.1} MiB, {:.0} rows/s, {:.1}s)",
+        quarry_etl_core::progress::fmt_num(processed),
+        out_path.display(),
+        size as f64 / 1024.0 / 1024.0,
+        rps,
+        elapsed.as_secs_f64(),
+    );
+    if is_tty {
+        eprintln!("{done_msg}");
+    } else {
+        tracing::info!("{done_msg}");
+    }
+
     Ok(())
 }
 
