@@ -102,6 +102,16 @@ fn pending_style() -> ProgressStyle {
         .expect("invalid template")
 }
 
+/// Embed progress bar style (row count + throughput).
+pub fn embed_style() -> ProgressStyle {
+    ProgressStyle::default_bar()
+        .template(
+            "{prefix:.bold} {bar:30.cyan/black.dim} {pos}/{len} rows [{elapsed_precise}] {per_sec}",
+        )
+        .expect("invalid template")
+        .progress_chars("=>-")
+}
+
 /// Per-directory progress bar style (file count, used by push/pull)
 fn dir_style(unit: &str) -> ProgressStyle {
     ProgressStyle::default_bar()

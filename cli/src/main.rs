@@ -843,14 +843,7 @@ fn cmd_embed(args: &EmbedArgs) -> Result<()> {
     // Progress bar: TTY shows bar with speed, non-TTY hidden
     let bar = if is_tty {
         let b = multi.add(indicatif::ProgressBar::new(effective_total as u64));
-        b.set_style(
-            indicatif::ProgressStyle::default_bar()
-                .template(
-                    "{prefix:.bold} {bar:30.cyan/black.dim} {pos}/{len} rows [{elapsed}] {per_sec}",
-                )
-                .expect("valid template")
-                .progress_chars("=>-"),
-        );
+        b.set_style(quarry_etl_core::progress::embed_style());
         b.set_prefix("Embedding");
         b
     } else {
