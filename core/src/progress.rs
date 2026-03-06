@@ -106,7 +106,7 @@ fn pending_style() -> ProgressStyle {
 pub fn embed_style() -> ProgressStyle {
     ProgressStyle::default_bar()
         .template(
-            "{prefix:.bold} {bar:30.cyan/black.dim} {pos}/{len} rows [{elapsed_precise}] {per_sec}",
+            "{prefix:.bold} {bar:30.cyan/black.dim} {pos}/{len} rows [{elapsed_precise}] {per_sec} ETA {eta}",
         )
         .expect("invalid template")
         .progress_chars("=>-")
