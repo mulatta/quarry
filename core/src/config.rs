@@ -32,6 +32,36 @@ pub struct FileConfig {
     pub hive: HiveConfig,
     #[serde(default)]
     pub upload: UploadConfig,
+    #[serde(default)]
+    pub embed: EmbedConfig,
+}
+
+/// `[embed]` section — settings for `quarry-etl embed`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EmbedConfig {
+    /// Embedding backend: "http" or "local"
+    pub backend: Option<String>,
+    /// Batch size for embedding calls
+    pub batch_size: Option<usize>,
+    /// Max rows to process (for testing)
+    pub max_rows: Option<usize>,
+    /// Embedding API endpoint (http backend)
+    pub endpoint: Option<String>,
+    /// Model name for HTTP API (http backend)
+    pub model: Option<String>,
+    /// Path to ONNX model directory (local backend)
+    pub model_dir: Option<String>,
+    /// Execution device: cpu, cuda, coreml (local backend)
+    pub device: Option<String>,
+    /// Pooling strategy: mean, cls, last_token (local backend)
+    pub pooling: Option<String>,
+    /// Prompt prefix prepended to each text (local backend)
+    pub prompt: Option<String>,
+    /// Max token length (local backend)
+    pub max_length: Option<usize>,
+    /// Output parquet path
+    pub output: Option<String>,
 }
 
 /// `[hive]` section — settings for `quarry-etl hive`.

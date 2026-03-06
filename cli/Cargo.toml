@@ -7,8 +7,14 @@ edition = "2024"
 name = "quarry-etl"
 path = "src/main.rs"
 
+[features]
+default = ["local"]
+local = ["quarry-etl-core/local"]
+cuda = ["quarry-etl-core/cuda"]
+coreml = ["quarry-etl-core/coreml"]
+
 [dependencies]
-quarry-etl-core = { path = "../core" }
+quarry-etl-core = { path = "../core", default-features = false }
 clap = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }

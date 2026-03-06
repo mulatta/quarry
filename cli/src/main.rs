@@ -11,6 +11,7 @@ use indicatif::MultiProgress;
 use rayon::prelude::*;
 
 use quarry_etl_core::config::{self, FileConfig, ResolvedHiveConfig, ResolvedUploadConfig};
+use quarry_etl_core::embed;
 use quarry_etl_core::oa::{self, OAProvider, OAShard};
 use quarry_etl_core::progress::{IndicatifMakeWriter, ProgressContext};
 use quarry_etl_core::provider::{RunContext, run_provider};
@@ -39,6 +40,8 @@ enum Command {
     Status(StatusArgs),
     /// Remove temporary (.tmp) files from output directory
     Clean(CleanArgs),
+    /// Generate embeddings for hive-partitioned works
+    Embed(EmbedArgs),
 }
 
 // ============================================================
@@ -191,6 +194,70 @@ struct CleanArgs {
 }
 
 // ============================================================
+// Embed
+// ============================================================
+
+#[derive(Clone, clap::ValueEnum)]
+enum EmbedBackend {
+    /// OpenAI-compatible HTTP API
+    Http,
+    /// Local ONNX Runtime inference
+    Local,
+}
+
+#[derive(Parser)]
+struct EmbedArgs {
+    #[command(flatten)]
+    common: CommonOpts,
+
+    /// Embedding backend
+    #[arg(long, value_enum, default_value_t = EmbedBackend::Http)]
+    backend: EmbedBackend,
+
+    /// Batch size for embedding calls
+    #[arg(long)]
+    batch_size: Option<usize>,
+
+    /// Max rows to process (for testing)
+    #[arg(long)]
+    max_rows: Option<usize>,
+
+    /// Output parquet path (default: {output_dir}/embeddings.parquet)
+    #[arg(long)]
+    embed_output: Option<PathBuf>,
+
+    // --- HTTP backend options ---
+    /// Embedding API endpoint (http backend)
+    #[arg(long, env = "EMBED_ENDPOINT")]
+    endpoint: Option<String>,
+
+    /// Model name for the API (http backend)
+    #[arg(long)]
+    model: Option<String>,
+
+    // --- Local backend options ---
+    /// Path to ONNX model directory containing model.onnx + tokenizer.json
+    #[arg(long)]
+    model_dir: Option<PathBuf>,
+
+    /// Execution device: cpu, cuda, coreml (local backend)
+    #[arg(long)]
+    device: Option<String>,
+
+    /// Pooling strategy: mean, cls, last_token (local backend)
+    #[arg(long)]
+    pooling: Option<embed::PoolingStrategy>,
+
+    /// Prompt prefix prepended to each text (local backend)
+    #[arg(long)]
+    prompt: Option<String>,
+
+    /// Max token length for tokenizer (local backend)
+    #[arg(long)]
+    max_length: Option<usize>,
+}
+
+// ============================================================
 // Main
 // ============================================================
 
@@ -204,6 +271,7 @@ fn main() -> Result<()> {
         Command::Pull(args) => cmd_pull(args),
         Command::Status(args) => cmd_status(args),
         Command::Clean(args) => cmd_clean(args),
+        Command::Embed(args) => cmd_embed(args),
     }
 }
 
@@ -636,6 +704,117 @@ fn cmd_clean(args: &CleanArgs) -> Result<()> {
     } else {
         eprintln!("No .tmp files found");
     }
+    Ok(())
+}
+
+fn cmd_embed(args: &EmbedArgs) -> Result<()> {
+    let cfg = load_cfg(args.common.config.as_deref())?;
+    let root = resolve_root(&args.common, &cfg);
+    let ecfg = &cfg.embed;
+
+    let multi = MultiProgress::new();
+    init_tracing(&multi);
+
+    // Resolve: CLI > config > default
+    let batch_size = args.batch_size.or(ecfg.batch_size).unwrap_or(64);
+    let max_rows = args.max_rows.or(ecfg.max_rows);
+    let model_name = args
+        .model
+        .clone()
+        .or_else(|| ecfg.model.clone())
+        .unwrap_or_else(|| "jina-embeddings-v3".to_string());
+
+    let hive_dir = PathBuf::from(&root).join("hive/works");
+    let out_path = args
+        .embed_output
+        .clone()
+        .or_else(|| ecfg.output.as_ref().map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from(&root).join("embeddings.parquet"));
+
+    // Backend selection
+    let backend_str = match args.backend {
+        EmbedBackend::Http => "http",
+        EmbedBackend::Local => "local",
+    };
+    let backend_str = ecfg.backend.as_deref().unwrap_or(backend_str);
+
+    // Phase 1: Read
+    let (work_ids, texts) = embed::io::read_inputs(&hive_dir, max_rows)?;
+    if work_ids.is_empty() {
+        eprintln!("No works to embed");
+        return Ok(());
+    }
+
+    // Phase 2: Encode
+    let embedder: Box<dyn embed::Embedder> = match backend_str {
+        "http" => {
+            let endpoint = args
+                .endpoint
+                .clone()
+                .or_else(|| ecfg.endpoint.clone())
+                .or_else(|| std::env::var("EMBED_ENDPOINT").ok())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("--endpoint or [embed].endpoint required for http backend")
+                })?;
+            Box::new(embed::HttpEmbedder::new(endpoint, model_name))
+        }
+        "local" => {
+            #[cfg(feature = "local")]
+            {
+                let model_dir = args
+                    .model_dir
+                    .clone()
+                    .or_else(|| ecfg.model_dir.as_ref().map(PathBuf::from))
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "--model-dir or [embed].model_dir required for local backend"
+                        )
+                    })?;
+                // CLI > config > auto-detect from model dir JSON files
+                let pooling_override = args.pooling.or_else(|| {
+                    ecfg.pooling
+                        .as_deref()
+                        .and_then(|s| s.parse::<embed::PoolingStrategy>().ok())
+                });
+                let prompt_override = args.prompt.clone().or_else(|| ecfg.prompt.clone());
+                let max_length_override = args.max_length.or(ecfg.max_length);
+                let device = args
+                    .device
+                    .clone()
+                    .or_else(|| ecfg.device.clone())
+                    .unwrap_or_else(|| "cpu".to_string());
+                Box::new(embed::ort_backend::OrtEmbedder::new(
+                    &model_dir,
+                    embed::ort_backend::OrtEmbedderOpts {
+                        pooling: pooling_override,
+                        max_length: max_length_override,
+                        prompt: prompt_override,
+                        device,
+                    },
+                )?)
+            }
+            #[cfg(not(feature = "local"))]
+            anyhow::bail!("local backend not compiled — rebuild with --features local")
+        }
+        other => anyhow::bail!("unknown embed backend: {other} (expected http|local)"),
+    };
+
+    let bar = indicatif::ProgressBar::new(texts.len() as u64);
+    bar.set_style(
+        indicatif::ProgressStyle::default_bar()
+            .template("{prefix:.bold} {bar:30.cyan/black.dim} {pos}/{len} rows [{elapsed}]")
+            .expect("valid template")
+            .progress_chars("=>-"),
+    );
+    bar.set_prefix("Encoding");
+
+    let (embeddings, dim) = embedder.encode(&texts, batch_size, &bar)?;
+    bar.finish_and_clear();
+
+    // Phase 3: Write
+    embed::io::write_output(&out_path, &work_ids, embeddings, dim)?;
+
+    eprintln!("Done: {} works embedded (dim={dim})", work_ids.len());
     Ok(())
 }
 
