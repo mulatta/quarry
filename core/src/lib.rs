@@ -3,6 +3,7 @@
 pub mod accumulator;
 pub mod api;
 pub mod config;
+pub mod embed;
 pub mod error;
 pub mod hive;
 pub mod id;

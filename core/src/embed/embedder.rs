@@ -4,7 +4,7 @@ use anyhow::Result;
 use indicatif::ProgressBar;
 
 /// Pooling strategy for extracting a fixed-size vector from token-level hidden states.
-#[derive(Debug, Clone, Copy, clap::ValueEnum, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PoolingStrategy {
     /// Average over non-padding tokens (weighted by attention_mask).
@@ -13,6 +13,29 @@ pub enum PoolingStrategy {
     Cls,
     /// Last non-padding token hidden state.
     LastToken,
+}
+
+impl std::fmt::Display for PoolingStrategy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Mean => write!(f, "mean"),
+            Self::Cls => write!(f, "cls"),
+            Self::LastToken => write!(f, "last_token"),
+        }
+    }
+}
+
+impl std::str::FromStr for PoolingStrategy {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "mean" => Ok(Self::Mean),
+            "cls" => Ok(Self::Cls),
+            "last_token" => Ok(Self::LastToken),
+            _ => anyhow::bail!("unknown pooling strategy: {s} (expected mean|cls|last_token)"),
+        }
+    }
 }
 
 /// Unified embedding interface.

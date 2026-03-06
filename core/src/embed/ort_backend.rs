@@ -3,6 +3,10 @@
 //! Supports any transformer model exported to ONNX format with
 //! `{input_ids, attention_mask, [token_type_ids]} → hidden_states` interface.
 //! Pooling (mean/cls/last_token) and L2 normalization applied post-inference.
+//!
+//! Model metadata (pooling, max_length, prompt) is auto-detected from
+//! HuggingFace/SentenceTransformer JSON config files in the model directory.
+//! CLI arguments override auto-detected values.
 
 use std::path::Path;
 use std::sync::Mutex;
@@ -11,8 +15,8 @@ use anyhow::Result;
 use indicatif::ProgressBar;
 use ort::session::Session;
 
-use crate::embedder::{Embedder, PoolingStrategy, l2_normalize, pool};
-use crate::tokenize::{BatchEncoding, tokenize_batch};
+use super::embedder::{Embedder, PoolingStrategy, l2_normalize, pool};
+use super::tokenize::{BatchEncoding, tokenize_batch};
 
 /// Local ONNX Runtime embedding backend.
 pub struct OrtEmbedder {
@@ -24,15 +28,34 @@ pub struct OrtEmbedder {
     needs_token_type_ids: bool,
 }
 
+/// Options for `OrtEmbedder::new`. `None` fields are auto-detected from model dir.
+pub struct OrtEmbedderOpts {
+    pub pooling: Option<PoolingStrategy>,
+    pub max_length: Option<usize>,
+    pub prompt: Option<String>,
+    pub device: String,
+}
+
 impl OrtEmbedder {
-    pub fn new(
-        model_dir: &Path,
-        pooling: PoolingStrategy,
-        max_length: usize,
-        prompt: String,
-        device: &str,
-    ) -> Result<Self> {
+    pub fn new(model_dir: &Path, opts: OrtEmbedderOpts) -> Result<Self> {
         let onnx_path = find_onnx_model(model_dir)?;
+
+        // Auto-detect from model config files, CLI overrides
+        let detected = ModelConfig::load(model_dir);
+        let pooling = opts.pooling.or(detected.pooling).unwrap_or_else(|| {
+            tracing::warn!("pooling not detected, defaulting to mean");
+            PoolingStrategy::Mean
+        });
+        let max_length = opts.max_length.or(detected.max_length).unwrap_or_else(|| {
+            tracing::warn!("max_length not detected, defaulting to 512");
+            512
+        });
+        let prompt = opts.prompt.or(detected.prompt).unwrap_or_default();
+
+        tracing::info!(
+            "Model config: pooling={pooling}, max_length={max_length}, prompt={:?}",
+            if prompt.is_empty() { "(none)" } else { &prompt }
+        );
 
         let tokenizer_path = model_dir.join("tokenizer.json");
         anyhow::ensure!(
@@ -57,6 +80,7 @@ impl OrtEmbedder {
         #[allow(unused_mut)]
         let mut builder = builder;
 
+        let device = &opts.device;
         if device == "cuda" {
             #[cfg(feature = "cuda")]
             {
@@ -207,4 +231,81 @@ fn find_onnx_model(dir: &Path) -> Result<std::path::PathBuf> {
         "no model.onnx found in {} (checked root and onnx/ subdir)",
         dir.display()
     )
+}
+
+// ============================================================
+// Model config auto-detection from HuggingFace JSON files
+// ============================================================
+
+/// Auto-detected model configuration from JSON files in model directory.
+struct ModelConfig {
+    pooling: Option<PoolingStrategy>,
+    max_length: Option<usize>,
+    prompt: Option<String>,
+}
+
+impl ModelConfig {
+    /// Read `1_Pooling/config.json`, `config.json`, and
+    /// `config_sentence_transformers.json` to detect pooling, max_length, prompt.
+    fn load(model_dir: &Path) -> Self {
+        Self {
+            pooling: detect_pooling(model_dir),
+            max_length: detect_max_length(model_dir),
+            prompt: detect_prompt(model_dir),
+        }
+    }
+}
+
+/// Read `1_Pooling/config.json` for pooling strategy.
+fn detect_pooling(model_dir: &Path) -> Option<PoolingStrategy> {
+    #[derive(serde::Deserialize)]
+    struct PoolingConfig {
+        #[serde(default)]
+        pooling_mode_cls_token: bool,
+        #[serde(default)]
+        pooling_mode_mean_tokens: bool,
+        #[serde(default)]
+        pooling_mode_lasttoken: bool,
+    }
+
+    let path = model_dir.join("1_Pooling/config.json");
+    let text = std::fs::read_to_string(&path).ok()?;
+    let cfg: PoolingConfig = sonic_rs::from_str(&text).ok()?;
+
+    if cfg.pooling_mode_cls_token {
+        Some(PoolingStrategy::Cls)
+    } else if cfg.pooling_mode_lasttoken {
+        Some(PoolingStrategy::LastToken)
+    } else if cfg.pooling_mode_mean_tokens {
+        Some(PoolingStrategy::Mean)
+    } else {
+        None
+    }
+}
+
+/// Read `config.json` for `max_position_embeddings`.
+fn detect_max_length(model_dir: &Path) -> Option<usize> {
+    #[derive(serde::Deserialize)]
+    struct ModelConfig_ {
+        max_position_embeddings: Option<usize>,
+    }
+
+    let path = model_dir.join("config.json");
+    let text = std::fs::read_to_string(&path).ok()?;
+    let cfg: ModelConfig_ = sonic_rs::from_str(&text).ok()?;
+    cfg.max_position_embeddings
+}
+
+/// Read `config_sentence_transformers.json` for default prompt.
+fn detect_prompt(model_dir: &Path) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct StConfig {
+        #[serde(default)]
+        prompts: std::collections::HashMap<String, String>,
+    }
+
+    let path = model_dir.join("config_sentence_transformers.json");
+    let text = std::fs::read_to_string(&path).ok()?;
+    let cfg: StConfig = sonic_rs::from_str(&text).ok()?;
+    cfg.prompts.into_values().next()
 }

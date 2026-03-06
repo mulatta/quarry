@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use indicatif::ProgressBar;
 use serde::{Deserialize, Serialize};
 
-use crate::embedder::Embedder;
+use super::embedder::Embedder;
 
 #[derive(Serialize)]
 struct EmbedRequest<'a> {
@@ -105,7 +105,7 @@ impl Embedder for HttpEmbedder {
         batch_size: usize,
         bar: &ProgressBar,
     ) -> Result<(Vec<f32>, usize)> {
-        let rt = tokio::runtime::Handle::current();
+        let rt = tokio::runtime::Runtime::new()?;
         rt.block_on(self.encode_async(texts, batch_size, bar))
     }
 }

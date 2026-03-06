@@ -1,5 +1,5 @@
 [workspace]
-members = ["core", "cli", "embed"]
+members = ["core", "cli"]
 resolver = "3"
 
 [workspace.dependencies]
@@ -39,6 +39,10 @@ rustc-hash = "2"
 num_cpus = "1"
 signal-hook = "0.3"
 clap = { version = "4", features = ["derive", "env"] }
+
+# Embedding (optional, used by core with "local" feature)
+ort = "2.0.0-rc.12"
+tokenizers = { version = "0.22", default-features = false, features = ["fancy-regex"] }
 
 # Dev
 tempfile = "3"

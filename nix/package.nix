@@ -1,6 +1,10 @@
 {
   perSystem =
-    { pkgs, lib, ... }:
+    {
+      pkgs,
+      lib,
+      ...
+    }:
     let
       src = lib.cleanSourceWith {
         src = lib.cleanSource ../.;
@@ -24,7 +28,7 @@
 
             inherit src;
 
-            cargoHash = "sha256-n1m03o6UYAl4Le0tZHApo0Htc82twBEoEZzxisddsl8=";
+            cargoHash = "sha256-+s900OxhLge8fuAEcX6BvAbGgO8umFP8GYsTRyD3HZM=";
 
             dontUseCmakeConfigure = true;
 
