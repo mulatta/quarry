@@ -11,7 +11,7 @@ use anyhow::Result;
 use indicatif::ProgressBar;
 use ort::session::Session;
 
-use crate::embedder::{Embedder, PoolingStrategy};
+use crate::embedder::{Embedder, PoolingStrategy, l2_normalize, pool};
 use crate::tokenize::{BatchEncoding, tokenize_batch};
 
 /// Local ONNX Runtime embedding backend.
@@ -207,70 +207,4 @@ fn find_onnx_model(dir: &Path) -> Result<std::path::PathBuf> {
         "no model.onnx found in {} (checked root and onnx/ subdir)",
         dir.display()
     )
-}
-
-/// Apply pooling strategy to hidden states.
-pub(crate) fn pool(
-    hidden: &[f32],
-    attention_mask: &[i64],
-    batch: usize,
-    seq: usize,
-    dim: usize,
-    strategy: PoolingStrategy,
-) -> Vec<f32> {
-    let mut out = vec![0.0f32; batch * dim];
-
-    match strategy {
-        PoolingStrategy::Mean => {
-            for b in 0..batch {
-                let mut count = 0.0f32;
-                for s in 0..seq {
-                    if attention_mask[b * seq + s] > 0 {
-                        count += 1.0;
-                        let h = (b * seq + s) * dim;
-                        let o = b * dim;
-                        for d in 0..dim {
-                            out[o + d] += hidden[h + d];
-                        }
-                    }
-                }
-                let denom = count.max(1e-9);
-                for d in 0..dim {
-                    out[b * dim + d] /= denom;
-                }
-            }
-        }
-        PoolingStrategy::Cls => {
-            for b in 0..batch {
-                let h = b * seq * dim;
-                out[b * dim..(b + 1) * dim].copy_from_slice(&hidden[h..h + dim]);
-            }
-        }
-        PoolingStrategy::LastToken => {
-            for b in 0..batch {
-                let last = attention_mask[b * seq..(b + 1) * seq]
-                    .iter()
-                    .filter(|&&m| m > 0)
-                    .count()
-                    .saturating_sub(1);
-                let h = (b * seq + last) * dim;
-                out[b * dim..(b + 1) * dim].copy_from_slice(&hidden[h..h + dim]);
-            }
-        }
-    }
-
-    out
-}
-
-/// L2 normalize each embedding vector in the batch.
-pub(crate) fn l2_normalize(embeddings: &[f32], batch: usize, dim: usize) -> Vec<f32> {
-    let mut out = embeddings.to_vec();
-    for b in 0..batch {
-        let row = &mut out[b * dim..(b + 1) * dim];
-        let norm = row.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-9);
-        for x in row.iter_mut() {
-            *x /= norm;
-        }
-    }
-    out
 }
