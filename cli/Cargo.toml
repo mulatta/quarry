@@ -1,0 +1,21 @@
+[package]
+name = "quarry-etl"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "quarry-etl"
+path = "src/main.rs"
+
+[dependencies]
+quarry-etl-core = { path = "../core" }
+clap = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+indicatif = { workspace = true }
+rayon = { workspace = true }
+signal-hook = { workspace = true }
+
+[lints]
+workspace = true
