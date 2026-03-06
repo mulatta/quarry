@@ -222,6 +222,10 @@ struct EmbedArgs {
     #[arg(long)]
     max_rows: Option<usize>,
 
+    /// Overwrite existing output file
+    #[arg(long)]
+    force: bool,
+
     /// Output parquet path (default: {output_dir}/embeddings.parquet)
     #[arg(long)]
     embed_output: Option<PathBuf>,
@@ -748,6 +752,14 @@ fn cmd_embed(args: &EmbedArgs) -> Result<()> {
         .clone()
         .or_else(|| ecfg.output.as_ref().map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from(&root).join("embeddings.parquet"));
+
+    // Overwrite protection
+    if out_path.exists() && !args.force {
+        anyhow::bail!(
+            "{} already exists (use --force to overwrite)",
+            out_path.display()
+        );
+    }
 
     // Backend selection
     let backend_str = match args.backend {

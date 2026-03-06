@@ -151,13 +151,17 @@ pub fn process_hive_chunks(
 
 /// Incremental parquet writer for embedding output.
 ///
-/// Each `write_chunk` call adds a row group, keeping memory bounded.
+/// Writes to `{path}.tmp`, renames to `path` on `close()`.
+/// Removes `.tmp` on drop if `close()` was not called (failure path).
 pub struct EmbedWriter {
-    writer: ArrowWriter<BufWriter<std::fs::File>>,
+    writer: Option<ArrowWriter<BufWriter<std::fs::File>>>,
     schema: Arc<Schema>,
     item_field: Arc<Field>,
+    tmp_path: PathBuf,
+    final_path: PathBuf,
     dim: i32,
     rows_written: usize,
+    committed: bool,
 }
 
 impl EmbedWriter {
@@ -165,6 +169,8 @@ impl EmbedWriter {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
+
+        let tmp_path = path.with_extension("parquet.tmp");
 
         let item_field = Arc::new(Field::new("item", DataType::Float32, false));
         let schema = Arc::new(Schema::new(vec![
@@ -180,15 +186,18 @@ impl EmbedWriter {
             .set_compression(Compression::ZSTD(ZstdLevel::try_new(3)?))
             .build();
 
-        let file = BufWriter::new(std::fs::File::create(path)?);
+        let file = BufWriter::new(std::fs::File::create(&tmp_path)?);
         let writer = ArrowWriter::try_new(file, schema.clone(), Some(props))?;
 
         Ok(Self {
-            writer,
+            writer: Some(writer),
             schema,
             item_field,
+            tmp_path,
+            final_path: path.to_path_buf(),
             dim: dim as i32,
             rows_written: 0,
+            committed: false,
         })
     }
 
@@ -203,7 +212,10 @@ impl EmbedWriter {
         )?);
 
         let batch = RecordBatch::try_new(self.schema.clone(), vec![wid_array, emb_array])?;
-        self.writer.write(&batch)?;
+        self.writer
+            .as_mut()
+            .expect("write_chunk after close")
+            .write(&batch)?;
         self.rows_written += work_ids.len();
         Ok(())
     }
@@ -212,9 +224,23 @@ impl EmbedWriter {
         self.rows_written
     }
 
-    pub fn close(self) -> Result<()> {
-        self.writer.close()?;
+    /// Flush the parquet footer and atomically rename `.tmp` → final path.
+    pub fn close(mut self) -> Result<()> {
+        if let Some(w) = self.writer.take() {
+            w.close()?;
+        }
+        std::fs::rename(&self.tmp_path, &self.final_path)?;
+        self.committed = true;
         Ok(())
+    }
+}
+
+impl Drop for EmbedWriter {
+    fn drop(&mut self) {
+        if !self.committed {
+            drop(self.writer.take());
+            let _ = std::fs::remove_file(&self.tmp_path);
+        }
     }
 }
 
