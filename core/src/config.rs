@@ -183,7 +183,7 @@ impl ResolvedUploadConfig {
     }
 }
 
-/// Try loading config from explicit `--config` path or `./quarry-etl.toml` in CWD.
+/// Load config: `--config` > `./etl.toml` > `~/quarry/etl.toml` > defaults.
 pub fn load_config(explicit: Option<&Path>) -> anyhow::Result<FileConfig> {
     let path = if let Some(p) = explicit {
         if !p.exists() {
@@ -191,17 +191,16 @@ pub fn load_config(explicit: Option<&Path>) -> anyhow::Result<FileConfig> {
         }
         Some(p.to_path_buf())
     } else {
-        let auto = PathBuf::from("./quarry-etl.toml");
-        if auto.exists() {
-            tracing::info!("Using config: {}", auto.display());
-            Some(auto)
-        } else {
-            None
+        let mut candidates = vec![PathBuf::from("./etl.toml")];
+        if let Ok(home) = std::env::var("HOME") {
+            candidates.push(PathBuf::from(home).join("quarry/etl.toml"));
         }
+        candidates.into_iter().find(|p| p.exists())
     };
 
     match path {
         Some(p) => {
+            tracing::info!("config: {}", p.display());
             let text = fs::read_to_string(&p)
                 .map_err(|e| anyhow::anyhow!("Failed to read {}: {e}", p.display()))?;
             let cfg: FileConfig = toml::from_str(&text)

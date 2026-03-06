@@ -283,19 +283,9 @@ fn main() -> Result<()> {
 // Config helpers
 // ============================================================
 
-/// Load config from explicit path, or auto-discover papeline.toml / quarry-etl.toml.
+/// Load config: --config > ./etl.toml > ~/quarry/etl.toml > defaults.
 fn load_cfg(explicit: Option<&std::path::Path>) -> Result<FileConfig> {
-    if let Some(p) = explicit {
-        return config::load_config(Some(p));
-    }
-    // Auto-discover: papeline.toml first, then quarry-etl.toml
-    for name in &["papeline.toml", "quarry-etl.toml"] {
-        let p = std::path::Path::new(name);
-        if p.exists() {
-            return config::load_config(Some(p));
-        }
-    }
-    config::load_config(None)
+    config::load_config(explicit)
 }
 
 fn resolve_root(common: &CommonOpts, cfg: &FileConfig) -> String {
