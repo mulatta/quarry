@@ -1,0 +1,31 @@
+[package]
+name = "quarry-embed"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "quarry-embed"
+path = "src/main.rs"
+
+[dependencies]
+# Arrow I/O
+arrow = { workspace = true }
+parquet = { workspace = true }
+
+# HTTP embedding API
+reqwest = { workspace = true, features = ["json"] }
+tokio = { workspace = true, features = ["macros"] }
+
+# Serialization
+serde = { workspace = true }
+sonic-rs = { workspace = true }
+
+# CLI & utilities
+clap = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+indicatif = { workspace = true }
+
+[lints]
+workspace = true
