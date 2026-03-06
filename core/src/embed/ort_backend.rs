@@ -46,9 +46,18 @@ impl OrtEmbedder {
             tracing::warn!("pooling not detected, defaulting to mean");
             PoolingStrategy::Mean
         });
-        let max_length = opts.max_length.or(detected.max_length).unwrap_or_else(|| {
-            tracing::warn!("max_length not detected, defaulting to 512");
-            512
+        const DEFAULT_MAX_LENGTH: usize = 512;
+        let max_length = opts.max_length.unwrap_or_else(|| {
+            let detected_len = detected.max_length.unwrap_or(DEFAULT_MAX_LENGTH);
+            if detected_len > DEFAULT_MAX_LENGTH {
+                tracing::info!(
+                    "model max_position_embeddings={detected_len}, capping to {DEFAULT_MAX_LENGTH} \
+                     (override with --max-length)"
+                );
+                DEFAULT_MAX_LENGTH
+            } else {
+                detected_len
+            }
         });
         let prompt = opts.prompt.or(detected.prompt).unwrap_or_default();
 
