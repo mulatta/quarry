@@ -793,15 +793,7 @@ fn cmd_embed(args: &EmbedArgs) -> Result<()> {
         "local" => {
             #[cfg(feature = "local")]
             {
-                let model_dir = args
-                    .model_dir
-                    .clone()
-                    .or_else(|| ecfg.model_dir.as_ref().map(PathBuf::from))
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "--model-dir or [embed].model_dir required for local backend"
-                        )
-                    })?;
+                let model_dir = resolve_model_dir(args, ecfg)?;
                 let pooling_override = args.pooling.or_else(|| {
                     ecfg.pooling
                         .as_deref()
@@ -884,6 +876,45 @@ fn cmd_embed(args: &EmbedArgs) -> Result<()> {
 // ============================================================
 // Helpers
 // ============================================================
+
+/// Resolve model directory: --model-dir > [embed].model_dir > {models_dir}/{model}
+fn resolve_model_dir(args: &EmbedArgs, ecfg: &config::EmbedConfig) -> Result<PathBuf> {
+    // 1. CLI --model-dir (absolute path)
+    if let Some(ref dir) = args.model_dir {
+        return Ok(dir.clone());
+    }
+    // 2. TOML model_dir (absolute path)
+    if let Some(ref dir) = ecfg.model_dir {
+        return Ok(PathBuf::from(dir));
+    }
+    // 3. models_dir + model name
+    let model_name = args
+        .model
+        .as_deref()
+        .or(ecfg.model.as_deref())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "--model-dir, [embed].model_dir, or [embed].model required for local backend"
+            )
+        })?;
+
+    let base = ecfg
+        .models_dir
+        .as_deref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+            PathBuf::from(home).join("quarry/models")
+        });
+
+    let resolved = base.join(model_name);
+    anyhow::ensure!(
+        resolved.exists(),
+        "model directory not found: {} (set [embed].models_dir or use --model-dir)",
+        resolved.display()
+    );
+    Ok(resolved)
+}
 
 fn resolve_hive_config(
     root: &str,

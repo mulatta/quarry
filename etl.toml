@@ -25,3 +25,8 @@ enable = true
 threads = 24
 memory_limit = "128GB"
 row_group_size = 1000000
+
+[embed]
+backend = "local"
+device = "cuda"
+model = "jina-v5-small-clustering"

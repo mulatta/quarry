@@ -48,10 +48,12 @@ pub struct EmbedConfig {
     pub max_rows: Option<usize>,
     /// Embedding API endpoint (http backend)
     pub endpoint: Option<String>,
-    /// Model name for HTTP API (http backend)
+    /// Model name for HTTP API / model directory name (local backend)
     pub model: Option<String>,
-    /// Path to ONNX model directory (local backend)
+    /// Absolute path to ONNX model directory (local backend, overrides models_dir/model)
     pub model_dir: Option<String>,
+    /// Base directory for model lookup (default: ~/quarry/models)
+    pub models_dir: Option<String>,
     /// Execution device: cpu, cuda, coreml (local backend)
     pub device: Option<String>,
     /// Pooling strategy: mean, cls, last_token (local backend)
