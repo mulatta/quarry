@@ -1,6 +1,6 @@
 //! JSON-to-Arrow record batch accumulators for OpenAlex works.
 //!
-//! 13-table star schema: 1 fact table (works, 84 cols) + 12 fan-out tables.
+//! 13-table star schema: 1 fact table (works, 82 cols) + 12 fan-out tables.
 //! All complex array fields are exploded into separate tables — zero JSON columns.
 
 mod fanout;

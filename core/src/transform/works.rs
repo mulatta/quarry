@@ -1,4 +1,4 @@
-//! Works accumulator (84-column fact table) and arrow helper functions.
+//! Works accumulator (82-column fact table) and arrow helper functions.
 
 use std::sync::Arc;
 
@@ -144,7 +144,6 @@ pub struct WorksAccumulator {
     doi: Vec<Option<String>>,
     doi_norm: Vec<Option<String>>,
     title: Vec<Option<String>>,
-    display_name: Vec<Option<String>>,
     abstract_text: Vec<Option<String>>,
     content_hash: Vec<Option<String>>,
     // dates
@@ -230,7 +229,6 @@ pub struct WorksAccumulator {
     best_oa_location_source_host_organization: Vec<Option<String>>,
     best_oa_location_source_type: Vec<Option<String>>,
     // external ids
-    ids_mag: Vec<Option<String>>,
     ids_pmid: Vec<Option<String>>,
     ids_pmcid: Vec<Option<String>>,
     // list columns
@@ -266,7 +264,6 @@ impl WorksAccumulator {
             doi: vec_cap!(),
             doi_norm: vec_cap!(),
             title: vec_cap!(),
-            display_name: vec_cap!(),
             abstract_text: vec_cap!(),
             content_hash: vec_cap!(),
             publication_date: vec_cap!(),
@@ -337,7 +334,6 @@ impl WorksAccumulator {
             best_oa_location_source_issn: vec_cap!(),
             best_oa_location_source_host_organization: vec_cap!(),
             best_oa_location_source_type: vec_cap!(),
-            ids_mag: vec_cap!(),
             ids_pmid: vec_cap!(),
             ids_pmcid: vec_cap!(),
             corresponding_author_ids: vec_cap!(),
@@ -378,8 +374,7 @@ impl Accumulator for WorksAccumulator {
         self.content_hash
             .push(Some(hasher.finalize().to_hex().to_string()));
 
-        self.title.push(row.title);
-        self.display_name.push(row.display_name);
+        self.title.push(row.title.map(|s| strip_html_tags(&s)));
         self.abstract_text.push(abstract_text);
 
         // dates
@@ -531,7 +526,6 @@ impl Accumulator for WorksAccumulator {
 
         // external ids
         let ids = row.ids.as_ref();
-        self.ids_mag.push(ids.and_then(|i| i.mag.clone()));
         self.ids_pmid.push(
             ids.and_then(|i| i.pmid.as_deref())
                 .and_then(extract_pmid)
@@ -561,12 +555,11 @@ impl Accumulator for WorksAccumulator {
     fn take_batch(&mut self) -> Result<RecordBatch, arrow::error::ArrowError> {
         let n = self.len();
         let arrays: Vec<ArrayRef> = vec![
-            // identity (6)
+            // identity (5)
             Arc::new(StringArray::from(std::mem::take(&mut self.work_id))),
             Arc::new(StringArray::from(std::mem::take(&mut self.doi))),
             Arc::new(StringArray::from(std::mem::take(&mut self.doi_norm))),
             Arc::new(StringArray::from(std::mem::take(&mut self.title))),
-            Arc::new(StringArray::from(std::mem::take(&mut self.display_name))),
             Arc::new(StringArray::from(std::mem::take(&mut self.abstract_text))),
             Arc::new(StringArray::from(std::mem::take(&mut self.content_hash))),
             // dates (4)
@@ -749,8 +742,7 @@ impl Accumulator for WorksAccumulator {
             Arc::new(StringArray::from(std::mem::take(
                 &mut self.best_oa_location_source_type,
             ))),
-            // external ids (3)
-            Arc::new(StringArray::from(std::mem::take(&mut self.ids_mag))),
+            // external ids (2)
             Arc::new(StringArray::from(std::mem::take(&mut self.ids_pmid))),
             Arc::new(StringArray::from(std::mem::take(&mut self.ids_pmcid))),
             // list columns (4)

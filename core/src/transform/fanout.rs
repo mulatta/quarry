@@ -15,7 +15,7 @@ use crate::schema;
 
 use super::model::*;
 use super::works::{build_list_list_string_array, build_list_string_array, opt_vec_to_opt};
-use super::{extract_pmcid, extract_pmid, strip_oa_prefix};
+use super::{extract_pmcid, extract_pmid, strip_html_tags, strip_oa_prefix};
 
 /// Convert a column of `Arc<str>` to a StringArray, draining the Vec.
 fn arc_str_col_to_array(col: &mut Vec<Option<Arc<str>>>) -> ArrayRef {
@@ -187,7 +187,8 @@ impl KeywordsAccumulator {
         for kw in &row.keywords {
             self.work_id.push(Some(Arc::clone(work_id)));
             self.keyword_id.push(kw.id.clone());
-            self.display_name.push(kw.display_name.clone());
+            self.display_name
+                .push(kw.display_name.as_deref().map(strip_html_tags));
             self.score.push(kw.score);
         }
     }
@@ -270,7 +271,13 @@ fanout_accumulator!(MeshAccumulator, schema::work_mesh, {
 
 impl MeshAccumulator {
     pub fn push_from_work(&mut self, work_id: &Arc<str>, row: &WorkRow) {
+        // Dedup by (descriptor_ui, qualifier_ui) — OpenAlex source has duplicates
+        let mut seen = rustc_hash::FxHashSet::default();
         for m in &row.mesh {
+            let key = (m.descriptor_ui.as_deref(), m.qualifier_ui.as_deref());
+            if !seen.insert(key) {
+                continue;
+            }
             self.work_id.push(Some(Arc::clone(work_id)));
             self.descriptor_ui.push(m.descriptor_ui.clone());
             self.descriptor_name.push(m.descriptor_name.clone());
@@ -613,7 +620,7 @@ mod tests {
         acc.push(row);
         let batch = acc.take_batch().unwrap();
 
-        assert_eq!(batch.num_columns(), 84);
+        assert_eq!(batch.num_columns(), 82);
         assert_eq!(batch.num_rows(), 1);
 
         let id_col = batch

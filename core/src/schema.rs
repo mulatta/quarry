@@ -15,7 +15,7 @@ fn list_list_utf8() -> DataType {
     DataType::List(Arc::new(Field::new("item", list_utf8(), true)))
 }
 
-/// works.parquet — 84-column fact table
+/// works.parquet — 82-column fact table
 pub fn works() -> &'static Arc<Schema> {
     static SCHEMA: LazyLock<Arc<Schema>> = LazyLock::new(|| {
         Arc::new(Schema::new(vec![
@@ -24,7 +24,6 @@ pub fn works() -> &'static Arc<Schema> {
             Field::new("doi", DataType::Utf8, true),
             Field::new("doi_norm", DataType::Utf8, true),
             Field::new("title", DataType::Utf8, true),
-            Field::new("display_name", DataType::Utf8, true),
             Field::new("abstract_text", DataType::Utf8, true),
             Field::new("content_hash", DataType::Utf8, true),
             // -- dates (4)
@@ -117,8 +116,7 @@ pub fn works() -> &'static Arc<Schema> {
                 true,
             ),
             Field::new("best_oa_location_source_type", DataType::Utf8, true),
-            // -- external ids (3)
-            Field::new("ids_mag", DataType::Utf8, true),
+            // -- external ids (2)
             Field::new("ids_pmid", DataType::Utf8, true),
             Field::new("ids_pmcid", DataType::Utf8, true),
             // -- simple list columns (4)
@@ -331,8 +329,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn works_has_84_cols() {
-        assert_eq!(works().fields().len(), 84);
+    fn works_has_82_cols() {
+        assert_eq!(works().fields().len(), 82);
     }
 
     #[test]

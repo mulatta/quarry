@@ -417,7 +417,7 @@ mod tests {
         assert_eq!(mismatches.len(), 1);
         assert_eq!(mismatches[0].table, "works");
         assert_eq!(mismatches[0].actual_fields, vec!["a", "b"]);
-        assert_eq!(mismatches[0].expected_fields.len(), 84);
+        assert_eq!(mismatches[0].expected_fields.len(), 82);
     }
 
     #[test]

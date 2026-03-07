@@ -505,14 +505,12 @@ mod tests {
             "doi",
             &["https://doi.org/10.1038/s41586-020-2649-2"],
         );
-        assert_str_col(&works, "display_name", &["Array programming with NumPy"]);
         assert_str_col(&works, "language", &["en"]);
         assert_i32_col(&works, "publication_year", &[2020]);
         assert_i32_col(&works, "cited_by_count", &[5000]);
         assert_str_col(&works, "abstract_text", &["Array programming with NumPy"]);
         assert_str_col(&works, "ids_pmid", &["32939066"]);
         assert_str_col(&works, "ids_pmcid", &["PMC7759461"]);
-        assert_str_col(&works, "ids_mag", &["2741809807"]);
         assert_str_col(&works, "shard_updated_date", &["2024-01-15"]);
 
         // oa_shard_idx
