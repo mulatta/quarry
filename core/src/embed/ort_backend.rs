@@ -341,3 +341,141 @@ fn detect_prompt(model_dir: &Path) -> Option<String> {
     let cfg: StConfig = sonic_rs::from_str(&text).ok()?;
     cfg.prompts.into_values().next()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn find_onnx_model_in_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("model.onnx"), b"fake").unwrap();
+        let result = find_onnx_model(tmp.path()).unwrap();
+        assert!(result.ends_with("model.onnx"));
+    }
+
+    #[test]
+    fn find_onnx_model_in_subdir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let sub = tmp.path().join("onnx");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("model.onnx"), b"fake").unwrap();
+        let result = find_onnx_model(tmp.path()).unwrap();
+        assert!(result.ends_with("onnx/model.onnx"));
+    }
+
+    #[test]
+    fn find_onnx_model_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(find_onnx_model(tmp.path()).is_err());
+    }
+
+    #[test]
+    fn detect_pooling_mean() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool_dir = tmp.path().join("1_Pooling");
+        std::fs::create_dir_all(&pool_dir).unwrap();
+        std::fs::write(
+            pool_dir.join("config.json"),
+            r#"{"pooling_mode_mean_tokens": true, "pooling_mode_cls_token": false}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            detect_pooling(tmp.path()),
+            Some(PoolingStrategy::Mean)
+        ));
+    }
+
+    #[test]
+    fn detect_pooling_cls() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool_dir = tmp.path().join("1_Pooling");
+        std::fs::create_dir_all(&pool_dir).unwrap();
+        std::fs::write(
+            pool_dir.join("config.json"),
+            r#"{"pooling_mode_cls_token": true, "pooling_mode_mean_tokens": false}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            detect_pooling(tmp.path()),
+            Some(PoolingStrategy::Cls)
+        ));
+    }
+
+    #[test]
+    fn detect_pooling_lasttoken() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool_dir = tmp.path().join("1_Pooling");
+        std::fs::create_dir_all(&pool_dir).unwrap();
+        std::fs::write(
+            pool_dir.join("config.json"),
+            r#"{"pooling_mode_lasttoken": true}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            detect_pooling(tmp.path()),
+            Some(PoolingStrategy::LastToken)
+        ));
+    }
+
+    #[test]
+    fn detect_pooling_missing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(detect_pooling(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn detect_max_length_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("config.json"),
+            r#"{"max_position_embeddings": 8192}"#,
+        )
+        .unwrap();
+        assert_eq!(detect_max_length(tmp.path()), Some(8192));
+    }
+
+    #[test]
+    fn detect_max_length_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(detect_max_length(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn detect_prompt_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("config_sentence_transformers.json"),
+            r#"{"prompts": {"retrieval.query": "query: "}}"#,
+        )
+        .unwrap();
+        let prompt = detect_prompt(tmp.path()).unwrap();
+        assert_eq!(prompt, "query: ");
+    }
+
+    #[test]
+    fn detect_prompt_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(detect_prompt(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn detect_prompt_empty_prompts() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("config_sentence_transformers.json"),
+            r#"{"prompts": {}}"#,
+        )
+        .unwrap();
+        assert!(detect_prompt(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn model_config_load_empty_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = ModelConfig::load(tmp.path());
+        assert!(cfg.pooling.is_none());
+        assert!(cfg.max_length.is_none());
+        assert!(cfg.prompt.is_none());
+    }
+}
