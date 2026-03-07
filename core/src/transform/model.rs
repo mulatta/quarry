@@ -379,3 +379,167 @@ pub struct CountByYear {
     #[serde(default)]
     pub cited_by_count: Option<i32>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deserialize_minimal_work() {
+        let json = r#"{}"#;
+        let w: WorkRow = sonic_rs::from_str(json).unwrap();
+        assert!(w.id.is_none());
+        assert!(w.title.is_none());
+        assert!(w.publication_year.is_none());
+        assert!(w.authorships.is_empty());
+        assert!(w.topics.is_empty());
+        assert!(w.keywords.is_empty());
+    }
+
+    #[test]
+    fn deserialize_core_fields() {
+        let json = r#"{
+            "id": "https://openalex.org/W123",
+            "doi": "https://doi.org/10.1234/test",
+            "title": "Test Paper",
+            "publication_year": 2024,
+            "type": "article",
+            "language": "en",
+            "cited_by_count": 42,
+            "is_retracted": false
+        }"#;
+        let w: WorkRow = sonic_rs::from_str(json).unwrap();
+        assert_eq!(w.id.as_deref(), Some("https://openalex.org/W123"));
+        assert_eq!(w.work_type.as_deref(), Some("article"));
+        assert_eq!(w.publication_year, Some(2024));
+        assert_eq!(w.cited_by_count, Some(42));
+        assert_eq!(w.is_retracted, Some(false));
+    }
+
+    #[test]
+    fn deserialize_open_access() {
+        let json = r#"{
+            "open_access": {
+                "is_oa": true,
+                "oa_status": "gold",
+                "oa_url": "https://example.com/paper.pdf",
+                "any_repository_has_fulltext": true
+            }
+        }"#;
+        let w: WorkRow = sonic_rs::from_str(json).unwrap();
+        let oa = w.open_access.unwrap();
+        assert_eq!(oa.is_oa, Some(true));
+        assert_eq!(oa.oa_status.as_deref(), Some("gold"));
+    }
+
+    #[test]
+    fn deserialize_apc_float_value() {
+        let json = r#"{"apc_list": {"value": 2500.0, "currency": "USD", "value_usd": 2500}}"#;
+        let w: WorkRow = sonic_rs::from_str(json).unwrap();
+        let apc = w.apc_list.unwrap();
+        assert_eq!(apc.value, Some(2500));
+        assert_eq!(apc.currency.as_deref(), Some("USD"));
+    }
+
+    #[test]
+    fn deserialize_apc_int_value() {
+        let json = r#"{"apc_list": {"value": 1500, "value_usd": 1500}}"#;
+        let w: WorkRow = sonic_rs::from_str(json).unwrap();
+        assert_eq!(w.apc_list.unwrap().value, Some(1500));
+    }
+
+    #[test]
+    fn deserialize_apc_null_value() {
+        let json = r#"{"apc_list": {"value": null}}"#;
+        let w: WorkRow = sonic_rs::from_str(json).unwrap();
+        assert_eq!(w.apc_list.unwrap().value, None);
+    }
+
+    #[test]
+    fn deserialize_mag_as_number() {
+        let json = r#"{"ids": {"mag": 12345678}}"#;
+        let w: WorkRow = sonic_rs::from_str(json).unwrap();
+        assert_eq!(w.ids.unwrap().mag.as_deref(), Some("12345678"));
+    }
+
+    #[test]
+    fn deserialize_mag_as_string() {
+        let json = r#"{"ids": {"mag": "12345678"}}"#;
+        let w: WorkRow = sonic_rs::from_str(json).unwrap();
+        assert_eq!(w.ids.unwrap().mag.as_deref(), Some("12345678"));
+    }
+
+    #[test]
+    fn deserialize_abstract_inverted_index() {
+        let json = r#"{"abstract_inverted_index": {"hello": [0], "world": [1]}}"#;
+        let w: WorkRow = sonic_rs::from_str(json).unwrap();
+        let idx = w.abstract_inverted_index.unwrap();
+        assert_eq!(idx.len(), 2);
+        assert_eq!(idx["hello"], vec![0u32]);
+    }
+
+    #[test]
+    fn deserialize_authorships() {
+        let json = r#"{"authorships": [{
+            "author_position": "first",
+            "author": {"id": "https://openalex.org/A1", "display_name": "Alice"},
+            "institutions": [{"id": "https://openalex.org/I1", "type": "education"}],
+            "is_corresponding": true,
+            "countries": ["US"]
+        }]}"#;
+        let w: WorkRow = sonic_rs::from_str(json).unwrap();
+        assert_eq!(w.authorships.len(), 1);
+        let a = &w.authorships[0];
+        assert_eq!(a.author_position.as_deref(), Some("first"));
+        assert_eq!(a.is_corresponding, Some(true));
+        assert_eq!(
+            a.institutions[0].institution_type.as_deref(),
+            Some("education")
+        );
+    }
+
+    #[test]
+    fn deserialize_topic_hierarchy() {
+        let json = r#"{"primary_topic": {
+            "id": "https://openalex.org/T1",
+            "display_name": "ML",
+            "score": 0.95,
+            "subfield": {"id": "SF1", "display_name": "AI"},
+            "field": {"id": "F1", "display_name": "CS"},
+            "domain": {"id": "D1", "display_name": "Physical Sciences"}
+        }}"#;
+        let w: WorkRow = sonic_rs::from_str(json).unwrap();
+        let t = w.primary_topic.unwrap();
+        assert_eq!(t.score, Some(0.95));
+        assert_eq!(t.subfield.unwrap().display_name.as_deref(), Some("AI"));
+    }
+
+    #[test]
+    fn deserialize_location_with_source() {
+        let json = r#"{"primary_location": {
+            "is_oa": true,
+            "landing_page_url": "https://example.com",
+            "source": {
+                "id": "https://openalex.org/S1",
+                "display_name": "Nature",
+                "issn": ["1234-5678"],
+                "type": "journal"
+            }
+        }}"#;
+        let w: WorkRow = sonic_rs::from_str(json).unwrap();
+        let loc = w.primary_location.unwrap();
+        assert_eq!(loc.is_oa, Some(true));
+        let src = loc.source.unwrap();
+        assert_eq!(src.source_type.as_deref(), Some("journal"));
+        assert_eq!(src.issn.unwrap(), vec!["1234-5678"]);
+    }
+
+    #[test]
+    fn deserialize_award_with_funder_alias() {
+        let json = r#"{"awards": [{"id": "G1", "funder": "F1", "funder_award_id": "R01"}]}"#;
+        let w: WorkRow = sonic_rs::from_str(json).unwrap();
+        let award = &w.awards[0];
+        assert_eq!(award.funder_id.as_deref(), Some("F1"));
+        assert_eq!(award.funder_award_id.as_deref(), Some("R01"));
+    }
+}

@@ -760,3 +760,232 @@ impl Accumulator for WorksAccumulator {
         RecordBatch::try_new(self.schema.clone(), arrays)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::model::{Location, Source, Topic, TopicClassification, WorkRow};
+    use super::*;
+    use crate::accumulator::Accumulator;
+    use arrow::array::AsArray;
+
+    fn minimal_work() -> WorkRow {
+        sonic_rs::from_str(
+            r#"{
+            "id": "https://openalex.org/W999",
+            "doi": "https://doi.org/10.1234/test",
+            "title": "Test Title",
+            "publication_year": 2024,
+            "language": "en",
+            "type": "article"
+        }"#,
+        )
+        .unwrap()
+    }
+
+    fn work_with_abstract() -> WorkRow {
+        sonic_rs::from_str(
+            r#"{
+            "id": "https://openalex.org/W888",
+            "title": "Paper A",
+            "abstract_inverted_index": {"hello": [0], "world": [1]},
+            "publication_year": 2023
+        }"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn build_list_string_array_some_and_none() {
+        let data = vec![
+            Some(vec!["a".to_string(), "b".to_string()]),
+            None,
+            Some(vec!["c".to_string()]),
+        ];
+        let arr = build_list_string_array(&data);
+        assert_eq!(arr.len(), 3);
+        assert!(!arr.is_null(0));
+        assert!(arr.is_null(1));
+        assert!(!arr.is_null(2));
+    }
+
+    #[test]
+    fn build_list_list_string_array_nested() {
+        let data = vec![
+            Some(vec![
+                vec!["a".to_string()],
+                vec!["b".to_string(), "c".to_string()],
+            ]),
+            None,
+        ];
+        let arr = build_list_list_string_array(&data);
+        assert_eq!(arr.len(), 2);
+        assert!(!arr.is_null(0));
+        assert!(arr.is_null(1));
+    }
+
+    #[test]
+    fn flatten_location_none_returns_all_none() {
+        let result = flatten_location(None);
+        assert!(result.0.is_none());
+        assert!(result.1.is_none());
+        assert!(result.10.is_none());
+    }
+
+    #[test]
+    fn flatten_location_with_source() {
+        let loc = Location {
+            is_oa: Some(true),
+            landing_page_url: Some("https://example.com".into()),
+            pdf_url: None,
+            license: Some("cc-by".into()),
+            version: Some("publishedVersion".into()),
+            source: Some(Source {
+                id: Some("S1".into()),
+                display_name: Some("Nature".into()),
+                issn_l: Some("0028-0836".into()),
+                issn: Some(vec!["0028-0836".into()]),
+                host_organization: Some("Springer".into()),
+                source_type: Some("journal".into()),
+            }),
+        };
+        let r = flatten_location(Some(&loc));
+        assert_eq!(r.0, Some(true));
+        assert_eq!(r.1.as_deref(), Some("https://example.com"));
+        assert_eq!(r.5.as_deref(), Some("S1"));
+        assert_eq!(r.10.as_deref(), Some("journal"));
+    }
+
+    #[test]
+    fn flatten_topic_none_returns_all_none() {
+        let r = flatten_topic(None);
+        assert!(r.0.is_none());
+        assert!(r.2.is_none());
+        assert!(r.8.is_none());
+    }
+
+    #[test]
+    fn flatten_topic_with_hierarchy() {
+        let t = Topic {
+            id: Some("T1".into()),
+            display_name: Some("ML".into()),
+            score: Some(0.95),
+            subfield: Some(TopicClassification {
+                id: Some("SF1".into()),
+                display_name: Some("AI".into()),
+            }),
+            field: Some(TopicClassification {
+                id: Some("F1".into()),
+                display_name: Some("CS".into()),
+            }),
+            domain: None,
+        };
+        let r = flatten_topic(Some(&t));
+        assert_eq!(r.0.as_deref(), Some("T1"));
+        assert_eq!(r.2, Some(0.95));
+        assert_eq!(r.3.as_deref(), Some("SF1"));
+        assert!(r.7.is_none()); // domain.id
+    }
+
+    #[test]
+    fn opt_vec_to_opt_empty_returns_none() {
+        assert!(opt_vec_to_opt(vec![]).is_none());
+    }
+
+    #[test]
+    fn opt_vec_to_opt_nonempty_returns_some() {
+        let v = opt_vec_to_opt(vec!["a".to_string()]);
+        assert_eq!(v.unwrap(), vec!["a"]);
+    }
+
+    #[test]
+    fn works_accumulator_push_and_take_batch() {
+        let mut acc = WorksAccumulator::new();
+        acc.push(minimal_work());
+        assert_eq!(acc.len(), 1);
+
+        let batch = acc.take_batch().unwrap();
+        assert_eq!(batch.num_rows(), 1);
+        // Check work_id has OA prefix stripped
+        let wid = batch.column(0).as_string::<i32>();
+        assert_eq!(wid.value(0), "W999");
+        // Check doi_norm (normalized DOI)
+        let doi_norm = batch.column(2).as_string::<i32>();
+        assert_eq!(doi_norm.value(0), "10.1234/test");
+    }
+
+    #[test]
+    fn works_accumulator_content_hash_deterministic() {
+        let mut acc1 = WorksAccumulator::new();
+        let mut acc2 = WorksAccumulator::new();
+        acc1.push(work_with_abstract());
+        acc2.push(work_with_abstract());
+
+        let b1 = acc1.take_batch().unwrap();
+        let b2 = acc2.take_batch().unwrap();
+        let h1 = b1.column(5).as_string::<i32>().value(0);
+        let h2 = b2.column(5).as_string::<i32>().value(0);
+        assert_eq!(h1, h2);
+        assert!(!h1.is_empty());
+    }
+
+    #[test]
+    fn works_accumulator_content_hash_differs_on_title_change() {
+        let w1: WorkRow = sonic_rs::from_str(r#"{"title": "A", "id": "W1"}"#).unwrap();
+        let w2: WorkRow = sonic_rs::from_str(r#"{"title": "B", "id": "W1"}"#).unwrap();
+        let mut a1 = WorksAccumulator::new();
+        let mut a2 = WorksAccumulator::new();
+        a1.push(w1);
+        a2.push(w2);
+        let h1 = a1
+            .take_batch()
+            .unwrap()
+            .column(5)
+            .as_string::<i32>()
+            .value(0)
+            .to_string();
+        let h2 = a2
+            .take_batch()
+            .unwrap()
+            .column(5)
+            .as_string::<i32>()
+            .value(0)
+            .to_string();
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn works_accumulator_abstract_decoded_and_stripped() {
+        let mut acc = WorksAccumulator::new();
+        acc.push(work_with_abstract());
+        let batch = acc.take_batch().unwrap();
+        let abs = batch.column(4).as_string::<i32>().value(0);
+        assert_eq!(abs, "hello world");
+    }
+
+    #[test]
+    fn works_accumulator_shard_metadata() {
+        let mut acc = WorksAccumulator::with_shard_metadata(Some("2024-01-01".into()), 42);
+        acc.push(minimal_work());
+        let batch = acc.take_batch().unwrap();
+        let ncols = batch.num_columns();
+        // shard_updated_date is second-to-last column
+        let sud = batch.column(ncols - 2).as_string::<i32>().value(0);
+        assert_eq!(sud, "2024-01-01");
+        // oa_shard_idx is last column
+        let idx = batch
+            .column(ncols - 1)
+            .as_any()
+            .downcast_ref::<arrow::array::UInt16Array>()
+            .unwrap();
+        assert_eq!(idx.value(0), 42);
+    }
+
+    #[test]
+    fn works_accumulator_schema_column_count() {
+        let mut acc = WorksAccumulator::new();
+        acc.push(minimal_work());
+        let batch = acc.take_batch().unwrap();
+        // Schema has 84 columns (82 + shard_updated_date + oa_shard_idx)
+        assert_eq!(batch.num_columns(), crate::schema::works().fields().len());
+    }
+}
