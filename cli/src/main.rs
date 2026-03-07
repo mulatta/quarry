@@ -1,6 +1,6 @@
 //! quarry-etl CLI — Academic paper data pipeline (OpenAlex).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -274,8 +274,8 @@ fn main() -> Result<()> {
     match &cli.command {
         Command::Run(args) => cmd_run(args),
         Command::Hive(args) => cmd_hive(args),
-        Command::Push(args) => cmd_push(args),
-        Command::Pull(args) => cmd_pull(args),
+        Command::Push(args) => cmd_transfer(args, true),
+        Command::Pull(args) => cmd_transfer(args, false),
         Command::Status(args) => cmd_status(args),
         Command::Clean(args) => cmd_clean(args),
         Command::Embed(args) => cmd_embed(args),
@@ -438,7 +438,6 @@ fn cmd_run(args: &RunArgs) -> Result<()> {
     }
 
     let (cancelled, sig_id) = install_sigint()?;
-    let mut failed = 0usize;
 
     // Spawn a single upload worker for the entire pipeline (raw + hive).
     // It stays alive until we drop the sender after all stages complete.
@@ -450,76 +449,24 @@ fn cmd_run(args: &RunArgs) -> Result<()> {
     let upload_tx = upload.as_ref().map(|(tx, _)| tx);
 
     // ── Stage 1: Raw download ──
-    if shards.is_empty() {
+    let failed = if shards.is_empty() {
         eprintln!("All shards up to date.");
+        0
     } else {
-        let mut pending = shards;
-        let mut total_completed = 0usize;
-        let mut total_rows = 0usize;
-
-        for pass_num in 0..=r_outer_retries {
-            if pending.is_empty() {
-                break;
-            }
-            if pass_num > 0 {
-                eprintln!(
-                    "\nRetry pass {pass_num}/{r_outer_retries} ({} shards)",
-                    pending.len()
-                );
-                std::thread::sleep(Duration::from_secs(r_retry_delay));
-            }
-
-            let ctx = RunContext {
-                output_dir: raw_dir.clone(),
-                zstd_level: r_zstd_level,
-                concurrency: r_concurrency,
-                cancelled: Arc::clone(&cancelled),
-            };
-            let provider = OAProvider {
-                filter: filter.clone(),
-                pool: Arc::clone(&pool),
-            };
-
-            let summary = if let Some(tx) = upload_tx {
-                let on_complete = |shard: &OAShard| {
-                    for table in oa::TABLES {
-                        let path =
-                            raw_dir.join(format!("{table}/shard_{:04}.parquet", shard.shard_idx));
-                        if path.exists() {
-                            let _ = tx.send(path);
-                        }
-                    }
-                };
-                run_provider(&provider, &pending, &ctx, &progress, Some(&on_complete))
-            } else {
-                run_provider(&provider, &pending, &ctx, &progress, None)
-            };
-
-            total_completed += summary.completed;
-            total_rows += summary.total_rows;
-
-            if summary.failed == 0 {
-                pending = Vec::new();
-                break;
-            }
-            pending = summary
-                .failed_indices
-                .iter()
-                .map(|&i| pending[i].clone())
-                .collect();
-
-            if cancelled.load(Ordering::Relaxed) {
-                break;
-            }
-        }
-
-        failed = pending.len();
-        eprintln!("\nDone: {total_completed} completed, {failed} failed, {total_rows} rows");
-        if failed > 0 {
-            let idxs: Vec<usize> = pending.iter().map(|s| s.shard_idx).collect();
-            eprintln!("Failed shards: {idxs:?}");
-        }
-    }
+        run_download_stage(
+            shards,
+            &raw_dir,
+            &pool,
+            &filter,
+            r_concurrency,
+            r_zstd_level,
+            r_outer_retries,
+            r_retry_delay,
+            &cancelled,
+            &progress,
+            upload_tx,
+        )
+    };
 
     // ── Stage 2: Hive partitioning ──
     let do_hive = args.hive || cfg.hive.is_enabled();
@@ -560,6 +507,90 @@ fn cmd_run(args: &RunArgs) -> Result<()> {
     Ok(())
 }
 
+/// Download stage with outer retry loop. Returns number of failed shards.
+#[allow(clippy::too_many_arguments)]
+fn run_download_stage(
+    shards: Vec<OAShard>,
+    raw_dir: &Path,
+    pool: &Arc<HttpPool>,
+    filter: &quarry_etl_core::transform::Filter,
+    concurrency: usize,
+    zstd_level: i32,
+    outer_retries: u32,
+    retry_delay: u64,
+    cancelled: &Arc<AtomicBool>,
+    progress: &Arc<ProgressContext>,
+    upload_tx: Option<&std::sync::mpsc::SyncSender<PathBuf>>,
+) -> usize {
+    let mut pending = shards;
+    let mut total_completed = 0usize;
+    let mut total_rows = 0usize;
+
+    for pass_num in 0..=outer_retries {
+        if pending.is_empty() {
+            break;
+        }
+        if pass_num > 0 {
+            eprintln!(
+                "\nRetry pass {pass_num}/{outer_retries} ({} shards)",
+                pending.len()
+            );
+            std::thread::sleep(Duration::from_secs(retry_delay));
+        }
+
+        let ctx = RunContext {
+            output_dir: raw_dir.to_path_buf(),
+            zstd_level,
+            concurrency,
+            cancelled: Arc::clone(cancelled),
+        };
+        let provider = OAProvider {
+            filter: filter.clone(),
+            pool: Arc::clone(pool),
+        };
+
+        let summary = if let Some(tx) = upload_tx {
+            let on_complete = |shard: &OAShard| {
+                for table in oa::TABLES {
+                    let path =
+                        raw_dir.join(format!("{table}/shard_{:04}.parquet", shard.shard_idx));
+                    if path.exists() {
+                        let _ = tx.send(path);
+                    }
+                }
+            };
+            run_provider(&provider, &pending, &ctx, progress, Some(&on_complete))
+        } else {
+            run_provider(&provider, &pending, &ctx, progress, None)
+        };
+
+        total_completed += summary.completed;
+        total_rows += summary.total_rows;
+
+        if summary.failed == 0 {
+            pending = Vec::new();
+            break;
+        }
+        pending = summary
+            .failed_indices
+            .iter()
+            .map(|&i| pending[i].clone())
+            .collect();
+
+        if cancelled.load(Ordering::Relaxed) {
+            break;
+        }
+    }
+
+    let failed = pending.len();
+    eprintln!("\nDone: {total_completed} completed, {failed} failed, {total_rows} rows");
+    if failed > 0 {
+        let idxs: Vec<usize> = pending.iter().map(|s| s.shard_idx).collect();
+        eprintln!("Failed shards: {idxs:?}");
+    }
+    failed
+}
+
 fn cmd_hive(args: &HiveArgs) -> Result<()> {
     let cfg = load_cfg(args.common.config.as_deref())?;
     let root = resolve_root(&args.common, &cfg);
@@ -588,7 +619,7 @@ fn cmd_hive(args: &HiveArgs) -> Result<()> {
     Ok(())
 }
 
-fn cmd_push(args: &TransferArgs) -> Result<()> {
+fn cmd_transfer(args: &TransferArgs, is_push: bool) -> Result<()> {
     let cfg = load_cfg(args.common.config.as_deref())?;
     let root = resolve_root(&args.common, &cfg);
 
@@ -611,43 +642,16 @@ fn cmd_push(args: &TransferArgs) -> Result<()> {
 
     let (cancelled, sig_id) = install_sigint()?;
     let progress: Arc<ProgressContext> = Arc::new(ProgressContext::with_multi(multi));
-    let summary = remote::run_push(&ucfg, &PathBuf::from(&root), &opts, &progress, &cancelled)?;
-    signal_hook::low_level::unregister(sig_id);
-
-    print_transfer_summary("Push", &summary);
-    if summary.files_failed > 0 {
-        std::process::exit(1);
-    }
-    Ok(())
-}
-
-fn cmd_pull(args: &TransferArgs) -> Result<()> {
-    let cfg = load_cfg(args.common.config.as_deref())?;
-    let root = resolve_root(&args.common, &cfg);
-
-    let multi = MultiProgress::new();
-    init_tracing(&multi);
-
-    let ucfg = ResolvedUploadConfig::from_config(&cfg.upload)?;
-    let r_force = args.force || cfg.upload.force.unwrap_or(false);
-    let r_concurrency = args.concurrency.or(cfg.upload.concurrency).unwrap_or(8);
-
-    let opts = TransferOpts {
-        targets: RemoteTargets {
-            raw: !args.no_raw,
-            hive: !args.no_hive,
-        },
-        dry_run: args.dry_run,
-        force: r_force,
-        concurrency: r_concurrency,
+    let output = PathBuf::from(&root);
+    let summary = if is_push {
+        remote::run_push(&ucfg, &output, &opts, &progress, &cancelled)?
+    } else {
+        remote::run_pull(&ucfg, &output, &opts, &progress, &cancelled)?
     };
-
-    let (cancelled, sig_id) = install_sigint()?;
-    let progress: Arc<ProgressContext> = Arc::new(ProgressContext::with_multi(multi));
-    let summary = remote::run_pull(&ucfg, &PathBuf::from(&root), &opts, &progress, &cancelled)?;
     signal_hook::low_level::unregister(sig_id);
 
-    print_transfer_summary("Pull", &summary);
+    let label = if is_push { "Push" } else { "Pull" };
+    print_transfer_summary(label, &summary);
     if summary.files_failed > 0 {
         std::process::exit(1);
     }
@@ -756,13 +760,13 @@ fn cmd_embed(args: &EmbedArgs) -> Result<()> {
 
     // Resolve: CLI > config > default
     let batch_size = args.batch_size.or(ecfg.batch_size).unwrap_or(64);
-    let chunk_size = 50_000usize;
     let max_rows = args.max_rows.or(ecfg.max_rows);
     let model_name = args
         .model
-        .clone()
-        .or_else(|| ecfg.model.clone())
-        .unwrap_or_else(|| "jina-embeddings-v3".to_string());
+        .as_deref()
+        .or(ecfg.model.as_deref())
+        .unwrap_or("jina-embeddings-v3")
+        .to_string();
 
     let hive_dir = PathBuf::from(&root).join("hive/works");
     let out_path = args
@@ -771,59 +775,12 @@ fn cmd_embed(args: &EmbedArgs) -> Result<()> {
         .or_else(|| ecfg.output.as_ref().map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from(&root).join("embeddings.parquet"));
 
-    // Incremental mode: load existing embeddings for content_hash diffing
-    let existing_cache = if out_path.exists() && !args.force {
-        match embed::io::load_existing_embeddings(&out_path) {
-            Ok((cache, _dim)) if !cache.is_empty() => {
-                let msg = format!(
-                    "Incremental mode: {} existing embeddings loaded",
-                    quarry_etl_core::progress::fmt_num(cache.len()),
-                );
-                if is_tty {
-                    eprintln!("{msg}");
-                } else {
-                    tracing::info!("{msg}");
-                }
-                Some(cache)
-            }
-            Ok(_) => {
-                // Empty cache (old format without content_hash) → full rebuild
-                None
-            }
-            Err(e) => {
-                tracing::warn!("Cannot load existing embeddings, full rebuild: {e}");
-                None
-            }
-        }
-    } else {
-        None
-    };
-
     // Backend selection
     let backend_str = match args.backend {
         EmbedBackend::Http => "http",
         EmbedBackend::Local => "local",
     };
     let backend_str = ecfg.backend.as_deref().unwrap_or(backend_str);
-
-    // Count total rows (fast metadata-only scan)
-    let (total_rows, num_files) = embed::io::count_hive_rows(&hive_dir)?;
-    let effective_total = max_rows.map(|m| m.min(total_rows)).unwrap_or(total_rows);
-
-    if effective_total == 0 {
-        eprintln!("No works to embed");
-        return Ok(());
-    }
-
-    let summary = format!(
-        "{num_files} hive files, ~{} rows, backend={backend_str}, batch_size={batch_size}",
-        quarry_etl_core::progress::fmt_num(effective_total),
-    );
-    if is_tty {
-        eprintln!("{summary}");
-    } else {
-        tracing::info!("{summary}");
-    }
 
     // Build embedder
     let embedder: Box<dyn embed::Embedder> = match backend_str {
@@ -841,25 +798,27 @@ fn cmd_embed(args: &EmbedArgs) -> Result<()> {
         "local" => {
             #[cfg(feature = "local")]
             {
-                let model_dir = resolve_model_dir(args, ecfg)?;
-                let pooling_override = args.pooling.or_else(|| {
+                let model_dir =
+                    resolve_model_dir(args.model_dir.as_deref(), args.model.as_deref(), ecfg)?;
+                let pooling = args.pooling.or_else(|| {
                     ecfg.pooling
                         .as_deref()
                         .and_then(|s| s.parse::<embed::PoolingStrategy>().ok())
                 });
-                let prompt_override = args.prompt.clone().or_else(|| ecfg.prompt.clone());
-                let max_length_override = args.max_length.or(ecfg.max_length);
+                let prompt = args.prompt.clone().or_else(|| ecfg.prompt.clone());
+                let max_length = args.max_length.or(ecfg.max_length);
                 let device = args
                     .device
-                    .clone()
-                    .or_else(|| ecfg.device.clone())
-                    .unwrap_or_else(|| "cpu".to_string());
+                    .as_deref()
+                    .or(ecfg.device.as_deref())
+                    .unwrap_or("cpu")
+                    .to_string();
                 Box::new(embed::ort_backend::OrtEmbedder::new(
                     &model_dir,
                     embed::ort_backend::OrtEmbedderOpts {
-                        pooling: pooling_override,
-                        max_length: max_length_override,
-                        prompt: prompt_override,
+                        pooling,
+                        max_length,
+                        prompt,
                         device,
                     },
                 )?)
@@ -869,6 +828,152 @@ fn cmd_embed(args: &EmbedArgs) -> Result<()> {
         }
         other => anyhow::bail!("unknown embed backend: {other} (expected http|local)"),
     };
+
+    let (cancelled, sig_id) = install_sigint()?;
+    run_embed_core(
+        &*embedder,
+        &hive_dir,
+        &out_path,
+        backend_str,
+        batch_size,
+        max_rows,
+        args.force,
+        &cancelled,
+        &multi,
+        is_tty,
+    )?;
+    signal_hook::low_level::unregister(sig_id);
+    Ok(())
+}
+
+// ============================================================
+// Helpers
+// ============================================================
+
+/// Default base directory for model lookup: ~/quarry/etl/models/
+const DEFAULT_MODELS_DIR: &str = "quarry/etl/models";
+
+const EMBED_CHUNK_SIZE: usize = 50_000;
+
+/// Resolve model directory: --model-dir > [embed].model_dir > {models_dir}/{model}
+fn resolve_model_dir(
+    cli_model_dir: Option<&Path>,
+    cli_model: Option<&str>,
+    ecfg: &config::EmbedConfig,
+) -> Result<PathBuf> {
+    // 1. CLI --model-dir (absolute path)
+    if let Some(dir) = cli_model_dir {
+        return Ok(dir.to_path_buf());
+    }
+    // 2. TOML model_dir (absolute path)
+    if let Some(ref dir) = ecfg.model_dir {
+        return Ok(PathBuf::from(dir));
+    }
+    // 3. models_dir + model name
+    let model_name = cli_model.or(ecfg.model.as_deref()).ok_or_else(|| {
+        anyhow::anyhow!(
+            "--model-dir, [embed].model_dir, or [embed].model required for local backend"
+        )
+    })?;
+
+    let base = ecfg
+        .models_dir
+        .as_deref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+            PathBuf::from(home).join(DEFAULT_MODELS_DIR)
+        });
+
+    let resolved = base.join(model_name);
+    anyhow::ensure!(
+        resolved.exists(),
+        "model directory not found: {} (set [embed].models_dir or use --model-dir)",
+        resolved.display()
+    );
+    Ok(resolved)
+}
+
+fn resolve_hive_config(
+    root: &str,
+    cfg: &FileConfig,
+    args: &HiveArgs,
+) -> Result<ResolvedHiveConfig> {
+    let output_dir = PathBuf::from(root);
+    let hive_cfg = config::HiveConfig {
+        enable: cfg.hive.enable,
+        clean_raw: cfg.hive.clean_raw,
+        zstd_level: args.zstd_level.or(cfg.hive.zstd_level),
+        row_group_size: args.row_group_size.or(cfg.hive.row_group_size),
+        num_shards: args.num_shards.or(cfg.hive.num_shards),
+        threads: args.threads.or(cfg.hive.threads),
+        memory_limit: args
+            .memory_limit
+            .clone()
+            .or_else(|| cfg.hive.memory_limit.clone()),
+    };
+    ResolvedHiveConfig::from_config(&output_dir, &hive_cfg, cfg.zstd_level)
+}
+
+/// Core embedding pipeline: cache loading → chunk processing → summary.
+///
+/// Caller is responsible for: tracing init, embedder construction, SIGINT.
+#[allow(clippy::too_many_arguments)]
+fn run_embed_core(
+    embedder: &dyn embed::Embedder,
+    hive_dir: &Path,
+    out_path: &Path,
+    backend_label: &str,
+    batch_size: usize,
+    max_rows: Option<usize>,
+    force: bool,
+    cancelled: &Arc<AtomicBool>,
+    multi: &MultiProgress,
+    is_tty: bool,
+) -> Result<()> {
+    // Incremental mode: load existing embeddings for content_hash diffing
+    let existing_cache = if out_path.exists() && !force {
+        match embed::io::load_existing_embeddings(out_path) {
+            Ok((cache, _dim)) if !cache.is_empty() => {
+                let msg = format!(
+                    "Incremental mode: {} existing embeddings loaded",
+                    quarry_etl_core::progress::fmt_num(cache.len()),
+                );
+                if is_tty {
+                    eprintln!("{msg}");
+                } else {
+                    tracing::info!("{msg}");
+                }
+                Some(cache)
+            }
+            Ok(_) => None,
+            Err(e) => {
+                tracing::warn!("Cannot load existing embeddings, full rebuild: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // Count total rows (fast metadata-only scan)
+    let (total_rows, num_files) = embed::io::count_hive_rows(hive_dir)?;
+    let effective_total = max_rows.map(|m| m.min(total_rows)).unwrap_or(total_rows);
+
+    if effective_total == 0 {
+        eprintln!("No works to embed");
+        return Ok(());
+    }
+
+    let summary = format!(
+        "{num_files} hive files, ~{} rows, backend={backend_label}, batch_size={batch_size}",
+        quarry_etl_core::progress::fmt_num(effective_total),
+    );
+    if is_tty {
+        eprintln!("{summary}");
+    } else {
+        tracing::info!("{summary}");
+    }
 
     // Progress bar: TTY shows bar with speed, non-TTY hidden
     let bar = if is_tty {
@@ -880,8 +985,6 @@ fn cmd_embed(args: &EmbedArgs) -> Result<()> {
         indicatif::ProgressBar::hidden()
     };
 
-    let (cancelled, sig_id) = install_sigint()?;
-
     // Stream: read chunks → encode → write (bounded memory)
     let mut writer: Option<embed::io::EmbedWriter> = None;
     let start = std::time::Instant::now();
@@ -889,17 +992,17 @@ fn cmd_embed(args: &EmbedArgs) -> Result<()> {
     let mut carried_count = 0usize;
 
     let processed = embed::io::process_hive_chunks_incremental(
-        &hive_dir,
-        chunk_size,
+        hive_dir,
+        EMBED_CHUNK_SIZE,
         max_rows,
-        &cancelled,
+        cancelled,
         existing_cache.as_ref(),
         |work_ids, texts, hashes, carried| {
             // Encode new/changed works
             if !texts.is_empty() {
                 let (embeddings, dim) = embedder.encode(texts, batch_size, &bar)?;
                 if writer.is_none() {
-                    writer = Some(embed::io::EmbedWriter::new(&out_path, dim)?);
+                    writer = Some(embed::io::EmbedWriter::new(out_path, dim)?);
                 }
                 writer
                     .as_mut()
@@ -913,7 +1016,7 @@ fn cmd_embed(args: &EmbedArgs) -> Result<()> {
                 if writer.is_none() {
                     // Need dim from carried vectors
                     let dim = carried[0].2.len();
-                    writer = Some(embed::io::EmbedWriter::new(&out_path, dim)?);
+                    writer = Some(embed::io::EmbedWriter::new(out_path, dim)?);
                 }
                 bar.inc(carried.len() as u64);
                 writer.as_mut().unwrap().write_carried(carried)?;
@@ -924,7 +1027,6 @@ fn cmd_embed(args: &EmbedArgs) -> Result<()> {
         },
     )?;
 
-    signal_hook::low_level::unregister(sig_id);
     bar.finish_and_clear();
 
     if cancelled.load(Ordering::Relaxed) {
@@ -968,103 +1070,6 @@ fn cmd_embed(args: &EmbedArgs) -> Result<()> {
     Ok(())
 }
 
-// ============================================================
-// Helpers
-// ============================================================
-
-/// Default base directory for model lookup: ~/quarry/etl/models/
-const DEFAULT_MODELS_DIR: &str = "quarry/etl/models";
-
-/// Resolve model directory: --model-dir > [embed].model_dir > {models_dir}/{model}
-fn resolve_model_dir(args: &EmbedArgs, ecfg: &config::EmbedConfig) -> Result<PathBuf> {
-    // 1. CLI --model-dir (absolute path)
-    if let Some(ref dir) = args.model_dir {
-        return Ok(dir.clone());
-    }
-    // 2. TOML model_dir (absolute path)
-    if let Some(ref dir) = ecfg.model_dir {
-        return Ok(PathBuf::from(dir));
-    }
-    // 3. models_dir + model name
-    let model_name = args
-        .model
-        .as_deref()
-        .or(ecfg.model.as_deref())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "--model-dir, [embed].model_dir, or [embed].model required for local backend"
-            )
-        })?;
-
-    let base = ecfg
-        .models_dir
-        .as_deref()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-            PathBuf::from(home).join(DEFAULT_MODELS_DIR)
-        });
-
-    let resolved = base.join(model_name);
-    anyhow::ensure!(
-        resolved.exists(),
-        "model directory not found: {} (set [embed].models_dir or use --model-dir)",
-        resolved.display()
-    );
-    Ok(resolved)
-}
-
-/// Resolve model directory from config only (no CLI args).
-/// Used when embedding is triggered automatically via `run --embed`.
-fn resolve_model_dir_from_cfg(ecfg: &config::EmbedConfig) -> Result<PathBuf> {
-    // 1. TOML model_dir (absolute path)
-    if let Some(ref dir) = ecfg.model_dir {
-        return Ok(PathBuf::from(dir));
-    }
-    // 2. models_dir + model name
-    let model_name = ecfg.model.as_deref().ok_or_else(|| {
-        anyhow::anyhow!("[embed].model_dir or [embed].model required for local backend")
-    })?;
-
-    let base = ecfg
-        .models_dir
-        .as_deref()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-            PathBuf::from(home).join(DEFAULT_MODELS_DIR)
-        });
-
-    let resolved = base.join(model_name);
-    anyhow::ensure!(
-        resolved.exists(),
-        "model directory not found: {} (set [embed].models_dir or use --model-dir)",
-        resolved.display()
-    );
-    Ok(resolved)
-}
-
-fn resolve_hive_config(
-    root: &str,
-    cfg: &FileConfig,
-    args: &HiveArgs,
-) -> Result<ResolvedHiveConfig> {
-    let output_dir = PathBuf::from(root);
-    let hive_cfg = config::HiveConfig {
-        enable: cfg.hive.enable,
-        clean_raw: cfg.hive.clean_raw,
-        zstd_level: args.zstd_level.or(cfg.hive.zstd_level),
-        row_group_size: args.row_group_size.or(cfg.hive.row_group_size),
-        num_shards: args.num_shards.or(cfg.hive.num_shards),
-        threads: args.threads.or(cfg.hive.threads),
-        memory_limit: args
-            .memory_limit
-            .clone()
-            .or_else(|| cfg.hive.memory_limit.clone()),
-    };
-    ResolvedHiveConfig::from_config(&output_dir, &hive_cfg, cfg.zstd_level)
-}
-
 /// Run embedding with config-only settings (no CLI args).
 /// Used by `cmd_run --embed` / `[embed].enable = true`.
 fn run_embed_with_cfg(root: &str, cfg: &FileConfig, cancelled: &Arc<AtomicBool>) -> Result<()> {
@@ -1074,12 +1079,12 @@ fn run_embed_with_cfg(root: &str, cfg: &FileConfig, cancelled: &Arc<AtomicBool>)
     let is_tty = std::io::stderr().is_terminal();
 
     let batch_size = ecfg.batch_size.unwrap_or(64);
-    let chunk_size = 50_000usize;
     let max_rows = ecfg.max_rows;
     let model_name = ecfg
         .model
-        .clone()
-        .unwrap_or_else(|| "jina-embeddings-v3".to_string());
+        .as_deref()
+        .unwrap_or("jina-embeddings-v3")
+        .to_string();
 
     let hive_dir = PathBuf::from(root).join("hive/works");
     let out_path = ecfg
@@ -1088,40 +1093,7 @@ fn run_embed_with_cfg(root: &str, cfg: &FileConfig, cancelled: &Arc<AtomicBool>)
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(root).join("embeddings.parquet"));
 
-    // Incremental mode: load existing embeddings for content_hash diffing
-    let existing_cache = if out_path.exists() {
-        match embed::io::load_existing_embeddings(&out_path) {
-            Ok((cache, _dim)) if !cache.is_empty() => {
-                eprintln!(
-                    "Incremental mode: {} existing embeddings loaded",
-                    quarry_etl_core::progress::fmt_num(cache.len()),
-                );
-                Some(cache)
-            }
-            Ok(_) => None,
-            Err(e) => {
-                tracing::warn!("Cannot load existing embeddings, full rebuild: {e}");
-                None
-            }
-        }
-    } else {
-        None
-    };
-
     let backend_str = ecfg.backend.as_deref().unwrap_or("http");
-
-    let (total_rows, num_files) = embed::io::count_hive_rows(&hive_dir)?;
-    let effective_total = max_rows.map(|m| m.min(total_rows)).unwrap_or(total_rows);
-
-    if effective_total == 0 {
-        eprintln!("No works to embed");
-        return Ok(());
-    }
-
-    eprintln!(
-        "{num_files} hive files, ~{} rows, backend={backend_str}, batch_size={batch_size}",
-        quarry_etl_core::progress::fmt_num(effective_total),
-    );
 
     let embedder: Box<dyn embed::Embedder> = match backend_str {
         "http" => {
@@ -1135,20 +1107,20 @@ fn run_embed_with_cfg(root: &str, cfg: &FileConfig, cancelled: &Arc<AtomicBool>)
         "local" => {
             #[cfg(feature = "local")]
             {
-                let model_dir = resolve_model_dir_from_cfg(ecfg)?;
-                let pooling_override = ecfg
+                let model_dir = resolve_model_dir(None, None, ecfg)?;
+                let pooling = ecfg
                     .pooling
                     .as_deref()
                     .and_then(|s| s.parse::<embed::PoolingStrategy>().ok());
-                let prompt_override = ecfg.prompt.clone();
-                let max_length_override = ecfg.max_length;
-                let device = ecfg.device.clone().unwrap_or_else(|| "cpu".to_string());
+                let prompt = ecfg.prompt.clone();
+                let max_length = ecfg.max_length;
+                let device = ecfg.device.as_deref().unwrap_or("cpu").to_string();
                 Box::new(embed::ort_backend::OrtEmbedder::new(
                     &model_dir,
                     embed::ort_backend::OrtEmbedderOpts {
-                        pooling: pooling_override,
-                        max_length: max_length_override,
-                        prompt: prompt_override,
+                        pooling,
+                        max_length,
+                        prompt,
                         device,
                     },
                 )?)
@@ -1160,87 +1132,18 @@ fn run_embed_with_cfg(root: &str, cfg: &FileConfig, cancelled: &Arc<AtomicBool>)
     };
 
     let multi = MultiProgress::new();
-    let bar = if is_tty {
-        let b = multi.add(indicatif::ProgressBar::new(effective_total as u64));
-        b.set_style(quarry_etl_core::progress::embed_style());
-        b.set_prefix("Embedding");
-        b
-    } else {
-        indicatif::ProgressBar::hidden()
-    };
-
-    let mut writer: Option<embed::io::EmbedWriter> = None;
-    let start = std::time::Instant::now();
-    let mut encoded_count = 0usize;
-    let mut carried_count = 0usize;
-
-    let processed = embed::io::process_hive_chunks_incremental(
+    run_embed_core(
+        &*embedder,
         &hive_dir,
-        chunk_size,
+        &out_path,
+        backend_str,
+        batch_size,
         max_rows,
+        false,
         cancelled,
-        existing_cache.as_ref(),
-        |work_ids, texts, hashes, carried| {
-            if !texts.is_empty() {
-                let (embeddings, dim) = embedder.encode(texts, batch_size, &bar)?;
-                if writer.is_none() {
-                    writer = Some(embed::io::EmbedWriter::new(&out_path, dim)?);
-                }
-                writer
-                    .as_mut()
-                    .unwrap()
-                    .write_chunk(work_ids, embeddings, hashes)?;
-                encoded_count += work_ids.len();
-            }
-
-            if !carried.is_empty() {
-                if writer.is_none() {
-                    let dim = carried[0].2.len();
-                    writer = Some(embed::io::EmbedWriter::new(&out_path, dim)?);
-                }
-                bar.inc(carried.len() as u64);
-                writer.as_mut().unwrap().write_carried(carried)?;
-                carried_count += carried.len();
-            }
-
-            Ok(())
-        },
-    )?;
-
-    bar.finish_and_clear();
-
-    if cancelled.load(Ordering::Relaxed) {
-        drop(writer);
-        eprintln!("Embedding cancelled");
-        return Ok(());
-    }
-
-    if let Some(w) = writer {
-        w.close()?;
-    }
-
-    let elapsed = start.elapsed();
-    let rps = processed as f64 / elapsed.as_secs_f64();
-    let size = out_path.metadata().map(|m| m.len()).unwrap_or(0);
-    let incremental_info = if carried_count > 0 {
-        format!(
-            " (encoded={}, carried={})",
-            quarry_etl_core::progress::fmt_num(encoded_count),
-            quarry_etl_core::progress::fmt_num(carried_count),
-        )
-    } else {
-        String::new()
-    };
-    eprintln!(
-        "{} rows → {} ({:.1} MiB, {:.0} rows/s, {:.1}s){incremental_info}",
-        quarry_etl_core::progress::fmt_num(processed),
-        out_path.display(),
-        size as f64 / 1024.0 / 1024.0,
-        rps,
-        elapsed.as_secs_f64(),
-    );
-
-    Ok(())
+        &multi,
+        is_tty,
+    )
 }
 
 fn print_transfer_summary(label: &str, summary: &remote::TransferSummary) {
