@@ -21,7 +21,6 @@ work_types = ["article", "review", "preprint"]
 require_abstract = true
 
 [hive]
-enable = true
 threads = 24
 memory_limit = "128GB"
 row_group_size = 1000000

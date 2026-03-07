@@ -37,9 +37,14 @@ pub struct FileConfig {
 }
 
 /// `[embed]` section — settings for `quarry-etl embed`.
+///
+/// The section being present in TOML with a backend/model is enough to enable auto-embed.
+/// An explicit `enable = false` can disable it.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EmbedConfig {
+    /// Override auto-enable. If absent, embed runs when backend or model is set.
+    pub enable: Option<bool>,
     /// Embedding backend: "http" or "local"
     pub backend: Option<String>,
     /// Batch size for embedding calls
@@ -66,11 +71,23 @@ pub struct EmbedConfig {
     pub output: Option<String>,
 }
 
+impl EmbedConfig {
+    /// Returns true if embed should auto-run.
+    /// `enable = true/false` takes precedence. Otherwise, having backend or model set implies enable.
+    pub fn is_enabled(&self) -> bool {
+        self.enable
+            .unwrap_or_else(|| self.backend.is_some() || self.model.is_some())
+    }
+}
+
 /// `[hive]` section — settings for `quarry-etl hive`.
+///
+/// The section being present in TOML is enough to enable auto-hive.
+/// An explicit `enable = false` can disable it.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HiveConfig {
-    /// Auto-run hive after `quarry-etl run` (same as `--hive` CLI flag).
+    /// Override auto-enable. If absent, hive runs when any field is set.
     pub enable: Option<bool>,
     /// Remove raw parquet after hive (same as `--clean-raw` CLI flag).
     pub clean_raw: Option<bool>,
@@ -79,6 +96,20 @@ pub struct HiveConfig {
     pub num_shards: Option<usize>,
     pub threads: Option<usize>,
     pub memory_limit: Option<String>,
+}
+
+impl HiveConfig {
+    /// Returns true if hive should auto-run.
+    /// `enable = true/false` takes precedence. Otherwise, having any config field set implies enable.
+    pub fn is_enabled(&self) -> bool {
+        self.enable.unwrap_or_else(|| {
+            self.zstd_level.is_some()
+                || self.row_group_size.is_some()
+                || self.num_shards.is_some()
+                || self.threads.is_some()
+                || self.memory_limit.is_some()
+        })
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
