@@ -8,6 +8,8 @@ pub enum ShardError {
     Stream(StreamError),
     Io(std::io::Error),
     Arrow(arrow::error::ArrowError),
+    /// Processing was interrupted by a cancellation signal (e.g. SIGINT).
+    Cancelled,
 }
 
 impl std::fmt::Display for ShardError {
@@ -16,6 +18,7 @@ impl std::fmt::Display for ShardError {
             Self::Stream(e) => write!(f, "{e}"),
             Self::Io(e) => write!(f, "IO: {e}"),
             Self::Arrow(e) => write!(f, "Arrow: {e}"),
+            Self::Cancelled => write!(f, "cancelled"),
         }
     }
 }
@@ -29,6 +32,7 @@ impl ShardError {
             Self::Io(e) => e.kind() != std::io::ErrorKind::StorageFull,
             // Arrow schema/data errors are never retryable
             Self::Arrow(_) => false,
+            Self::Cancelled => false,
         }
     }
 }

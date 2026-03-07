@@ -4,7 +4,7 @@
 
 use std::io::BufRead;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::accumulator::Accumulator;
 use crate::error::ShardError;
@@ -219,7 +219,7 @@ pub(super) fn process_works_shard(
 ) -> Result<ShardStats, ShardError> {
     let shard_label = format!("works_{:04}", shard.shard_idx);
 
-    crate::retry::retry_with_backoff(&shard_label, pb, pool.max_retries, || {
+    crate::retry::retry_with_backoff(&shard_label, pb, pool.max_retries, &ctx.cancelled, || {
         let t0 = std::time::Instant::now();
 
         let (mut reader, counter, total_bytes) =
@@ -239,8 +239,20 @@ pub(super) fn process_works_shard(
             u16::try_from(shard.shard_idx).expect("shard_idx overflow"),
         )?;
 
-        let result = process_works_lines(&mut reader, &counter, &mut pipeline, filter, pb)
-            .map_err(ShardError::Io)?;
+        let result = process_works_lines(
+            &mut reader,
+            &counter,
+            &mut pipeline,
+            filter,
+            pb,
+            &ctx.cancelled,
+        )
+        .map_err(ShardError::Io)?;
+
+        if result.cancelled {
+            // Clean up temp files before returning
+            return Err(ShardError::Cancelled);
+        }
 
         if result.parse_failures > 0 {
             let total = result.rows_written + result.parse_failures;
@@ -305,6 +317,8 @@ struct LinesResult {
     parse_failures: usize,
     /// Rows where `affiliation.institution_ids` contained null elements.
     null_institution_ids: usize,
+    /// Whether processing was interrupted by a cancellation signal.
+    cancelled: bool,
 }
 
 fn process_works_lines(
@@ -313,6 +327,7 @@ fn process_works_lines(
     pipeline: &mut ShardPipeline,
     filter: &Filter,
     pb: &dyn ProgressReporter,
+    cancelled: &Arc<AtomicBool>,
 ) -> std::io::Result<LinesResult> {
     let mut buf = String::with_capacity(4096);
     let mut rows_written = 0usize;
@@ -328,6 +343,16 @@ fn process_works_lines(
         lines_scanned += 1;
 
         if lines_scanned.is_multiple_of(UPDATE_INTERVAL) {
+            if cancelled.load(Ordering::Relaxed) {
+                pipeline.flush_remaining()?;
+                return Ok(LinesResult {
+                    lines_scanned,
+                    rows_written,
+                    parse_failures,
+                    null_institution_ids,
+                    cancelled: true,
+                });
+            }
             pb.set_position(counter.load(Ordering::Relaxed));
             if filter.is_empty() {
                 pb.set_message(&format!("{} rows", fmt_num(rows_written)));
@@ -372,6 +397,7 @@ fn process_works_lines(
         rows_written,
         parse_failures,
         null_institution_ids,
+        cancelled: false,
     })
 }
 
@@ -482,8 +508,16 @@ mod tests {
         let pb = crate::progress::NoopReporter;
         let filter = Filter::default();
 
-        let result =
-            process_works_lines(&mut reader, &counter, &mut pipeline, &filter, &pb).unwrap();
+        let not_cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let result = process_works_lines(
+            &mut reader,
+            &counter,
+            &mut pipeline,
+            &filter,
+            &pb,
+            &not_cancelled,
+        )
+        .unwrap();
         assert_eq!(result.rows_written, 1);
         assert_eq!(result.parse_failures, 0);
 
@@ -678,8 +712,16 @@ mod tests {
         let pb = crate::progress::NoopReporter;
         let filter = Filter::default();
 
-        let result =
-            process_works_lines(&mut reader, &counter, &mut pipeline, &filter, &pb).unwrap();
+        let not_cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let result = process_works_lines(
+            &mut reader,
+            &counter,
+            &mut pipeline,
+            &filter,
+            &pb,
+            &not_cancelled,
+        )
+        .unwrap();
         assert_eq!(result.rows_written, 1);
         assert_eq!(result.parse_failures, 0);
         assert_eq!(result.null_institution_ids, 1);
