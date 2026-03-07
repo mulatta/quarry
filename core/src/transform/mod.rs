@@ -49,6 +49,25 @@ pub fn decode_inverted_index(index: &HashMap<String, Vec<u32>>) -> String {
     result
 }
 
+/// Strip inline HTML/XML tags from text (e.g. `<italic>`, `<jats:p>`).
+///
+/// Simple `<...>` removal without regex dependency. Handles self-closing tags
+/// and attributes. Does NOT decode HTML entities (OpenAlex data doesn't use them).
+pub fn strip_html_tags(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut inside_tag = false;
+    for c in s.chars() {
+        if c == '<' {
+            inside_tag = true;
+        } else if c == '>' && inside_tag {
+            inside_tag = false;
+        } else if !inside_tag {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// Extract bare PMID from OpenAlex URL format.
 pub(crate) fn extract_pmid(url: &str) -> Option<&str> {
     url.strip_prefix("https://pubmed.ncbi.nlm.nih.gov/")
@@ -240,5 +259,38 @@ mod tests {
     #[test]
     fn strip_oa_prefix_no_prefix() {
         assert_eq!(strip_oa_prefix("W2741809807"), "W2741809807");
+    }
+
+    #[test]
+    fn strip_html_tags_inline() {
+        assert_eq!(
+            strip_html_tags("Oxidative stress <italic>in vivo</italic> leads to damage"),
+            "Oxidative stress in vivo leads to damage"
+        );
+    }
+
+    #[test]
+    fn strip_html_tags_jats() {
+        assert_eq!(
+            strip_html_tags(
+                "<jats:p>Results showed <jats:bold>significant</jats:bold> improvement.</jats:p>"
+            ),
+            "Results showed significant improvement."
+        );
+    }
+
+    #[test]
+    fn strip_html_tags_no_tags() {
+        assert_eq!(strip_html_tags("plain text"), "plain text");
+    }
+
+    #[test]
+    fn strip_html_tags_empty() {
+        assert_eq!(strip_html_tags(""), "");
+    }
+
+    #[test]
+    fn strip_html_tags_self_closing() {
+        assert_eq!(strip_html_tags("line1<br/>line2"), "line1line2");
     }
 }

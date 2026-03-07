@@ -10,7 +10,7 @@ use crate::id::normalize_doi;
 use crate::schema;
 
 use super::model::*;
-use super::{decode_inverted_index, extract_pmcid, extract_pmid, strip_oa_prefix};
+use super::{decode_inverted_index, extract_pmcid, extract_pmid, strip_html_tags, strip_oa_prefix};
 
 // ============================================================
 // Arrow helpers
@@ -362,11 +362,12 @@ impl Accumulator for WorksAccumulator {
                 .and_then(normalize_doi)
                 .map(|b| b.into_string()),
         );
-        // Decode abstract before push so we can compute content_hash
+        // Decode abstract and strip inline HTML tags (e.g. <italic>, <jats:p>)
         let abstract_text = row
             .abstract_inverted_index
             .as_ref()
             .map(decode_inverted_index)
+            .map(|s| strip_html_tags(&s))
             .filter(|s| !s.is_empty());
 
         // blake3(title + \0 + abstract) for downstream embedding change detection
