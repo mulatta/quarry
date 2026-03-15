@@ -22,15 +22,8 @@ class Settings(BaseSettings):
     # CSR mmap output (on RAID for space)
     csr_dir: Path = Path("/workspace/seungwon/quarry/csr")
 
-    # Edge list intermediate storage (parquet, on RAID)
-    edge_list_dir: Path = Path("/workspace/seungwon/quarry/edge_list")
-
     # LanceDB (on RAID)
     lancedb_uri: str = "/workspace/seungwon/quarry/lancedb"
-
-    # ETL tuning
-    clickhouse_batch_size: int = 50_000
-    parse_workers: int = 8
 
 
 settings = Settings()
