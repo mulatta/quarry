@@ -1,9 +1,22 @@
 [project]
 name = "quarry"
 version = "0.1.0"
-description = "Add your description here"
+description = "Academic paper exploration + citation graph mining system"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "cocoindex>=0.3.36",
+    "dagster",
+    "dagster-webserver",
+    "clickhouse-connect",
+    "lancedb",
+    "numpy",
+    "orjson",
+    "blake3",
+    "pyarrow",
+    "pydantic-settings",
+    "httpx",
+    "rustworkx",
 ]
+
+[tool.dagster]
+module_name = "quarry.definitions"

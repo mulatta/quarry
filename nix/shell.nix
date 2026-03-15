@@ -13,6 +13,7 @@
 
         env = {
           UV_PYTHON_DOWNLOADS = "never";
+          LD_LIBRARY_PATH = "${pkgs.stdenv.cc.cc.lib}/lib";
         };
 
         shellHook = ''
@@ -22,6 +23,9 @@
             fi
             uv sync --quiet
           fi
+
+          export VIRTUAL_ENV="$PWD/.venv"
+          export PATH="$VIRTUAL_ENV/bin:$PATH"
         '';
       };
     };
