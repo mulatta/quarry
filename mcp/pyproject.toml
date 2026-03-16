@@ -1,0 +1,12 @@
+[project]
+name = "quarry-mcp"
+version = "0.1.0"
+description = "MCP server for quarry: academic paper search + citation graph"
+requires-python = ">=3.13"
+dependencies = [
+    "mcp[cli]",
+    "quarry",
+]
+
+[project.scripts]
+quarry-mcp = "quarry_mcp.server:main"
