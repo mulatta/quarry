@@ -1,0 +1,16 @@
+[package]
+name = "quarry-parse"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "quarry_parse"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.24", features = ["extension-module"] }
+arrow = { version = "55", features = ["ffi"] }
+pyo3-arrow = "0.9"
+quick-xml = "0.37"
+flate2 = "1"
+rayon = "1.10"
