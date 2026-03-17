@@ -2,12 +2,8 @@
 
 Parses the NLM MeSH descriptor XML (desc20XX.xml) to extract
 descriptor_ui, descriptor_name, and tree_number(s).
-
-Usage:
-    python -m quarry.etl.mesh --xml ~/data/mesh/desc2025.xml
 """
 
-import argparse
 import time
 from pathlib import Path
 
@@ -86,16 +82,3 @@ def load_mesh_tree(xml_path: Path, db: DuckDBStore | None = None):
 
     if close_db:
         db.close()
-
-
-def main():
-    parser = argparse.ArgumentParser(
-        description="MeSH descriptor XML → DuckDB mesh_tree"
-    )
-    parser.add_argument("--xml", type=Path, required=True, help="Path to descXXXX.xml")
-    args = parser.parse_args()
-    load_mesh_tree(args.xml)
-
-
-if __name__ == "__main__":
-    main()

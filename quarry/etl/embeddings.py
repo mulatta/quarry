@@ -2,12 +2,8 @@
 
 Reads papers in batches from DuckDB, skips unchanged (blake3 match), encodes
 new/modified papers with jina-v5 nano, upserts to LanceDB.
-
-Usage (on psi with GPU):
-    python -m quarry.etl.embeddings --batch-size 5000 --limit 100000
 """
 
-import argparse
 import re
 import time
 
@@ -39,7 +35,7 @@ def content_hash(title: str, abstract: str) -> bytes:
     return blake3.blake3(f"{title}\n{abstract}".encode()).digest()
 
 
-def run(batch_size: int = 5000, limit: int | None = None, offset: int = 0):
+def run(batch_size: int = 5000, limit: int | None = None, start_pmid: int = 0):
     db = DuckDBStore()
     lance = LanceStore(settings.lancedb_uri)
 
@@ -49,25 +45,27 @@ def run(batch_size: int = 5000, limit: int | None = None, offset: int = 0):
     except Exception:
         lance.create_table()
 
-    encoder = JinaEncoder(device="cuda", dim=256)
+    encoder = JinaEncoder(dim=256)
 
     total_encoded = 0
     total_skipped = 0
     batch_num = 0
+    cursor_pmid = start_pmid
 
     while True:
-        current_offset = offset + batch_num * batch_size
-
+        # Keyset pagination: WHERE pmid > cursor avoids full-table OFFSET scan
         papers = db.conn.execute(
             "SELECT pmid, title, abstract FROM papers "
-            "WHERE abstract != '' AND title != '' AND NOT is_deleted "
-            "ORDER BY pmid LIMIT ? OFFSET ?",
-            [batch_size, current_offset],
+            "WHERE pmid > ? AND abstract != '' AND title != '' AND NOT is_deleted "
+            "ORDER BY pmid LIMIT ?",
+            [cursor_pmid, batch_size],
         ).fetchall()
 
         if not papers:
             break
 
+        # Advance cursor to last pmid in this batch
+        cursor_pmid = papers[-1][0]
         papers = [{"pmid": str(r[0]), "title": r[1], "abstract": r[2]} for r in papers]
 
         # Normalize and compute blake3 hashes
@@ -144,12 +142,3 @@ def run(batch_size: int = 5000, limit: int | None = None, offset: int = 0):
         lance.create_vector_index("vec_retrieval")
         lance.create_vector_index("vec_cluster")
         print("Indices built.")
-
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--batch-size", type=int, default=5000)
-    parser.add_argument("--limit", type=int, default=None)
-    parser.add_argument("--offset", type=int, default=0)
-    args = parser.parse_args()
-    run(batch_size=args.batch_size, limit=args.limit, offset=args.offset)

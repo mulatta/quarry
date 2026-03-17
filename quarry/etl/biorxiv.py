@@ -1,13 +1,8 @@
 """bioRxiv API daily fetch → DuckDB preprints table.
 
 Fetches recent preprints from bioRxiv/medRxiv API and upserts into DuckDB.
-
-Usage:
-    python -m quarry.etl.biorxiv --days 7       # last 7 days
-    python -m quarry.etl.biorxiv --from 2026-03-01 --to 2026-03-15
 """
 
-import argparse
 import time
 from datetime import date, timedelta
 
@@ -138,25 +133,3 @@ def load_preprints(
         db.close()
 
     return len(preprints)
-
-
-def main():
-    parser = argparse.ArgumentParser(description="bioRxiv/medRxiv → DuckDB preprints")
-    parser.add_argument("--server", choices=["biorxiv", "medrxiv"], default="biorxiv")
-    parser.add_argument("--days", type=int, default=7, help="Fetch last N days")
-    parser.add_argument("--from", dest="from_date", type=str, default=None)
-    parser.add_argument("--to", dest="to_date", type=str, default=None)
-    args = parser.parse_args()
-
-    if args.from_date:
-        from_d = date.fromisoformat(args.from_date)
-        to_d = date.fromisoformat(args.to_date) if args.to_date else date.today()
-    else:
-        to_d = date.today()
-        from_d = to_d - timedelta(days=args.days)
-
-    load_preprints(server=args.server, from_date=from_d, to_date=to_d)
-
-
-if __name__ == "__main__":
-    main()

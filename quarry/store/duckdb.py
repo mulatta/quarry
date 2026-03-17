@@ -165,6 +165,21 @@ class DuckDBStore:
         )
         self.conn.unregister("_tmp_del")
 
+    def _delete_by_registered_pmids(self, table: str):
+        """Delete rows using pre-registered _tmp_batch_pmids table."""
+        self.conn.execute(
+            f"DELETE FROM {table} WHERE pmid IN (SELECT pmid FROM _tmp_batch_pmids)"
+        )
+
+    def register_pmid_set(self, pmids: list[int]):
+        """Register a PMID set for reuse across multiple child-table deletes."""
+        pmid_arr = pa.table({"pmid": pa.array(pmids, type=pa.int32())})
+        self.conn.register("_tmp_batch_pmids", pmid_arr)
+
+    def unregister_pmid_set(self):
+        """Unregister the shared PMID set."""
+        self.conn.unregister("_tmp_batch_pmids")
+
     # -- Batch inserts --
 
     def upsert_papers(self, rows: list[dict]):
@@ -265,12 +280,15 @@ class DuckDBStore:
         self._delete_by_pmids("papers", pmids)
         self._bulk_insert("papers", columns, arrow_table)
 
-    def insert_authors(self, rows: list[dict]):
+    def insert_authors(self, rows: list[dict], pmids_registered: bool = False):
         """Batch insert authors via pyarrow (delete-then-insert by pmid set)."""
         if not rows:
             return
-        pmids = list({r["pmid"] for r in rows})
-        self._delete_by_pmids("authors", pmids)
+        if pmids_registered:
+            self._delete_by_registered_pmids("authors")
+        else:
+            pmids = list({r["pmid"] for r in rows})
+            self._delete_by_pmids("authors", pmids)
 
         columns = [
             "pmid",
@@ -308,12 +326,15 @@ class DuckDBStore:
         )
         self._bulk_insert("authors", columns, arrow_table)
 
-    def insert_mesh_headings(self, rows: list[dict]):
+    def insert_mesh_headings(self, rows: list[dict], pmids_registered: bool = False):
         """Batch insert mesh_headings via pyarrow (delete-then-insert by pmid set)."""
         if not rows:
             return
-        pmids = list({r["pmid"] for r in rows})
-        self._delete_by_pmids("mesh_headings", pmids)
+        if pmids_registered:
+            self._delete_by_registered_pmids("mesh_headings")
+        else:
+            pmids = list({r["pmid"] for r in rows})
+            self._delete_by_pmids("mesh_headings", pmids)
 
         columns = [
             "pmid",
@@ -345,12 +366,15 @@ class DuckDBStore:
         )
         self._bulk_insert("mesh_headings", columns, arrow_table)
 
-    def insert_grants(self, rows: list[dict]):
+    def insert_grants(self, rows: list[dict], pmids_registered: bool = False):
         """Batch insert grants via pyarrow (delete-then-insert by pmid set)."""
         if not rows:
             return
-        pmids = list({r["pmid"] for r in rows})
-        self._delete_by_pmids("grants", pmids)
+        if pmids_registered:
+            self._delete_by_registered_pmids("grants")
+        else:
+            pmids = list({r["pmid"] for r in rows})
+            self._delete_by_pmids("grants", pmids)
 
         columns = ["pmid", "grant_id", "acronym", "agency", "country"]
         arrow_table = pa.table(
@@ -366,12 +390,15 @@ class DuckDBStore:
         )
         self._bulk_insert("grants", columns, arrow_table)
 
-    def insert_chemicals(self, rows: list[dict]):
+    def insert_chemicals(self, rows: list[dict], pmids_registered: bool = False):
         """Batch insert chemicals via pyarrow (delete-then-insert by pmid set)."""
         if not rows:
             return
-        pmids = list({r["pmid"] for r in rows})
-        self._delete_by_pmids("chemicals", pmids)
+        if pmids_registered:
+            self._delete_by_registered_pmids("chemicals")
+        else:
+            pmids = list({r["pmid"] for r in rows})
+            self._delete_by_pmids("chemicals", pmids)
 
         columns = ["pmid", "registry_number", "substance_ui", "substance_name"]
         arrow_table = pa.table(

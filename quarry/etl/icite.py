@@ -3,14 +3,8 @@
 Two data files from figshare:
   1. open_citation_collection.csv (citing_pmid, cited_pmid) → CSR mmap
   2. icite_metadata.csv → papers table bulk UPDATE (rcr, apt, etc.)
-
-Usage:
-    python -m quarry.etl.icite citations   # build CSR from OCC CSV
-    python -m quarry.etl.icite metrics      # update papers with iCite metrics
-    python -m quarry.etl.icite all          # both
 """
 
-import argparse
 import csv
 import time
 from pathlib import Path
@@ -143,38 +137,3 @@ def _int_or_none(s: str | None) -> int | None:
         return int(s)
     except ValueError:
         return None
-
-
-def main():
-    parser = argparse.ArgumentParser(description="iCite OCC → CSR + DuckDB metrics")
-    sub = parser.add_subparsers(dest="command", required=True)
-
-    cit = sub.add_parser("citations", help="Build CSR from OCC CSV")
-    cit.add_argument(
-        "--csv", type=Path, required=True, help="open_citation_collection.csv path"
-    )
-    cit.add_argument("--csr-dir", type=Path, default=None)
-
-    met = sub.add_parser("metrics", help="Update papers with iCite metadata")
-    met.add_argument("--csv", type=Path, required=True, help="icite_metadata.csv path")
-
-    both = sub.add_parser("all", help="Build CSR + update metrics")
-    both.add_argument(
-        "--occ-csv", type=Path, required=True, help="open_citation_collection.csv"
-    )
-    both.add_argument("--meta-csv", type=Path, required=True, help="icite_metadata.csv")
-    both.add_argument("--csr-dir", type=Path, default=None)
-
-    args = parser.parse_args()
-
-    if args.command == "citations":
-        build_csr_from_csv(args.csv, args.csr_dir)
-    elif args.command == "metrics":
-        update_metrics(args.csv)
-    elif args.command == "all":
-        build_csr_from_csv(args.occ_csv, args.csr_dir)
-        update_metrics(args.meta_csv)
-
-
-if __name__ == "__main__":
-    main()
