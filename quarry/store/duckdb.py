@@ -1,0 +1,493 @@
+"""DuckDB store: schema creation, batch insert, and query interface.
+
+All batch inserts use pyarrow table registration for columnar bulk loading.
+This avoids executemany's per-row Python↔C overhead which hangs on large batches.
+"""
+
+import re
+from pathlib import Path
+
+import duckdb
+import pyarrow as pa
+
+from quarry.config import settings
+
+# Only allow SELECT / WITH ... SELECT / EXPLAIN
+_READ_ONLY_RE = re.compile(r"^\s*(SELECT|WITH|EXPLAIN)\b", re.IGNORECASE)
+
+DDL = """
+CREATE TABLE IF NOT EXISTS papers (
+    pmid         INTEGER PRIMARY KEY,
+    doi          VARCHAR,
+    pmc_id       VARCHAR,
+    title        VARCHAR NOT NULL,
+    abstract     VARCHAR,
+    pub_year     SMALLINT,
+    pub_date     DATE,
+    journal_title VARCHAR,
+    journal_issn VARCHAR,
+    journal_abbr VARCHAR,
+    volume       VARCHAR,
+    issue        VARCHAR,
+    pages        VARCHAR,
+    language     VARCHAR,
+    pub_type     VARCHAR[],
+    country      VARCHAR,
+    medline_status VARCHAR,
+    created_date DATE,
+    revised_date DATE,
+    indexed_date DATE,
+    is_deleted   BOOLEAN DEFAULT FALSE,
+    deleted_date DATE,
+    rcr          FLOAT,
+    nih_percentile FLOAT,
+    apt          FLOAT,
+    is_clinical  BOOLEAN,
+    human        FLOAT,
+    animal       FLOAT,
+    molecular_cellular FLOAT,
+    cited_by_clin INTEGER,
+    field_citation_rate FLOAT
+);
+
+CREATE TABLE IF NOT EXISTS authors (
+    pmid              INTEGER NOT NULL,
+    author_position   SMALLINT,
+    last_name         VARCHAR,
+    fore_name         VARCHAR,
+    initials          VARCHAR,
+    orcid             VARCHAR,
+    affiliation       VARCHAR,
+    is_collective     BOOLEAN DEFAULT FALSE
+);
+CREATE INDEX IF NOT EXISTS idx_authors_pmid ON authors(pmid);
+
+CREATE TABLE IF NOT EXISTS mesh_headings (
+    pmid             INTEGER NOT NULL,
+    descriptor_ui    VARCHAR NOT NULL,
+    descriptor_name  VARCHAR NOT NULL,
+    qualifier_ui     VARCHAR,
+    qualifier_name   VARCHAR,
+    is_major_topic   BOOLEAN DEFAULT FALSE
+);
+CREATE INDEX IF NOT EXISTS idx_mesh_pmid ON mesh_headings(pmid);
+CREATE INDEX IF NOT EXISTS idx_mesh_descriptor ON mesh_headings(descriptor_ui);
+
+CREATE TABLE IF NOT EXISTS mesh_tree (
+    descriptor_ui    VARCHAR NOT NULL,
+    descriptor_name  VARCHAR NOT NULL,
+    tree_number      VARCHAR NOT NULL,
+    PRIMARY KEY (descriptor_ui, tree_number)
+);
+
+CREATE TABLE IF NOT EXISTS grants (
+    pmid       INTEGER NOT NULL,
+    grant_id   VARCHAR,
+    acronym    VARCHAR,
+    agency     VARCHAR,
+    country    VARCHAR
+);
+CREATE INDEX IF NOT EXISTS idx_grants_pmid ON grants(pmid);
+
+CREATE TABLE IF NOT EXISTS chemicals (
+    pmid              INTEGER NOT NULL,
+    registry_number   VARCHAR,
+    substance_ui      VARCHAR,
+    substance_name    VARCHAR
+);
+CREATE INDEX IF NOT EXISTS idx_chemicals_pmid ON chemicals(pmid);
+
+CREATE TABLE IF NOT EXISTS preprints (
+    doi          VARCHAR PRIMARY KEY,
+    title        VARCHAR,
+    abstract     VARCHAR,
+    date         DATE,
+    server       VARCHAR,
+    category     VARCHAR,
+    version      SMALLINT,
+    published_doi VARCHAR
+);
+"""
+
+
+class DuckDBStore:
+    """DuckDB embedded store for PubMed metadata."""
+
+    def __init__(self, db_path: Path | None = None):
+        self._path = str(db_path or settings.duckdb_path)
+        self._conn: duckdb.DuckDBPyConnection | None = None
+
+    @property
+    def conn(self) -> duckdb.DuckDBPyConnection:
+        if self._conn is None:
+            Path(self._path).parent.mkdir(parents=True, exist_ok=True)
+            self._conn = duckdb.connect(self._path)
+        return self._conn
+
+    def close(self):
+        if self._conn is not None:
+            self._conn.close()
+            self._conn = None
+
+    def init_schema(self):
+        """Create all tables if they don't exist."""
+        self.conn.execute("BEGIN TRANSACTION")
+        try:
+            for stmt in DDL.split(";"):
+                stmt = stmt.strip()
+                if stmt:
+                    self.conn.execute(stmt)
+            self.conn.execute("COMMIT")
+        except Exception:
+            self.conn.execute("ROLLBACK")
+            raise
+
+    # -- Bulk insert helpers --
+
+    def _bulk_insert(self, table: str, columns: list[str], arrow_table: pa.Table):
+        """Register a pyarrow table and INSERT INTO target from it.
+
+        Uses DuckDB's columnar scan of Arrow data — orders of magnitude
+        faster than executemany's per-row Python↔C serialization.
+        """
+        tmp = f"_tmp_{table}"
+        self.conn.register(tmp, arrow_table)
+        cols = ", ".join(columns)
+        self.conn.execute(f"INSERT INTO {table} ({cols}) SELECT {cols} FROM {tmp}")
+        self.conn.unregister(tmp)
+
+    def _delete_by_pmids(self, table: str, pmids: list[int]):
+        """Delete rows from table where pmid is in the given list."""
+        pmid_arr = pa.table({"pmid": pa.array(pmids, type=pa.int32())})
+        self.conn.register("_tmp_del", pmid_arr)
+        self.conn.execute(
+            f"DELETE FROM {table} WHERE pmid IN (SELECT pmid FROM _tmp_del)"
+        )
+        self.conn.unregister("_tmp_del")
+
+    # -- Batch inserts --
+
+    def upsert_papers(self, rows: list[dict]):
+        """Insert or update papers batch via pyarrow bulk loading.
+
+        Deduplicates within batch (last wins). Uses DELETE + INSERT
+        for reliability with DuckDB's PK constraints.
+        """
+        if not rows:
+            return
+        # Deduplicate: keep last occurrence of each PMID
+        seen: dict[int, dict] = {}
+        for r in rows:
+            seen[r["pmid"]] = r
+        deduped = list(seen.values())
+
+        columns = [
+            "pmid",
+            "doi",
+            "pmc_id",
+            "title",
+            "abstract",
+            "pub_year",
+            "pub_date",
+            "journal_title",
+            "journal_issn",
+            "journal_abbr",
+            "volume",
+            "issue",
+            "pages",
+            "language",
+            "pub_type",
+            "country",
+            "medline_status",
+            "created_date",
+            "revised_date",
+            "indexed_date",
+        ]
+
+        # Build pyarrow arrays with explicit types
+        arrow_table = pa.table(
+            {
+                "pmid": pa.array([r["pmid"] for r in deduped], type=pa.int32()),
+                "doi": pa.array([r.get("doi") for r in deduped], type=pa.string()),
+                "pmc_id": pa.array(
+                    [r.get("pmc_id") for r in deduped], type=pa.string()
+                ),
+                "title": pa.array([r["title"] for r in deduped], type=pa.string()),
+                "abstract": pa.array(
+                    [r.get("abstract") for r in deduped], type=pa.string()
+                ),
+                "pub_year": pa.array(
+                    [r.get("pub_year") for r in deduped], type=pa.int16()
+                ),
+                "pub_date": pa.array(
+                    [r.get("pub_date") for r in deduped], type=pa.date32()
+                ),
+                "journal_title": pa.array(
+                    [r.get("journal_title") for r in deduped], type=pa.string()
+                ),
+                "journal_issn": pa.array(
+                    [r.get("journal_issn") for r in deduped], type=pa.string()
+                ),
+                "journal_abbr": pa.array(
+                    [r.get("journal_abbr") for r in deduped], type=pa.string()
+                ),
+                "volume": pa.array(
+                    [r.get("volume") for r in deduped], type=pa.string()
+                ),
+                "issue": pa.array([r.get("issue") for r in deduped], type=pa.string()),
+                "pages": pa.array([r.get("pages") for r in deduped], type=pa.string()),
+                "language": pa.array(
+                    [r.get("language") for r in deduped], type=pa.string()
+                ),
+                "pub_type": pa.array(
+                    [r.get("pub_type") for r in deduped], type=pa.list_(pa.string())
+                ),
+                "country": pa.array(
+                    [r.get("country") for r in deduped], type=pa.string()
+                ),
+                "medline_status": pa.array(
+                    [r.get("medline_status") for r in deduped], type=pa.string()
+                ),
+                "created_date": pa.array(
+                    [r.get("created_date") for r in deduped], type=pa.date32()
+                ),
+                "revised_date": pa.array(
+                    [r.get("revised_date") for r in deduped], type=pa.date32()
+                ),
+                "indexed_date": pa.array(
+                    [r.get("indexed_date") for r in deduped], type=pa.date32()
+                ),
+            }
+        )
+
+        # Delete existing PMIDs first (for upsert semantics)
+        pmids = [r["pmid"] for r in deduped]
+        self._delete_by_pmids("papers", pmids)
+        self._bulk_insert("papers", columns, arrow_table)
+
+    def insert_authors(self, rows: list[dict]):
+        """Batch insert authors via pyarrow (delete-then-insert by pmid set)."""
+        if not rows:
+            return
+        pmids = list({r["pmid"] for r in rows})
+        self._delete_by_pmids("authors", pmids)
+
+        columns = [
+            "pmid",
+            "author_position",
+            "last_name",
+            "fore_name",
+            "initials",
+            "orcid",
+            "affiliation",
+            "is_collective",
+        ]
+        arrow_table = pa.table(
+            {
+                "pmid": pa.array([r["pmid"] for r in rows], type=pa.int32()),
+                "author_position": pa.array(
+                    [r.get("author_position") for r in rows], type=pa.int16()
+                ),
+                "last_name": pa.array(
+                    [r.get("last_name") for r in rows], type=pa.string()
+                ),
+                "fore_name": pa.array(
+                    [r.get("fore_name") for r in rows], type=pa.string()
+                ),
+                "initials": pa.array(
+                    [r.get("initials") for r in rows], type=pa.string()
+                ),
+                "orcid": pa.array([r.get("orcid") for r in rows], type=pa.string()),
+                "affiliation": pa.array(
+                    [r.get("affiliation") for r in rows], type=pa.string()
+                ),
+                "is_collective": pa.array(
+                    [r.get("is_collective", False) for r in rows], type=pa.bool_()
+                ),
+            }
+        )
+        self._bulk_insert("authors", columns, arrow_table)
+
+    def insert_mesh_headings(self, rows: list[dict]):
+        """Batch insert mesh_headings via pyarrow (delete-then-insert by pmid set)."""
+        if not rows:
+            return
+        pmids = list({r["pmid"] for r in rows})
+        self._delete_by_pmids("mesh_headings", pmids)
+
+        columns = [
+            "pmid",
+            "descriptor_ui",
+            "descriptor_name",
+            "qualifier_ui",
+            "qualifier_name",
+            "is_major_topic",
+        ]
+        arrow_table = pa.table(
+            {
+                "pmid": pa.array([r["pmid"] for r in rows], type=pa.int32()),
+                "descriptor_ui": pa.array(
+                    [r["descriptor_ui"] for r in rows], type=pa.string()
+                ),
+                "descriptor_name": pa.array(
+                    [r["descriptor_name"] for r in rows], type=pa.string()
+                ),
+                "qualifier_ui": pa.array(
+                    [r.get("qualifier_ui") for r in rows], type=pa.string()
+                ),
+                "qualifier_name": pa.array(
+                    [r.get("qualifier_name") for r in rows], type=pa.string()
+                ),
+                "is_major_topic": pa.array(
+                    [r.get("is_major_topic", False) for r in rows], type=pa.bool_()
+                ),
+            }
+        )
+        self._bulk_insert("mesh_headings", columns, arrow_table)
+
+    def insert_grants(self, rows: list[dict]):
+        """Batch insert grants via pyarrow (delete-then-insert by pmid set)."""
+        if not rows:
+            return
+        pmids = list({r["pmid"] for r in rows})
+        self._delete_by_pmids("grants", pmids)
+
+        columns = ["pmid", "grant_id", "acronym", "agency", "country"]
+        arrow_table = pa.table(
+            {
+                "pmid": pa.array([r["pmid"] for r in rows], type=pa.int32()),
+                "grant_id": pa.array(
+                    [r.get("grant_id") for r in rows], type=pa.string()
+                ),
+                "acronym": pa.array([r.get("acronym") for r in rows], type=pa.string()),
+                "agency": pa.array([r.get("agency") for r in rows], type=pa.string()),
+                "country": pa.array([r.get("country") for r in rows], type=pa.string()),
+            }
+        )
+        self._bulk_insert("grants", columns, arrow_table)
+
+    def insert_chemicals(self, rows: list[dict]):
+        """Batch insert chemicals via pyarrow (delete-then-insert by pmid set)."""
+        if not rows:
+            return
+        pmids = list({r["pmid"] for r in rows})
+        self._delete_by_pmids("chemicals", pmids)
+
+        columns = ["pmid", "registry_number", "substance_ui", "substance_name"]
+        arrow_table = pa.table(
+            {
+                "pmid": pa.array([r["pmid"] for r in rows], type=pa.int32()),
+                "registry_number": pa.array(
+                    [r.get("registry_number") for r in rows], type=pa.string()
+                ),
+                "substance_ui": pa.array(
+                    [r.get("substance_ui") for r in rows], type=pa.string()
+                ),
+                "substance_name": pa.array(
+                    [r.get("substance_name") for r in rows], type=pa.string()
+                ),
+            }
+        )
+        self._bulk_insert("chemicals", columns, arrow_table)
+
+    def soft_delete(self, pmids: list[int]):
+        """Soft-delete papers by PMID list."""
+        if not pmids:
+            return
+        pmid_arr = pa.table({"pmid": pa.array(pmids, type=pa.int32())})
+        self.conn.register("_tmp_softdel", pmid_arr)
+        self.conn.execute(
+            "UPDATE papers SET is_deleted = TRUE, deleted_date = CURRENT_DATE "
+            "WHERE pmid IN (SELECT pmid FROM _tmp_softdel)"
+        )
+        self.conn.unregister("_tmp_softdel")
+
+    # -- Read queries --
+
+    def get_paper(self, pmid: int) -> dict | None:
+        """Get a single paper by PMID."""
+        result = self.conn.execute(
+            "SELECT * FROM papers WHERE pmid = ? AND NOT is_deleted", [pmid]
+        ).fetchone()
+        if not result:
+            return None
+        cols = [d[0] for d in self.conn.description]
+        return dict(zip(cols, result))
+
+    def get_papers(self, pmids: list[int]) -> list[dict]:
+        """Get multiple papers by PMID list."""
+        if not pmids:
+            return []
+        result = self.conn.execute(
+            "SELECT * FROM papers WHERE pmid IN (SELECT unnest(?)) AND NOT is_deleted",
+            [pmids],
+        )
+        cols = [d[0] for d in result.description]
+        return [dict(zip(cols, row)) for row in result.fetchall()]
+
+    def query(self, sql: str) -> list[dict]:
+        """Execute a read-only SQL query. Only SELECT/WITH/EXPLAIN allowed."""
+        if not _READ_ONLY_RE.match(sql):
+            raise ValueError("Only SELECT/WITH/EXPLAIN queries are allowed")
+        result = self.conn.execute(sql)
+        cols = [d[0] for d in result.description]
+        return [dict(zip(cols, row)) for row in result.fetchall()]
+
+    def mesh_descendants(self, tree_prefix: str) -> list[dict]:
+        """Get all MeSH descriptors under a tree number prefix."""
+        return self.query(
+            f"SELECT DISTINCT descriptor_ui, descriptor_name, tree_number "
+            f"FROM mesh_tree WHERE tree_number LIKE '{tree_prefix}%' "
+            f"ORDER BY tree_number"
+        )
+
+    def mesh_expand_pmids(self, descriptor_uis: list[str]) -> list[int]:
+        """Get PMIDs that have any of the given MeSH descriptor UIs."""
+        if not descriptor_uis:
+            return []
+        result = self.conn.execute(
+            "SELECT DISTINCT pmid FROM mesh_headings "
+            "WHERE descriptor_ui IN (SELECT unnest(?)) "
+            "AND pmid IN (SELECT pmid FROM papers WHERE NOT is_deleted)",
+            [descriptor_uis],
+        )
+        return [row[0] for row in result.fetchall()]
+
+    def top_mesh(self, pmids: list[int], limit: int = 10) -> list[dict]:
+        """Top MeSH descriptors for a set of PMIDs."""
+        if not pmids:
+            return []
+        result = self.conn.execute(
+            "SELECT descriptor_ui, descriptor_name, count(*) AS cnt "
+            "FROM mesh_headings WHERE pmid IN (SELECT unnest(?)) "
+            "GROUP BY descriptor_ui, descriptor_name ORDER BY cnt DESC LIMIT ?",
+            [pmids, limit],
+        )
+        cols = [d[0] for d in result.description]
+        return [dict(zip(cols, row)) for row in result.fetchall()]
+
+    def year_distribution(self, pmids: list[int]) -> list[dict]:
+        """Publication year distribution for a set of PMIDs."""
+        if not pmids:
+            return []
+        result = self.conn.execute(
+            "SELECT pub_year, count(*) AS cnt FROM papers "
+            "WHERE pmid IN (SELECT unnest(?)) AND pub_year > 0 AND NOT is_deleted "
+            "GROUP BY pub_year ORDER BY pub_year",
+            [pmids],
+        )
+        cols = [d[0] for d in result.description]
+        return [dict(zip(cols, row)) for row in result.fetchall()]
+
+    def top_authors(self, pmids: list[int], limit: int = 10) -> list[dict]:
+        """Top authors for a set of PMIDs."""
+        if not pmids:
+            return []
+        result = self.conn.execute(
+            "SELECT last_name, fore_name, orcid, count(*) AS cnt "
+            "FROM authors WHERE pmid IN (SELECT unnest(?)) "
+            "GROUP BY last_name, fore_name, orcid ORDER BY cnt DESC LIMIT ?",
+            [pmids, limit],
+        )
+        cols = [d[0] for d in result.description]
+        return [dict(zip(cols, row)) for row in result.fetchall()]

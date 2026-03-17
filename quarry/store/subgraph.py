@@ -1,7 +1,5 @@
 """Session subgraph using rustworkx for graph analytics."""
 
-from __future__ import annotations
-
 import rustworkx as rx
 
 from quarry.store.csr import CSRGraph
@@ -15,19 +13,19 @@ class SessionSubgraph:
         self._id_to_node: dict[str, int] = {}
         self._node_to_id: dict[int, str] = {}
 
-    def _ensure_node(self, oa_id: str) -> int:
-        if oa_id not in self._id_to_node:
-            node_idx = self._graph.add_node(oa_id)
-            self._id_to_node[oa_id] = node_idx
-            self._node_to_id[node_idx] = oa_id
-        return self._id_to_node[oa_id]
+    def _ensure_node(self, pmid: str) -> int:
+        if pmid not in self._id_to_node:
+            node_idx = self._graph.add_node(pmid)
+            self._id_to_node[pmid] = node_idx
+            self._node_to_id[node_idx] = pmid
+        return self._id_to_node[pmid]
 
     def add_nodes(self, ids: list[str]) -> None:
-        for oa_id in ids:
-            self._ensure_node(oa_id)
+        for pmid in ids:
+            self._ensure_node(pmid)
 
     def add_edges_from_csr(self, csr: CSRGraph, ids: list[str]) -> int:
-        """Add edges between the given IDs using CSR graph data.
+        """Add edges between the given PMIDs using CSR graph data.
 
         Only adds edges where both endpoints are in the subgraph.
         Returns number of edges added.
@@ -36,10 +34,10 @@ class SessionSubgraph:
         self.add_nodes(ids)
         added = 0
 
-        for oa_id in ids:
-            for nb in csr.neighbors(oa_id, direction="forward"):
+        for pmid in ids:
+            for nb in csr.neighbors(pmid, direction="forward"):
                 if nb in id_set:
-                    src = self._id_to_node[oa_id]
+                    src = self._id_to_node[pmid]
                     dst = self._id_to_node[nb]
                     self._graph.add_edge(src, dst, None)
                     added += 1
@@ -73,8 +71,8 @@ class SessionSubgraph:
         """Export subgraph as JSON for visualization."""
         nodes = []
         for node_idx in self._graph.node_indices():
-            oa_id = self._node_to_id[node_idx]
-            nodes.append({"id": oa_id})
+            pmid = self._node_to_id[node_idx]
+            nodes.append({"id": pmid})
 
         edges = []
         for src, dst, _ in self._graph.weighted_edge_list():
