@@ -25,7 +25,7 @@ class HybridSearcher:
 
     def _get_encoder(self) -> JinaEncoder:
         if self._encoder is None:
-            self._encoder = JinaEncoder(device="cuda", dim=256)
+            self._encoder = JinaEncoder(dim=256)
         return self._encoder
 
     def search(

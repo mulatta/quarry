@@ -14,6 +14,15 @@ DEFAULT_DIM = 256
 BATCH_SIZE = 32
 
 
+def _default_device() -> str:
+    """Pick best available device: cuda > mps > cpu."""
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
 def _truncate_norm(embs: np.ndarray, dim: int) -> np.ndarray:
     """Matryoshka truncation: slice first `dim` dims, re-normalize."""
     if dim >= embs.shape[1]:
@@ -27,11 +36,12 @@ def _truncate_norm(embs: np.ndarray, dim: int) -> np.ndarray:
 class JinaEncoder:
     """Stateful encoder wrapping jina-v5 nano with dual LoRA."""
 
-    def __init__(self, device: str = "cuda", dim: int = DEFAULT_DIM):
+    def __init__(self, device: str | None = None, dim: int = DEFAULT_DIM):
         self.dim = dim
+        self.device = device or _default_device()
         self._model = SentenceTransformer(
             MODEL_NAME,
-            device=device,
+            device=self.device,
             model_kwargs={"torch_dtype": torch.bfloat16},
             trust_remote_code=True,
         )
@@ -64,6 +74,7 @@ class JinaEncoder:
         return self._encode(texts, task="clustering")
 
     def unload(self):
-        """Free GPU memory."""
+        """Free GPU/device memory."""
         del self._model
-        torch.cuda.empty_cache()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
