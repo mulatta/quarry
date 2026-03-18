@@ -33,4 +33,4 @@ directory_type = "project"
 
 [tool.dg.project]
 root_module = "quarry"
-code_location_target_module = "quarry.definitions"
+code_location_target_module = "quarry.defs"

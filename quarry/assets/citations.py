@@ -55,12 +55,6 @@ def icite_metrics(
         context.log.warning(f"iCite metadata CSV not found: {meta_csv}")
         return MaterializeResult(metadata={"status": MetadataValue.text("skipped")})
 
-    db = duckdb.get_store()
-    try:
-        context.log.info(f"Updating papers metrics from {meta_csv}")
-        update_metrics(meta_csv, db=db)
-        return MaterializeResult(
-            metadata={"csv_path": MetadataValue.path(str(meta_csv))}
-        )
-    finally:
-        db.close()
+    context.log.info(f"Updating papers metrics from {meta_csv}")
+    update_metrics(meta_csv, db=duckdb.store)
+    return MaterializeResult(metadata={"csv_path": MetadataValue.path(str(meta_csv))})
