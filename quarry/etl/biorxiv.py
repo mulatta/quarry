@@ -88,6 +88,14 @@ def load_preprints(
     print(f"  Fetched {len(preprints)} preprints in {time.time() - t0:.1f}s")
 
     if preprints:
+        # Deduplicate: keep only latest version per DOI
+        by_doi: dict[str, dict] = {}
+        for p in preprints:
+            existing = by_doi.get(p["doi"])
+            if existing is None or p["version"] > existing["version"]:
+                by_doi[p["doi"]] = p
+        preprints = list(by_doi.values())
+
         # Upsert via DELETE + pyarrow bulk INSERT (DuckDB has no INSERT OR REPLACE)
         columns = [
             "doi",
@@ -106,7 +114,13 @@ def load_preprints(
                 "abstract": pa.array(
                     [p["abstract"] for p in preprints], type=pa.string()
                 ),
-                "date": pa.array([p["date"] for p in preprints], type=pa.date32()),
+                "date": pa.array(
+                    [
+                        date.fromisoformat(p["date"]) if p["date"] else None
+                        for p in preprints
+                    ],
+                    type=pa.date32(),
+                ),
                 "server": pa.array([p["server"] for p in preprints], type=pa.string()),
                 "category": pa.array(
                     [p["category"] for p in preprints], type=pa.string()
