@@ -23,5 +23,13 @@ dependencies = [
     "dagster-dg-cli>=1.12.19",
 ]
 
-[tool.dagster]
-module_name = "quarry.definitions"
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["quarry", "quarry.*"]
+
+[tool.dg]
+directory_type = "project"
+
+[tool.dg.project]
+root_module = "quarry"
+code_location_target_module = "quarry.definitions"
