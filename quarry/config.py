@@ -24,18 +24,35 @@ class Settings(BaseSettings):
     # iCite (figshare monthly release)
     icite_dir: Path = _DATA_DIR / "icite"
 
+    # Staging (Arrow Feather intermediate files)
+    staging_dir: Path = _DATA_DIR / "staging"
+
+    # bioRxiv API cache
+    biorxiv_cache_dir: Path = _DATA_DIR / "biorxiv"
+
     # CSR mmap output
     csr_dir: Path = _DATA_DIR / "csr"
 
     # LanceDB
     lancedb_uri: str = str(_DATA_DIR / "lancedb")
 
-    # FTP URLs
-    pubmed_ftp_baseline: str = "ftp.ncbi.nlm.nih.gov/pubmed/baseline/"
-    pubmed_ftp_updates: str = "ftp.ncbi.nlm.nih.gov/pubmed/updatefiles/"
+    # FTP
+    pubmed_ftp_host: str = "ftp.ncbi.nlm.nih.gov"
+    pubmed_ftp_baseline: str = "/pubmed/baseline/"
+    pubmed_ftp_updates: str = "/pubmed/updatefiles/"
+
+    # MeSH descriptor XML (auto-discovered from NLM FTP)
+    mesh_ftp_host: str = "nlmpubs.nlm.nih.gov"
+    mesh_ftp_dir: str = "/online/mesh/MESH_FILES/xmlmesh/"
+
+    # iCite figshare collection ID (stable, auto-discovers latest monthly snapshot)
+    icite_figshare_collection: int = 4586573
 
     # Batch sizes
     duckdb_batch_size: int = 10_000
+
+    # Download
+    ftp_parallel: int = 4
 
 
 settings = Settings()

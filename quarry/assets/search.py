@@ -11,12 +11,14 @@ from dagster import (
     asset,
 )
 
+from quarry.assets.load import duckdb_load
 from quarry.config import settings
 from quarry.etl.embeddings import run as run_embeddings
 
 
 @asset(
     group_name="search",
+    deps=[duckdb_load],
     description="Encode papers (blake3 change detection) → LanceDB vectors + FTS index.",
     kinds={"lancedb", "python", "gpu"},
 )
@@ -24,7 +26,6 @@ def paper_embeddings(
     context: AssetExecutionContext,
 ) -> MaterializeResult:
     context.log.info("Running embedding pipeline (blake3 cache + jina-v5)")
-    # run() uses settings internally for DuckDB + LanceDB paths
     run_embeddings()
     return MaterializeResult(
         metadata={

@@ -1,6 +1,6 @@
-"""Citation graph (CSR mmap) + iCite metrics Dagster assets.
+"""Citation graph (CSR mmap) Dagster asset.
 
-Wraps quarry.etl.icite logic.
+CSR build does not use DuckDB — reads directly from iCite CSV.
 DO NOT use `from __future__ import annotations` here — Dagster inspects types at runtime.
 """
 
@@ -11,13 +11,14 @@ from dagster import (
     asset,
 )
 
+from quarry.assets.download import icite_occ_sync
 from quarry.config import settings
-from quarry.etl.icite import build_csr_from_csv, update_metrics
-from quarry.resources import DuckDBResource
+from quarry.etl.icite import build_csr_from_csv
 
 
 @asset(
     group_name="citations",
+    deps=[icite_occ_sync],
     description="Build CSR mmap citation graph from iCite OCC CSV (monthly rebuild).",
     kinds={"python", "rust"},
 )
@@ -39,22 +40,3 @@ def csr_graph(
             "csr_dir": MetadataValue.path(str(settings.csr_dir)),
         }
     )
-
-
-@asset(
-    group_name="citations",
-    description="Update papers table with iCite metrics (RCR, APT, human/animal scores).",
-    kinds={"duckdb", "python"},
-)
-def icite_metrics(
-    context: AssetExecutionContext,
-    duckdb: DuckDBResource,
-) -> MaterializeResult:
-    meta_csv = settings.icite_dir / "icite_metadata.csv"
-    if not meta_csv.exists():
-        context.log.warning(f"iCite metadata CSV not found: {meta_csv}")
-        return MaterializeResult(metadata={"status": MetadataValue.text("skipped")})
-
-    context.log.info(f"Updating papers metrics from {meta_csv}")
-    update_metrics(meta_csv, db=duckdb.store)
-    return MaterializeResult(metadata={"csv_path": MetadataValue.path(str(meta_csv))})
