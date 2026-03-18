@@ -441,6 +441,16 @@ class DuckDBStore:
         cols = [d[0] for d in self.conn.description]
         return dict(zip(cols, result))
 
+    def get_paper_by_doi(self, doi: str) -> dict | None:
+        """Get a single paper by DOI (parameterized, injection-safe)."""
+        result = self.conn.execute(
+            "SELECT * FROM papers WHERE doi = ? AND NOT is_deleted", [doi]
+        ).fetchone()
+        if not result:
+            return None
+        cols = [d[0] for d in self.conn.description]
+        return dict(zip(cols, result))
+
     def get_papers(self, pmids: list[int]) -> list[dict]:
         """Get multiple papers by PMID list."""
         if not pmids:
@@ -462,11 +472,33 @@ class DuckDBStore:
 
     def mesh_descendants(self, tree_prefix: str) -> list[dict]:
         """Get all MeSH descriptors under a tree number prefix."""
-        return self.query(
-            f"SELECT DISTINCT descriptor_ui, descriptor_name, tree_number "
-            f"FROM mesh_tree WHERE tree_number LIKE '{tree_prefix}%' "
-            f"ORDER BY tree_number"
+        result = self.conn.execute(
+            "SELECT DISTINCT descriptor_ui, descriptor_name, tree_number "
+            "FROM mesh_tree WHERE tree_number LIKE ? "
+            "ORDER BY tree_number",
+            [tree_prefix + "%"],
         )
+        cols = [d[0] for d in result.description]
+        return [dict(zip(cols, row)) for row in result.fetchall()]
+
+    def mesh_search_by_name(self, name: str, limit: int = 10) -> list[dict]:
+        """Search MeSH descriptors by name (ILIKE, parameterized)."""
+        result = self.conn.execute(
+            "SELECT DISTINCT descriptor_ui, descriptor_name "
+            "FROM mesh_tree WHERE descriptor_name ILIKE ? LIMIT ?",
+            [f"%{name}%", limit],
+        )
+        cols = [d[0] for d in result.description]
+        return [dict(zip(cols, row)) for row in result.fetchall()]
+
+    def mesh_by_ui(self, descriptor_ui: str) -> list[dict]:
+        """Get all tree entries for a MeSH descriptor UI (parameterized)."""
+        result = self.conn.execute(
+            "SELECT * FROM mesh_tree WHERE descriptor_ui = ?",
+            [descriptor_ui],
+        )
+        cols = [d[0] for d in result.description]
+        return [dict(zip(cols, row)) for row in result.fetchall()]
 
     def mesh_expand_pmids(self, descriptor_uis: list[str]) -> list[int]:
         """Get PMIDs that have any of the given MeSH descriptor UIs."""

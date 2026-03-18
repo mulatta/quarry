@@ -80,10 +80,7 @@ def get_paper(pmid: int | None = None, doi: str | None = None) -> dict | None:
     if pmid is not None:
         return db.get_paper(pmid)
     if doi is not None:
-        results = db.query(
-            f"SELECT * FROM papers WHERE doi = '{doi}' AND NOT is_deleted LIMIT 1"
-        )
-        return results[0] if results else None
+        return db.get_paper_by_doi(doi)
     return None
 
 
@@ -238,10 +235,7 @@ def mesh_explore(
 
     # Resolve descriptor
     if descriptor_name and not descriptor_ui:
-        results = db.query(
-            f"SELECT DISTINCT descriptor_ui, descriptor_name "
-            f"FROM mesh_tree WHERE descriptor_name ILIKE '%{descriptor_name}%' LIMIT 10"
-        )
+        results = db.mesh_search_by_name(descriptor_name)
         if not results:
             return {"error": f"No MeSH descriptor found matching '{descriptor_name}'"}
         if len(results) > 1:
@@ -255,9 +249,7 @@ def mesh_explore(
         return {"error": "Provide descriptor_ui or descriptor_name"}
 
     # Get tree numbers for this descriptor
-    tree_entries = db.query(
-        f"SELECT * FROM mesh_tree WHERE descriptor_ui = '{descriptor_ui}'"
-    )
+    tree_entries = db.mesh_by_ui(descriptor_ui)
     if not tree_entries:
         return {"error": f"Descriptor {descriptor_ui} not found in mesh_tree"}
 
