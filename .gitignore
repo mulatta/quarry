@@ -6,3 +6,5 @@ __pycache__/
 *.pyc
 quarry-csr/target/
 quarry-parse/target/
+.tmp_dagster_home_*/
+.dagster_home/
