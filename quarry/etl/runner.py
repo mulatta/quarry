@@ -1,107 +1,158 @@
-"""ETL runner: parse PubMed XML → insert into DuckDB."""
+"""ETL runner: parse PubMed XML (via Rust quarry_parse) → insert into DuckDB.
+
+Uses quarry_parse for XML parsing (quick-xml + rayon parallel).
+Arrow RecordBatches are registered directly with DuckDB for zero-copy bulk insert.
+"""
 
 import time
 from pathlib import Path
 
+import quarry_parse
+
 from quarry.config import settings
-from quarry.etl.parse import ParseResult, parse_xml_stream
 from quarry.store.duckdb import DuckDBStore
 
+# Column order matching Rust Arrow schema (arrow.rs)
+_PAPERS_COLS = [
+    "pmid",
+    "doi",
+    "pmc_id",
+    "title",
+    "abstract",
+    "pub_year",
+    "pub_date",
+    "journal_title",
+    "journal_issn",
+    "journal_abbr",
+    "volume",
+    "issue",
+    "pages",
+    "language",
+    "pub_type",
+    "country",
+    "medline_status",
+    "created_date",
+    "revised_date",
+    "indexed_date",
+]
 
-def _flush_batch(db: DuckDBStore, batch: ParseResult):
-    """Insert accumulated batch into DuckDB.
+# Date columns that come as Utf8 from Rust and need CAST to DATE for DuckDB
+_DATE_COLS = {"pub_date", "created_date", "revised_date", "indexed_date"}
 
-    Registers the PMID set once and reuses it across all child-table
-    deletes (7.6x faster than per-table register/unregister).
-    """
-    db.conn.execute("BEGIN TRANSACTION")
+_CHILD_TABLES = {
+    "authors": [
+        "pmid",
+        "author_position",
+        "last_name",
+        "fore_name",
+        "initials",
+        "orcid",
+        "affiliation",
+        "is_collective",
+    ],
+    "mesh_headings": [
+        "pmid",
+        "descriptor_ui",
+        "descriptor_name",
+        "qualifier_ui",
+        "qualifier_name",
+        "is_major_topic",
+    ],
+    "grants": ["pmid", "grant_id", "acronym", "agency", "country"],
+    "chemicals": ["pmid", "registry_number", "substance_ui", "substance_name"],
+}
+
+
+def _flush_result(db: DuckDBStore, result: dict):
+    """Insert Arrow RecordBatches from Rust parser into DuckDB."""
+    conn = db.conn
+    conn.execute("BEGIN TRANSACTION")
     try:
-        db.upsert_papers(batch.papers)
+        # Papers: DELETE + INSERT with date casting
+        papers = result["papers"]
+        if papers.num_rows > 0:
+            conn.register("_tmp_papers", papers)
+            conn.execute(
+                "DELETE FROM papers WHERE pmid IN (SELECT pmid FROM _tmp_papers)"
+            )
+            cols_insert = ", ".join(_PAPERS_COLS)
+            cols_select = ", ".join(
+                f"TRY_CAST({c} AS DATE)"
+                if c in _DATE_COLS
+                else f"COALESCE({c}, '')"
+                if c == "title"
+                else c
+                for c in _PAPERS_COLS
+            )
+            conn.execute(
+                f"INSERT INTO papers ({cols_insert}) "
+                f"SELECT {cols_select} FROM _tmp_papers"
+            )
+            conn.unregister("_tmp_papers")
 
-        # Register PMID set once for all child-table delete-before-insert
-        child_pmids = list(
-            {r["pmid"] for r in batch.authors}
-            | {r["pmid"] for r in batch.mesh_headings}
-            | {r["pmid"] for r in batch.grants}
-            | {r["pmid"] for r in batch.chemicals}
-        )
-        if child_pmids:
-            db.register_pmid_set(child_pmids)
-            db.insert_authors(batch.authors, pmids_registered=True)
-            db.insert_mesh_headings(batch.mesh_headings, pmids_registered=True)
-            db.insert_grants(batch.grants, pmids_registered=True)
-            db.insert_chemicals(batch.chemicals, pmids_registered=True)
-            db.unregister_pmid_set()
-        else:
-            db.insert_authors(batch.authors)
-            db.insert_mesh_headings(batch.mesh_headings)
-            db.insert_grants(batch.grants)
-            db.insert_chemicals(batch.chemicals)
+        # Child tables: DELETE by PMID set + INSERT
+        for table_name, columns in _CHILD_TABLES.items():
+            rb = result[table_name]
+            if rb.num_rows > 0:
+                tmp = f"_tmp_{table_name}"
+                conn.register(tmp, rb)
+                conn.execute(
+                    f"DELETE FROM {table_name} "
+                    f"WHERE pmid IN (SELECT DISTINCT pmid FROM {tmp})"
+                )
+                cols = ", ".join(columns)
+                conn.execute(
+                    f"INSERT INTO {table_name} ({cols}) SELECT {cols} FROM {tmp}"
+                )
+                conn.unregister(tmp)
 
-        db.soft_delete(batch.delete_pmids)
-        db.conn.execute("COMMIT")
+        # Soft delete
+        db.soft_delete(result["delete_pmids"])
+        conn.execute("COMMIT")
     except Exception:
         try:
-            db.conn.execute("ROLLBACK")
+            conn.execute("ROLLBACK")
         except Exception:
-            pass  # Already rolled back or no active transaction
+            pass
         raise
 
 
-def load_file(db: DuckDBStore, path: Path, batch_size: int = 10_000) -> dict[str, int]:
-    """Parse a single PubMed XML file and load into DuckDB.
-
-    Returns counts: papers, authors, mesh, grants, chemicals, deletes.
-    """
-    batch = ParseResult()
-    total = {
-        "papers": 0,
-        "authors": 0,
-        "mesh": 0,
-        "grants": 0,
-        "chemicals": 0,
-        "deletes": 0,
+def _stats_to_counts(stats: dict) -> dict[str, int]:
+    return {
+        "papers": stats["num_papers"],
+        "authors": stats["num_authors"],
+        "mesh": stats["num_mesh"],
+        "grants": stats["num_grants"],
+        "chemicals": stats["num_chemicals"],
+        "deletes": stats["num_deletes"],
     }
-    parsed_count = 0
 
-    for result in parse_xml_stream(path):
-        batch.extend(result)
-        parsed_count += len(result.papers)
 
-        # Progress every 1000 articles
-        if parsed_count % 1000 < len(result.papers):
-            print(f"    parsed {parsed_count} articles...", flush=True)
+def load_file(db: DuckDBStore, path: Path) -> dict[str, int]:
+    """Parse a single PubMed XML file and load into DuckDB."""
+    result = quarry_parse.parse_pubmed_file(str(path))
+    _flush_result(db, result)
+    return _stats_to_counts(result["stats"])
 
-        if len(batch.papers) >= batch_size:
-            _flush_batch(db, batch)
-            total["papers"] += len(batch.papers)
-            total["authors"] += len(batch.authors)
-            total["mesh"] += len(batch.mesh_headings)
-            total["grants"] += len(batch.grants)
-            total["chemicals"] += len(batch.chemicals)
-            total["deletes"] += len(batch.delete_pmids)
-            batch = ParseResult()
 
-    # Flush remaining
-    if batch.papers or batch.delete_pmids:
-        _flush_batch(db, batch)
-        total["papers"] += len(batch.papers)
-        total["authors"] += len(batch.authors)
-        total["mesh"] += len(batch.mesh_headings)
-        total["grants"] += len(batch.grants)
-        total["chemicals"] += len(batch.chemicals)
-        total["deletes"] += len(batch.delete_pmids)
-
-    return total
+def load_files(db: DuckDBStore, paths: list[Path]) -> dict[str, int]:
+    """Parse multiple PubMed XML files in parallel (rayon) and load into DuckDB."""
+    result = quarry_parse.parse_pubmed_files([str(p) for p in paths])
+    _flush_result(db, result)
+    return _stats_to_counts(result["stats"])
 
 
 def load_baseline(
     db: DuckDBStore,
     baseline_dir: Path | None = None,
     single_file: str | None = None,
-    batch_size: int = 10_000,
+    chunk_size: int = 20,
 ):
-    """Load PubMed baseline XML files into DuckDB."""
+    """Load PubMed baseline XML files into DuckDB.
+
+    Files are processed in parallel chunks (rayon) with bounded memory.
+    chunk_size controls how many files are parsed in parallel per batch.
+    """
     baseline_dir = baseline_dir or settings.pubmed_baseline_dir
 
     if single_file:
@@ -113,7 +164,7 @@ def load_baseline(
         print(f"No baseline files found in {baseline_dir}")
         return
 
-    print(f"Baseline: {len(files)} files, batch_size={batch_size}")
+    print(f"Baseline: {len(files)} files, chunk_size={chunk_size}")
     grand_total = {
         "papers": 0,
         "authors": 0,
@@ -124,19 +175,21 @@ def load_baseline(
     }
     t0 = time.time()
 
-    for i, f in enumerate(files, 1):
-        ft0 = time.time()
-        counts = load_file(db, f, batch_size)
-        elapsed = time.time() - ft0
+    for i in range(0, len(files), chunk_size):
+        chunk = files[i : i + chunk_size]
+        ct0 = time.time()
+        counts = load_files(db, chunk)
+        elapsed = time.time() - ct0
 
         for k in grand_total:
             grand_total[k] += counts[k]
 
+        done = min(i + chunk_size, len(files))
         rate = counts["papers"] / elapsed if elapsed > 0 else 0
         print(
-            f"  [{i}/{len(files)}] {f.name}: "
-            f"papers={counts['papers']}, mesh={counts['mesh']}, "
-            f"deletes={counts['deletes']} ({rate:.0f} papers/s, {elapsed:.1f}s)"
+            f"  [{done}/{len(files)}] papers={counts['papers']}, "
+            f"mesh={counts['mesh']}, deletes={counts['deletes']} "
+            f"({rate:.0f} papers/s, {elapsed:.1f}s)"
         )
 
     total_elapsed = time.time() - t0
@@ -146,13 +199,8 @@ def load_baseline(
 def load_updates(
     db: DuckDBStore,
     update_dir: Path | None = None,
-    batch_size: int = 10_000,
 ):
-    """Load PubMed daily update XML files.
-
-    Processes all .xml.gz in update_dir. Caller should manage
-    which files are new (e.g., by tracking last processed file).
-    """
+    """Load PubMed daily update XML files."""
     update_dir = update_dir or settings.pubmed_update_dir
     files = sorted(update_dir.glob("pubmed*.xml.gz"))
 
@@ -166,16 +214,17 @@ def load_updates(
     total_deletes = 0
 
     for i, f in enumerate(files, 1):
-        counts = load_file(db, f, batch_size)
+        counts = load_file(db, f)
         total_papers += counts["papers"]
         total_deletes += counts["deletes"]
         print(
-            f"  [{i}/{len(files)}] {f.name}: papers={counts['papers']}, deletes={counts['deletes']}"
+            f"  [{i}/{len(files)}] {f.name}: "
+            f"papers={counts['papers']}, deletes={counts['deletes']}"
         )
 
     elapsed = time.time() - t0
     print(
-        f"\nUpdates done in {elapsed:.0f}s: papers={total_papers}, deletes={total_deletes}"
+        f"\nUpdates done in {elapsed:.0f}s: "
+        f"papers={total_papers}, deletes={total_deletes}"
     )
-
     return {"papers": total_papers, "deletes": total_deletes}

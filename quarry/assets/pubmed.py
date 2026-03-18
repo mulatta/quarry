@@ -1,6 +1,6 @@
 """PubMed baseline + daily update Dagster assets.
 
-Wraps quarry.etl.runner and quarry.etl.parse logic.
+Uses quarry_parse (Rust) for XML parsing via quarry.etl.runner.
 DO NOT use `from __future__ import annotations` here — Dagster inspects types at runtime.
 """
 
@@ -12,14 +12,14 @@ from dagster import (
 )
 
 from quarry.config import settings
-from quarry.etl.runner import load_file
+from quarry.etl.runner import load_file, load_files
 from quarry.resources import DuckDBResource
 
 
 @asset(
     group_name="pubmed",
     description="Load PubMed baseline XML files into DuckDB (one-time full load).",
-    kinds={"duckdb", "python"},
+    kinds={"duckdb", "rust"},
 )
 def pubmed_baseline(
     context: AssetExecutionContext,
@@ -31,7 +31,7 @@ def pubmed_baseline(
         files = sorted(baseline_dir.glob("pubmed*.xml.gz"))
         context.log.info(f"Baseline: {len(files)} files in {baseline_dir}")
 
-        grand_total: dict[str, int] = {
+        grand_total = {
             "papers": 0,
             "authors": 0,
             "mesh": 0,
@@ -39,12 +39,18 @@ def pubmed_baseline(
             "chemicals": 0,
             "deletes": 0,
         }
+        chunk_size = 20
 
-        for i, f in enumerate(files, 1):
-            counts = load_file(db, f)
+        for i in range(0, len(files), chunk_size):
+            chunk = files[i : i + chunk_size]
+            counts = load_files(db, chunk)
             for k in grand_total:
                 grand_total[k] += counts[k]
-            context.log.info(f"[{i}/{len(files)}] {f.name}: papers={counts['papers']}")
+            done = min(i + chunk_size, len(files))
+            context.log.info(
+                f"[{done}/{len(files)}] papers={counts['papers']}, "
+                f"mesh={counts['mesh']}"
+            )
 
         return MaterializeResult(
             metadata={
@@ -63,7 +69,7 @@ def pubmed_baseline(
     group_name="pubmed",
     deps=[pubmed_baseline],
     description="Process PubMed daily update XML files (incremental upsert + deletes).",
-    kinds={"duckdb", "python"},
+    kinds={"duckdb", "rust"},
 )
 def pubmed_daily_update(
     context: AssetExecutionContext,
@@ -84,8 +90,6 @@ def pubmed_daily_update(
                 }
             )
 
-        # Track processed files to support incremental runs
-        # TODO: cursor-based tracking (store last processed filename in DuckDB metadata table)
         total_papers = 0
         total_deletes = 0
 
