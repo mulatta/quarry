@@ -18,6 +18,7 @@
       systems = import inputs.systems;
       imports = [
         ./nix/formatter.nix
+        ./nix/packages.nix
         ./nix/shell.nix
       ];
 

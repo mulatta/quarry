@@ -4,7 +4,7 @@
     {
       devShells.default = pkgs.mkShell {
         packages = with pkgs; [
-          python3
+          python313
           uv
           rustc
           cargo
@@ -26,6 +26,9 @@
 
           export VIRTUAL_ENV="$PWD/.venv"
           export PATH="$VIRTUAL_ENV/bin:$PATH"
+
+          maturin develop --manifest-path quarry-parse/Cargo.toml --release --quiet
+          maturin develop --manifest-path quarry-csr/Cargo.toml --release --quiet
         '';
       };
     };
