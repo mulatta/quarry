@@ -4,11 +4,18 @@ These assets mirror raw data from external sources to local disk.
 Transform assets (pubmed, citations, supplementary) depend on these
 and read from the cached files to produce derived state.
 
+Each asset returns a DataVersion derived from the remote file state,
+enabling AutomationCondition.eager() on downstream assets to skip
+re-processing when upstream data hasn't changed.
+
 DO NOT use `from __future__ import annotations` here — Dagster inspects types at runtime.
 """
 
+import hashlib
+
 from dagster import (
     AssetExecutionContext,
+    DataVersion,
     MaterializeResult,
     MetadataValue,
     asset,
@@ -21,6 +28,19 @@ from quarry.etl.download import (
     resolve_figshare_files,
     sync_ftp_dir,
 )
+
+
+def _version_from_file_listing(
+    files: dict[str, int],
+    mtimes: dict[str, str] | None = None,
+) -> DataVersion:
+    """Stable DataVersion from {filename: size} + optional {filename: mtime}."""
+    parts = sorted(files.items())
+    if mtimes:
+        parts = [(k, v, mtimes.get(k, "")) for k, v in parts]
+    fingerprint = str(parts)
+    digest = hashlib.sha256(fingerprint.encode()).hexdigest()[:16]
+    return DataVersion(digest)
 
 
 @asset(
@@ -45,13 +65,16 @@ def pubmed_baseline_sync(
         ),
     )
     return MaterializeResult(
+        data_version=_version_from_file_listing(
+            stats["remote_files"], stats.get("remote_mtimes")
+        ),
         metadata={
             "downloaded": MetadataValue.int(stats["downloaded"]),
             "skipped": MetadataValue.int(stats["skipped"]),
             "errors": MetadataValue.int(stats["errors"]),
             "bytes": MetadataValue.int(stats["bytes"]),
             "dir": MetadataValue.path(str(settings.pubmed_baseline_dir)),
-        }
+        },
     )
 
 
@@ -77,13 +100,16 @@ def pubmed_updates_sync(
         ),
     )
     return MaterializeResult(
+        data_version=_version_from_file_listing(
+            stats["remote_files"], stats.get("remote_mtimes")
+        ),
         metadata={
             "downloaded": MetadataValue.int(stats["downloaded"]),
             "skipped": MetadataValue.int(stats["skipped"]),
             "errors": MetadataValue.int(stats["errors"]),
             "bytes": MetadataValue.int(stats["bytes"]),
             "dir": MetadataValue.path(str(settings.pubmed_update_dir)),
-        }
+        },
     )
 
 
@@ -106,14 +132,17 @@ def mesh_descriptor_sync(
         host=settings.mesh_ftp_host,
         remote_dir=settings.mesh_ftp_dir,
         local_dir=settings.pubmed_mesh_dir,
-        pattern=filename,  # only this specific file
+        pattern=filename,
     )
     return MaterializeResult(
+        data_version=_version_from_file_listing(
+            stats["remote_files"], stats.get("remote_mtimes")
+        ),
         metadata={
             "file": MetadataValue.text(filename),
             "downloaded": MetadataValue.int(stats["downloaded"]),
             "bytes": MetadataValue.int(stats["bytes"]),
-        }
+        },
     )
 
 
@@ -140,12 +169,16 @@ def icite_occ_sync(
         expected_file="open_citation_collection.csv",
         max_age_days=35,
     )
+    # DataVersion from figshare article file listing (changes on new monthly release)
+    version_str = str(sorted(files.items()))
+    digest = hashlib.sha256(version_str.encode()).hexdigest()[:16]
     return MaterializeResult(
+        data_version=DataVersion(digest),
         metadata={
             "status": MetadataValue.text(str(info["status"])),
             "path": MetadataValue.path(str(info["path"])),
             "bytes": MetadataValue.int(int(info["bytes"])),
-        }
+        },
     )
 
 
@@ -170,10 +203,13 @@ def icite_metadata_sync(
         expected_file="icite_metadata.csv",
         max_age_days=35,
     )
+    version_str = str(sorted(files.items()))
+    digest = hashlib.sha256(version_str.encode()).hexdigest()[:16]
     return MaterializeResult(
+        data_version=DataVersion(digest),
         metadata={
             "status": MetadataValue.text(str(info["status"])),
             "path": MetadataValue.path(str(info["path"])),
             "bytes": MetadataValue.int(int(info["bytes"])),
-        }
+        },
     )

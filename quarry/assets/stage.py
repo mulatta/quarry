@@ -1,6 +1,9 @@
 """Staging assets: parse raw data → Arrow Feather files.
 
 No DuckDB access. All assets here can run in parallel.
+Uses AutomationCondition.eager() with data_version_changed() so that
+scheduled runs skip re-processing when upstream data hasn't changed.
+
 DO NOT use `from __future__ import annotations` here — Dagster inspects types at runtime.
 """
 
@@ -8,15 +11,14 @@ import orjson
 import pyarrow as pa
 from dagster import (
     AssetExecutionContext,
+    AutomationCondition,
     MaterializeResult,
     MetadataValue,
     asset,
 )
 
 from quarry.assets.download import (
-    icite_metadata_sync,
     mesh_descriptor_sync,
-    pubmed_baseline_sync,
     pubmed_updates_sync,
 )
 from quarry.config import settings
@@ -24,45 +26,15 @@ from quarry.etl.staging import clear, write_tables
 
 import quarry_parse
 
+_EAGER_ON_VERSION_CHANGE = AutomationCondition.eager().replace(
+    "any_deps_updated",
+    AutomationCondition.any_deps_updated().replace(
+        "newly_updated", AutomationCondition.data_version_changed()
+    ),
+)
+
 
 # -- PubMed ------------------------------------------------------------------
-
-
-@asset(
-    group_name="pubmed",
-    deps=[pubmed_baseline_sync],
-    description="Parse PubMed baseline XML → Arrow Feather staging files.",
-    kinds={"rust", "arrow"},
-)
-def pubmed_baseline_stage(
-    context: AssetExecutionContext,
-) -> MaterializeResult:
-    staging = settings.staging_dir / "pubmed_baseline"
-    clear(staging)
-
-    files = sorted(settings.pubmed_baseline_dir.glob("pubmed*.xml.gz"))
-    context.log.info(f"Staging baseline: {len(files)} files")
-
-    total_papers = 0
-    chunk_size = 20
-
-    for i in range(0, len(files), chunk_size):
-        chunk = files[i : i + chunk_size]
-        result = quarry_parse.parse_pubmed_files([str(p) for p in chunk])
-        chunk_id = i // chunk_size
-        _write_pubmed_result(staging / f"chunk_{chunk_id:04d}", result)
-        total_papers += result["stats"]["num_papers"]
-        done = min(i + chunk_size, len(files))
-        context.log.info(
-            f"  [{done}/{len(files)}] papers={result['stats']['num_papers']}"
-        )
-
-    return MaterializeResult(
-        metadata={
-            "num_files": MetadataValue.int(len(files)),
-            "total_papers": MetadataValue.int(total_papers),
-        }
-    )
 
 
 @asset(
@@ -70,6 +42,7 @@ def pubmed_baseline_stage(
     deps=[pubmed_updates_sync],
     description="Parse PubMed daily update XML → Arrow Feather staging files.",
     kinds={"rust", "arrow"},
+    automation_condition=_EAGER_ON_VERSION_CHANGE,
 )
 def pubmed_updates_stage(
     context: AssetExecutionContext,
@@ -121,6 +94,7 @@ def _write_pubmed_result(chunk_dir, result):
     deps=[mesh_descriptor_sync],
     description="Parse MeSH descriptor XML → Arrow Feather staging.",
     kinds={"python", "arrow"},
+    automation_condition=_EAGER_ON_VERSION_CHANGE,
 )
 def mesh_stage(
     context: AssetExecutionContext,
@@ -224,113 +198,3 @@ def biorxiv_stage(
     return MaterializeResult(
         metadata={"total_preprints": MetadataValue.int(len(deduped))}
     )
-
-
-# -- iCite metrics ------------------------------------------------------------
-
-
-@asset(
-    group_name="citations",
-    deps=[icite_metadata_sync],
-    description="Parse iCite metadata CSV → Arrow Feather staging.",
-    kinds={"python", "arrow"},
-)
-def icite_metrics_stage(
-    context: AssetExecutionContext,
-) -> MaterializeResult:
-    import csv
-
-    staging = settings.staging_dir / "icite_metrics"
-    clear(staging)
-
-    meta_csv = settings.icite_dir / "icite_metadata.csv"
-    if not meta_csv.exists():
-        context.log.warning(f"iCite metadata CSV not found: {meta_csv}")
-        return MaterializeResult(metadata={"status": MetadataValue.text("skipped")})
-
-    context.log.info(f"Parsing iCite metrics from {meta_csv}")
-    csv.field_size_limit(2**30)
-
-    batch: list[dict] = []
-    batch_id = 0
-    batch_size = 50_000
-    total = 0
-
-    def _flush(rows, bid):
-        table = pa.table(
-            {
-                "pmid": pa.array([r["pmid"] for r in rows], type=pa.int32()),
-                "rcr": pa.array([r["rcr"] for r in rows], type=pa.float32()),
-                "nih_percentile": pa.array(
-                    [r["nih_percentile"] for r in rows], type=pa.float32()
-                ),
-                "apt": pa.array([r["apt"] for r in rows], type=pa.float32()),
-                "is_clinical": pa.array(
-                    [r["is_clinical"] for r in rows], type=pa.bool_()
-                ),
-                "human": pa.array([r["human"] for r in rows], type=pa.float32()),
-                "animal": pa.array([r["animal"] for r in rows], type=pa.float32()),
-                "molecular_cellular": pa.array(
-                    [r["molecular_cellular"] for r in rows], type=pa.float32()
-                ),
-                "cited_by_clin": pa.array(
-                    [r["cited_by_clin"] for r in rows], type=pa.int32()
-                ),
-                "field_citation_rate": pa.array(
-                    [r["field_citation_rate"] for r in rows], type=pa.float32()
-                ),
-            }
-        )
-        write_tables(staging / f"batch_{bid:04d}", {"metrics": table})
-
-    with open(meta_csv, "r") as f:
-        for row in csv.DictReader(f):
-            pmid_str = row.get("pmid", "")
-            if not pmid_str or not pmid_str.isdigit():
-                continue
-            batch.append(
-                {
-                    "pmid": int(pmid_str),
-                    "rcr": _float_or_none(row.get("relative_citation_ratio")),
-                    "nih_percentile": _float_or_none(row.get("nih_percentile")),
-                    "apt": _float_or_none(row.get("apt")),
-                    "is_clinical": row.get("is_clinical", "").lower() == "true",
-                    "human": _float_or_none(row.get("human")),
-                    "animal": _float_or_none(row.get("animal")),
-                    "molecular_cellular": _float_or_none(row.get("molecular_cellular")),
-                    "cited_by_clin": _int_or_none(row.get("cited_by_clin")),
-                    "field_citation_rate": _float_or_none(
-                        row.get("field_citation_rate")
-                    ),
-                }
-            )
-            if len(batch) >= batch_size:
-                _flush(batch, batch_id)
-                total += len(batch)
-                batch = []
-                batch_id += 1
-                context.log.info(f"  {total:,} rows staged")
-
-    if batch:
-        _flush(batch, batch_id)
-        total += len(batch)
-
-    return MaterializeResult(metadata={"total_rows": MetadataValue.int(total)})
-
-
-def _float_or_none(s):
-    if not s:
-        return None
-    try:
-        return float(s)
-    except ValueError:
-        return None
-
-
-def _int_or_none(s):
-    if not s:
-        return None
-    try:
-        return int(s)
-    except ValueError:
-        return None

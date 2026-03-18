@@ -34,7 +34,10 @@ def sync_ftp_dir(
     local_dir.mkdir(parents=True, exist_ok=True)
 
     # List remote files via MLSD (machine-readable)
+    # remote_files: {name: size} for DataVersion fingerprint
+    # remote_mtimes: {name: "YYYYMMDDHHMMSS"} for change detection
     remote_files: dict[str, int] = {}
+    remote_mtimes: dict[str, str] = {}
     with ftplib.FTP(host, timeout=30) as ftp:
         ftp.login()
         for name, facts in ftp.mlsd(remote_dir):
@@ -43,17 +46,38 @@ def sync_ftp_dir(
             if not fnmatch(name, pattern):
                 continue
             remote_files[name] = int(facts.get("size", 0))
+            remote_mtimes[name] = facts.get("modify", "")
 
-    # Determine what needs downloading (size mismatch or missing)
+    # Determine what needs downloading (size or mtime mismatch, or missing)
     to_download = []
     for name, remote_size in remote_files.items():
         local_path = local_dir / name
-        if local_path.exists() and local_path.stat().st_size == remote_size:
-            continue
-        to_download.append(name)
+        if local_path.exists():
+            if local_path.stat().st_size != remote_size:
+                to_download.append(name)
+            elif remote_mtimes.get(name):
+                # Compare remote modify timestamp against local mtime
+                try:
+                    remote_ts = datetime.strptime(
+                        remote_mtimes[name][:14], "%Y%m%d%H%M%S"
+                    )
+                    local_ts = datetime.fromtimestamp(local_path.stat().st_mtime)
+                    if remote_ts > local_ts:
+                        to_download.append(name)
+                except ValueError:
+                    pass  # unparseable modify fact — rely on size check
+        else:
+            to_download.append(name)
 
     if not to_download:
-        return {"downloaded": 0, "skipped": len(remote_files), "errors": 0, "bytes": 0}
+        return {
+            "downloaded": 0,
+            "skipped": len(remote_files),
+            "errors": 0,
+            "bytes": 0,
+            "remote_files": remote_files,
+            "remote_mtimes": remote_mtimes,
+        }
 
     # Parallel download: one persistent FTP connection per worker thread
     total_bytes = 0
@@ -116,6 +140,8 @@ def sync_ftp_dir(
         "skipped": len(remote_files) - len(to_download),
         "errors": errors,
         "bytes": total_bytes,
+        "remote_files": remote_files,
+        "remote_mtimes": remote_mtimes,
     }
 
 

@@ -74,8 +74,7 @@ class LanceStore:
 
     def create_fts_index(self):
         """Build BM25 full-text index on title and abstract."""
-        self.table.create_fts_index("title", replace=True)
-        self.table.create_fts_index("abstract", replace=True)
+        self.table.create_fts_index(["title", "abstract"], replace=True)
 
     def create_vector_index(self, column: str = "vec_retrieval"):
         """Build IVF_PQ vector index for ANN search."""
