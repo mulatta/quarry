@@ -34,11 +34,19 @@ def fetch_preprints(
     all_results = []
     current_cursor = cursor
 
-    with httpx.Client(timeout=30) as client:
+    with httpx.Client(timeout=httpx.Timeout(60, connect=10)) as client:
         while True:
             url = f"{BIORXIV_API}/{server}/{from_date}/{to_date}/{current_cursor}"
-            resp = client.get(url)
-            resp.raise_for_status()
+            for attempt in range(3):
+                try:
+                    resp = client.get(url)
+                    resp.raise_for_status()
+                    break
+                except (httpx.TimeoutException, httpx.HTTPStatusError):
+                    if attempt == 2:
+                        raise
+                    time.sleep(2**attempt)
+                    continue
             data = resp.json()
 
             messages = data.get("messages", [{}])
