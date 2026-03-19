@@ -22,7 +22,7 @@ from dagster import (
 )
 
 from quarry.config import settings
-from quarry.etl.download import (
+from quarry.etl.fetch import (
     download_and_extract_zip,
     find_latest_ftp_file,
     resolve_figshare_files,

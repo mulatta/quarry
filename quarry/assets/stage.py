@@ -18,7 +18,7 @@ from dagster import (
 
 from quarry.assets.download import mesh_descriptor_sync
 from quarry.config import settings
-from quarry.etl.staging import clear, write_tables
+from quarry.etl.feather import clear, write_tables
 
 _EAGER_ON_VERSION_CHANGE = AutomationCondition.eager().replace(
     "any_deps_updated",

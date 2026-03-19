@@ -28,7 +28,7 @@ from quarry.assets.download import (
 )
 from quarry.assets.stage import mesh_stage
 from quarry.config import settings
-from quarry.etl.staging import read_tables
+from quarry.etl.feather import read_tables
 from quarry.resources import DuckDBResource
 
 import quarry_parse
