@@ -172,20 +172,67 @@ def duckdb_load(
     )
 
 
+def _register_and_insert(conn, result):
+    """Register all Arrow tables, INSERT in a single transaction, then unregister.
+
+    Batches all 5 table INSERTs (papers + 4 child) under one transaction
+    to reduce commit overhead and GIL transitions.
+    """
+    registered = []
+
+    papers = result["papers"]
+    if papers is not None and papers.num_rows > 0:
+        conn.register("_stg_papers", papers)
+        registered.append("_stg_papers")
+
+    for table_name in _CHILD_TABLES:
+        t = result.get(table_name)
+        if t is not None and t.num_rows > 0:
+            tmp = f"_stg_{table_name}"
+            conn.register(tmp, t)
+            registered.append(tmp)
+
+    conn.execute("BEGIN TRANSACTION")
+
+    n_papers = 0
+    if "_stg_papers" in registered:
+        conn.execute(
+            f"INSERT INTO papers ({_COLS_INSERT}) "
+            f"SELECT {_COLS_SELECT} FROM _stg_papers"
+        )
+        n_papers = papers.num_rows
+
+    for table_name, columns in _CHILD_TABLES.items():
+        tmp = f"_stg_{table_name}"
+        if tmp in registered:
+            cols = ", ".join(columns)
+            conn.execute(f"INSERT INTO {table_name} ({cols}) SELECT {cols} FROM {tmp}")
+
+    conn.execute("COMMIT")
+
+    for name in registered:
+        conn.unregister(name)
+
+    return n_papers
+
+
 def _load_baseline_direct(conn, context) -> int:
     """Parse baseline XML directly into DuckDB — no Feather staging.
 
-    XML.gz → [Rust/rayon parse] → Arrow RecordBatch → DuckDB INSERT.
-    Saves ~66GB disk I/O (33GB write + 33GB read of Feather files).
+    Pipeline: parse chunk N+1 in background thread while DuckDB inserts chunk N.
+    DuckDB releases GIL during INSERT → background thread acquires GIL for Rust parse.
     """
+    from concurrent.futures import ThreadPoolExecutor
+
     files = sorted(settings.pubmed_baseline_dir.glob("pubmed*.xml.gz"))
     if not files:
         return 0
 
     chunk_size = 20
-    n_chunks = (len(files) + chunk_size - 1) // chunk_size
+    chunks = [files[i : i + chunk_size] for i in range(0, len(files), chunk_size)]
+    n_chunks = len(chunks)
     context.log.info(
-        f"Baseline: parsing {len(files)} XML files → DuckDB directly ({n_chunks} chunks)"
+        f"Baseline: parsing {len(files)} XML files → DuckDB ({n_chunks} chunks, pipelined)"
     )
 
     # Truncate all PubMed tables
@@ -193,101 +240,117 @@ def _load_baseline_direct(conn, context) -> int:
     for table_name in _CHILD_TABLES:
         conn.execute(f"DELETE FROM {table_name}")
 
+    def _parse(chunk_files):
+        return quarry_parse.parse_pubmed_files([str(p) for p in chunk_files])
+
     total = 0
-    for i in range(0, len(files), chunk_size):
-        chunk_files = files[i : i + chunk_size]
-        result = quarry_parse.parse_pubmed_files([str(p) for p in chunk_files])
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        # Kick off first parse
+        future = pool.submit(_parse, chunks[0])
 
-        # Papers
-        papers = result["papers"]
-        if papers is not None and papers.num_rows > 0:
-            conn.register("_stg_papers", papers)
-            conn.execute(
-                f"INSERT INTO papers ({_COLS_INSERT}) "
-                f"SELECT {_COLS_SELECT} FROM _stg_papers"
+        for i in range(n_chunks):
+            result = future.result()
+
+            # Pipeline: start parsing next chunk while we INSERT current
+            if i + 1 < n_chunks:
+                future = pool.submit(_parse, chunks[i + 1])
+
+            n_papers = _register_and_insert(conn, result)
+            total += n_papers
+            context.log.info(
+                f"  [{i + 1}/{n_chunks}] +{n_papers:,} papers (total: {total:,})"
             )
-            conn.unregister("_stg_papers")
-            total += papers.num_rows
-
-        # Child tables
-        for table_name, columns in _CHILD_TABLES.items():
-            t = result.get(table_name)
-            if t is not None and t.num_rows > 0:
-                tmp = f"_stg_{table_name}"
-                conn.register(tmp, t)
-                cols = ", ".join(columns)
-                conn.execute(
-                    f"INSERT INTO {table_name} ({cols}) SELECT {cols} FROM {tmp}"
-                )
-                conn.unregister(tmp)
-
-        chunk_idx = i // chunk_size
-        context.log.info(
-            f"  [{chunk_idx + 1}/{n_chunks}] +{papers.num_rows if papers is not None else 0:,} papers "
-            f"(total: {total:,})"
-        )
     return total
 
 
 def _load_updates_direct(conn, context) -> int:
-    """Parse update XML directly into DuckDB — no Feather staging.
+    """Parse update XML directly into DuckDB — pipelined.
 
-    Same pattern as _load_baseline_direct but with DELETE+INSERT (incremental).
+    Same pipeline pattern as baseline but with DELETE+INSERT (incremental).
+    Batches multiple update files for better throughput.
     """
+    from concurrent.futures import ThreadPoolExecutor
+
     files = sorted(settings.pubmed_update_dir.glob("pubmed*.xml.gz"))
     if not files:
         return 0
 
-    context.log.info(f"Updates: parsing {len(files)} XML files → DuckDB directly")
+    chunk_size = 10
+    chunks = [files[i : i + chunk_size] for i in range(0, len(files), chunk_size)]
+    n_chunks = len(chunks)
+    context.log.info(
+        f"Updates: parsing {len(files)} XML files → DuckDB ({n_chunks} chunks, pipelined)"
+    )
+
+    def _parse(chunk_files):
+        return quarry_parse.parse_pubmed_files([str(p) for p in chunk_files])
 
     total = 0
-    for i, f in enumerate(files):
-        result = quarry_parse.parse_pubmed_file(str(f))
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(_parse, chunks[0])
 
-        papers = result["papers"]
-        if papers is not None and papers.num_rows > 0:
-            conn.register("_stg_papers", papers)
-            conn.execute(
-                "DELETE FROM papers WHERE pmid IN (SELECT pmid FROM _stg_papers)"
-            )
-            conn.execute(
-                f"INSERT INTO papers ({_COLS_INSERT}) "
-                f"SELECT {_COLS_SELECT} FROM _stg_papers"
-            )
-            conn.unregister("_stg_papers")
-            total += papers.num_rows
+        for i in range(n_chunks):
+            result = future.result()
 
-        for table_name, columns in _CHILD_TABLES.items():
-            t = result.get(table_name)
-            if t is not None and t.num_rows > 0:
-                tmp = f"_stg_{table_name}"
-                conn.register(tmp, t)
+            if i + 1 < n_chunks:
+                future = pool.submit(_parse, chunks[i + 1])
+
+            registered = []
+
+            conn.execute("BEGIN TRANSACTION")
+
+            # DELETE existing rows, then INSERT (upsert pattern)
+            papers = result["papers"]
+            if papers is not None and papers.num_rows > 0:
+                conn.register("_stg_papers", papers)
+                registered.append("_stg_papers")
                 conn.execute(
-                    f"DELETE FROM {table_name} "
-                    f"WHERE pmid IN (SELECT DISTINCT pmid FROM {tmp})"
+                    "DELETE FROM papers WHERE pmid IN (SELECT pmid FROM _stg_papers)"
                 )
-                cols = ", ".join(columns)
                 conn.execute(
-                    f"INSERT INTO {table_name} ({cols}) SELECT {cols} FROM {tmp}"
+                    f"INSERT INTO papers ({_COLS_INSERT}) "
+                    f"SELECT {_COLS_SELECT} FROM _stg_papers"
                 )
-                conn.unregister(tmp)
+                total += papers.num_rows
 
-        if result["delete_pmids"]:
-            import pyarrow as pa
+            for table_name, columns in _CHILD_TABLES.items():
+                t = result.get(table_name)
+                if t is not None and t.num_rows > 0:
+                    tmp = f"_stg_{table_name}"
+                    conn.register(tmp, t)
+                    registered.append(tmp)
+                    conn.execute(
+                        f"DELETE FROM {table_name} "
+                        f"WHERE pmid IN (SELECT DISTINCT pmid FROM {tmp})"
+                    )
+                    cols = ", ".join(columns)
+                    conn.execute(
+                        f"INSERT INTO {table_name} ({cols}) SELECT {cols} FROM {tmp}"
+                    )
 
-            del_t = pa.table(
-                {"pmid": pa.array(result["delete_pmids"], type=pa.int32())}
+            # Soft-delete retracted PMIDs
+            if result["delete_pmids"]:
+                import pyarrow as pa
+
+                del_t = pa.table(
+                    {"pmid": pa.array(result["delete_pmids"], type=pa.int32())}
+                )
+                conn.register("_stg_del", del_t)
+                registered.append("_stg_del")
+                conn.execute(
+                    "UPDATE papers SET is_deleted = TRUE, deleted_date = CURRENT_DATE "
+                    "WHERE pmid IN (SELECT pmid FROM _stg_del)"
+                )
+
+            conn.execute("COMMIT")
+
+            for name in registered:
+                conn.unregister(name)
+
+            context.log.info(
+                f"  [{i + 1}/{n_chunks}] +{papers.num_rows if papers is not None else 0:,} papers "
+                f"(total: {total:,})"
             )
-            conn.register("_stg_del", del_t)
-            conn.execute(
-                "UPDATE papers SET is_deleted = TRUE, deleted_date = CURRENT_DATE "
-                "WHERE pmid IN (SELECT pmid FROM _stg_del)"
-            )
-            conn.unregister("_stg_del")
-
-        context.log.info(
-            f"  [{i + 1}/{len(files)}] {f.name}: papers={result['stats']['num_papers']}"
-        )
     return total
 
 
