@@ -21,12 +21,12 @@ def build_csr_from_csv(
 ) -> dict:
     """Build CSR mmap files from iCite open_citation_collection.csv.
 
-    Delegates to quarry_csr Rust extension (rayon parallel, ~31s for 805M edges).
+    Delegates to quarry_graph Rust extension (rayon parallel, ~31s for 805M edges).
     """
-    import quarry_csr
+    import quarry_graph
 
     csr_dir = csr_dir or settings.csr_dir
-    return quarry_csr.build_csr_from_csv(str(csv_path), str(csr_dir))
+    return quarry_graph.build_from_csv(str(csv_path), str(csr_dir))
 
 
 def update_metrics(

@@ -13,17 +13,15 @@ Tools:
 
 from mcp.server.fastmcp import FastMCP
 
+import quarry_graph
 from quarry.config import settings
-from quarry.store.csr import CSRGraph
 from quarry.store.duckdb import DuckDBStore
-from quarry.store.subgraph import SessionSubgraph
 
 mcp = FastMCP("quarry")
 
 # Lazy-initialized singletons
 _db: DuckDBStore | None = None
-_csr: CSRGraph | None = None
-_subgraph: SessionSubgraph | None = None
+_graph: quarry_graph.Graph | None = None
 
 
 def _get_db() -> DuckDBStore:
@@ -33,18 +31,11 @@ def _get_db() -> DuckDBStore:
     return _db
 
 
-def _get_csr() -> CSRGraph:
-    global _csr
-    if _csr is None:
-        _csr = CSRGraph(settings.csr_dir)
-    return _csr
-
-
-def _get_subgraph() -> SessionSubgraph:
-    global _subgraph
-    if _subgraph is None:
-        _subgraph = SessionSubgraph()
-    return _subgraph
+def _get_graph() -> quarry_graph.Graph:
+    global _graph
+    if _graph is None:
+        _graph = quarry_graph.Graph(str(settings.csr_dir))
+    return _graph
 
 
 @mcp.tool()
@@ -101,8 +92,8 @@ def expand_citations(
         max_nodes: Maximum nodes to return
         enrich: Include paper metadata
     """
-    csr = _get_csr()
-    neighbors = csr.k_hop(str(pmid), k=hops, direction=direction, max_nodes=max_nodes)
+    graph = _get_graph()
+    neighbors = graph.k_hop(pmid, k=hops, direction=direction, max_nodes=max_nodes)
 
     result = {
         "center": pmid,
@@ -112,12 +103,11 @@ def expand_citations(
     }
 
     if enrich:
-        pmids = [int(n) for n in neighbors]
         db = _get_db()
-        papers = db.get_papers(pmids[:100])  # limit enrichment
+        papers = db.get_papers(neighbors[:100])  # limit enrichment
         result["papers"] = papers
     else:
-        result["pmids"] = [int(n) for n in neighbors]
+        result["pmids"] = neighbors
 
     return result
 
@@ -137,8 +127,8 @@ def find_path(
         max_depth: Maximum path length to search
         enrich: Include paper metadata for path nodes
     """
-    csr = _get_csr()
-    path = csr.shortest_path(str(source_pmid), str(target_pmid), max_depth=max_depth)
+    graph = _get_graph()
+    path = graph.shortest_path(source_pmid, target_pmid, max_depth=max_depth)
 
     if path is None:
         return {"found": False, "source": source_pmid, "target": target_pmid}
@@ -146,14 +136,14 @@ def find_path(
     result = {
         "found": True,
         "path_length": len(path),
-        "path_pmids": [int(p) for p in path],
+        "path_pmids": path,
     }
 
     if enrich:
         db = _get_db()
-        papers = db.get_papers([int(p) for p in path])
+        papers = db.get_papers(path)
         paper_map = {p["pmid"]: p for p in papers}
-        result["path_papers"] = [paper_map.get(int(p), {"pmid": int(p)}) for p in path]
+        result["path_papers"] = [paper_map.get(p, {"pmid": p}) for p in path]
 
     return result
 
@@ -186,21 +176,25 @@ def get_subgraph(
         pmids: List of PMIDs to include in the subgraph
         include_metrics: If true, compute PageRank and betweenness centrality
     """
-    sg = _get_subgraph()
-    csr = _get_csr()
+    graph = _get_graph()
 
-    str_ids = [str(p) for p in pmids]
-    sg.add_edges_from_csr(csr, str_ids)
+    edges = graph.subgraph_edges(pmids)
+    result = {
+        "nodes": [{"id": p} for p in pmids],
+        "edges": [{"source": s, "target": t} for s, t in edges],
+        "num_nodes": len(pmids),
+        "num_edges": len(edges),
+    }
 
-    result = sg.to_json()
-    result["num_nodes"] = sg.num_nodes
-    result["num_edges"] = sg.num_edges
-
-    if include_metrics and sg.num_nodes > 0:
-        result["pagerank"] = sg.pagerank()
-        if sg.num_nodes < 10_000:
-            result["betweenness"] = sg.betweenness_centrality()
-        result["components"] = [list(c) for c in sg.connected_components()]
+    if include_metrics and len(pmids) > 0:
+        result["pagerank"] = dict(
+            graph.subgraph_pagerank(pmids, alpha=0.85, max_iter=100, tol=1e-6)
+        )
+        if len(pmids) < 10_000:
+            result["betweenness"] = dict(
+                graph.subgraph_betweenness(pmids, normalized=True)
+            )
+        result["components"] = graph.subgraph_components(pmids)
 
     return result
 

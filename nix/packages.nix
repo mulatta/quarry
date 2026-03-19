@@ -35,10 +35,10 @@
           lockFile = ../quarry-parse/Cargo.lock;
         };
 
-        quarry-csr = mkMaturinPackage {
-          pname = "quarry-csr";
-          src = ../quarry-csr;
-          lockFile = ../quarry-csr/Cargo.lock;
+        quarry-graph = mkMaturinPackage {
+          pname = "quarry-graph";
+          src = ../quarry-graph;
+          lockFile = ../quarry-graph/Cargo.lock;
         };
       };
     };

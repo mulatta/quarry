@@ -8,6 +8,7 @@
           uv
           rustc
           cargo
+          clippy
           maturin
         ];
 
@@ -28,7 +29,7 @@
           export PATH="$VIRTUAL_ENV/bin:$PATH"
 
           maturin develop --manifest-path quarry-parse/Cargo.toml --release --quiet
-          maturin develop --manifest-path quarry-csr/Cargo.toml --release --quiet
+          maturin develop --manifest-path quarry-graph/Cargo.toml --release --quiet
         '';
       };
     };

@@ -16,7 +16,6 @@ dependencies = [
     "pydantic-settings",
     "httpx",
     "lxml",
-    "rustworkx",
     "peft",
     "sentence-transformers",
     "torch",

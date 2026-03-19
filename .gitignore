@@ -4,7 +4,9 @@ result-*
 .venv/
 __pycache__/
 *.pyc
-quarry-csr/target/
+quarry-graph/target/
 quarry-parse/target/
 .tmp_dagster_home_*/
 .dagster_home/
+target/
+dump.rdb
