@@ -10,7 +10,7 @@ use std::collections::HashMap;
 /// Reconstruct a single abstract from its JSON inverted-index string.
 ///
 /// Returns empty string on parse failure or empty input.
-fn reconstruct_one(json_str: &str) -> String {
+pub fn reconstruct_one(json_str: &str) -> String {
     let map: HashMap<&str, Vec<usize>> = match sonic_rs::from_str(json_str) {
         Ok(m) => m,
         Err(_) => return String::new(),
