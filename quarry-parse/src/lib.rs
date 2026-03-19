@@ -1,4 +1,7 @@
+mod abstract_recon;
 mod arrow;
+mod mesh;
+mod normalize;
 mod xml;
 
 use std::path::Path;
@@ -117,9 +120,44 @@ fn parse_pubmed_files(py: Python<'_>, paths: Vec<String>) -> PyResult<PyObject> 
     Ok(dict.into())
 }
 
+/// Batch reconstruct OpenAlex abstract_inverted_index JSON → plaintext.
+///
+/// Input: list of JSON strings like '{"word": [0, 2], "other": [1]}'
+/// Output: list of plaintext strings
+#[pyfunction]
+fn reconstruct_abstracts(jsons: Vec<String>) -> Vec<String> {
+    abstract_recon::reconstruct_abstracts(jsons)
+}
+
+/// Batch strip HTML tags + collapse whitespace.
+///
+/// Input: list of raw text strings (may contain HTML)
+/// Output: list of normalized plaintext strings
+#[pyfunction]
+fn normalize_texts(texts: Vec<String>) -> Vec<String> {
+    normalize::normalize_texts(texts)
+}
+
+/// Parse MeSH descriptor XML → Arrow RecordBatch.
+///
+/// Returns a RecordBatch with columns: descriptor_ui, descriptor_name, tree_number.
+#[pyfunction]
+fn parse_mesh_xml(py: Python<'_>, path: &str) -> PyResult<PyObject> {
+    let t0 = Instant::now();
+    let batch = mesh::parse_mesh_xml(Path::new(path))
+        .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+    let num_rows = batch.num_rows();
+    let elapsed = t0.elapsed().as_secs_f64();
+    eprintln!("quarry_parse: MeSH {path} → {num_rows} entries in {elapsed:.1}s");
+    PyRecordBatch::new(batch).to_pyarrow(py)
+}
+
 #[pymodule]
 fn quarry_parse(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(parse_pubmed_file, m)?)?;
     m.add_function(wrap_pyfunction!(parse_pubmed_files, m)?)?;
+    m.add_function(wrap_pyfunction!(reconstruct_abstracts, m)?)?;
+    m.add_function(wrap_pyfunction!(normalize_texts, m)?)?;
+    m.add_function(wrap_pyfunction!(parse_mesh_xml, m)?)?;
     Ok(())
 }
