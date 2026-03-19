@@ -14,10 +14,10 @@ import lancedb
 import numpy as np
 from lancedb.rerankers import RRFReranker
 
-# LanceDB table schema (pyarrow) — pmid-based
+# LanceDB table schema (pyarrow) — work_id-based (OpenAlex)
 SCHEMA = pa.schema(
     [
-        pa.field("pmid", pa.string()),
+        pa.field("work_id", pa.string()),
         pa.field("content_hash", pa.binary(32)),  # blake3(title + abstract)
         pa.field("title", pa.string()),
         pa.field("abstract", pa.string()),
@@ -48,29 +48,29 @@ class LanceStore:
         self.table.add(data)
 
     def upsert(self, data: list[dict] | pa.Table):
-        """Insert or update rows by pmid."""
+        """Insert or update rows by work_id."""
         self.table.merge_insert(
-            "pmid"
+            "work_id"
         ).when_matched_update_all().when_not_matched_insert_all().execute(data)
 
-    def delete_pmids(self, pmids: list[str]):
-        """Delete rows by PMID list (for soft-deleted papers)."""
-        if not pmids:
+    def delete_work_ids(self, work_ids: list[str]):
+        """Delete rows by work_id list."""
+        if not work_ids:
             return
-        id_list = ", ".join(f"'{p}'" for p in pmids)
-        self.table.delete(f"pmid IN ({id_list})")
+        id_list = ", ".join(f"'{w}'" for w in work_ids)
+        self.table.delete(f"work_id IN ({id_list})")
 
     def existing_hashes(self, ids: list[str]) -> dict[str, bytes]:
         """Get content_hash for existing IDs (for blake3 cache check)."""
         id_list = ", ".join(f"'{i}'" for i in ids)
         result = (
             self.table.search()
-            .where(f"pmid IN ({id_list})")
-            .select(["pmid", "content_hash"])
+            .where(f"work_id IN ({id_list})")
+            .select(["work_id", "content_hash"])
             .limit(len(ids))
             .to_list()
         )
-        return {r["pmid"]: bytes(r["content_hash"]) for r in result}
+        return {r["work_id"]: bytes(r["content_hash"]) for r in result}
 
     def create_fts_index(self):
         """Build BM25 full-text index on title and abstract."""

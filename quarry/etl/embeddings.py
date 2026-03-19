@@ -35,7 +35,7 @@ def content_hash(title: str, abstract: str) -> bytes:
     return blake3.blake3(f"{title}\n{abstract}".encode()).digest()
 
 
-def run(batch_size: int = 5000, limit: int | None = None, start_pmid: int = 0):
+def run(batch_size: int = 5000, limit: int | None = None, start_work_id: str = ""):
     db = DuckDBStore()
     lance = LanceStore(settings.lancedb_uri)
 
@@ -50,30 +50,31 @@ def run(batch_size: int = 5000, limit: int | None = None, start_pmid: int = 0):
     total_encoded = 0
     total_skipped = 0
     batch_num = 0
-    cursor_pmid = start_pmid
+    cursor = start_work_id
 
     while True:
-        # Keyset pagination: WHERE pmid > cursor avoids full-table OFFSET scan
-        papers = db.conn.execute(
-            "SELECT pmid, title, abstract FROM papers "
-            "WHERE pmid > ? AND abstract != '' AND title != '' AND NOT is_deleted "
-            "ORDER BY pmid LIMIT ?",
-            [cursor_pmid, batch_size],
+        # Keyset pagination on work_id (T1+T2 only, with abstract)
+        works = db.conn.execute(
+            "SELECT work_id, title, abstract FROM works "
+            "WHERE work_id > ? AND tier IN ('t1', 't2') "
+            "AND abstract IS NOT NULL AND abstract != '' AND title != '' "
+            "ORDER BY work_id LIMIT ?",
+            [cursor, batch_size],
         ).fetchall()
 
-        if not papers:
+        if not works:
             break
 
-        # Advance cursor to last pmid in this batch
-        cursor_pmid = papers[-1][0]
-        papers = [{"pmid": str(r[0]), "title": r[1], "abstract": r[2]} for r in papers]
+        # Advance cursor to last work_id in this batch
+        cursor = works[-1][0]
+        works = [{"work_id": r[0], "title": r[1], "abstract": r[2]} for r in works]
 
         # Normalize and compute blake3 hashes
-        for p in papers:
-            p["title"] = normalize_text(p["title"])
-            p["abstract"] = normalize_text(p["abstract"])
+        for w in works:
+            w["title"] = normalize_text(w["title"])
+            w["abstract"] = normalize_text(w["abstract"])
 
-        hashes = {p["pmid"]: content_hash(p["title"], p["abstract"]) for p in papers}
+        hashes = {w["work_id"]: content_hash(w["title"], w["abstract"]) for w in works}
 
         # Check existing hashes in LanceDB
         ids = list(hashes.keys())
@@ -82,18 +83,20 @@ def run(batch_size: int = 5000, limit: int | None = None, start_pmid: int = 0):
         except Exception:
             existing = {}
 
-        # Filter to only new/changed papers
-        to_encode = [p for p in papers if hashes[p["pmid"]] != existing.get(p["pmid"])]
+        # Filter to only new/changed works
+        to_encode = [
+            w for w in works if hashes[w["work_id"]] != existing.get(w["work_id"])
+        ]
 
         if not to_encode:
-            total_skipped += len(papers)
+            total_skipped += len(works)
             batch_num += 1
             if limit and (batch_num * batch_size) >= limit:
                 break
             continue
 
         # Encode
-        texts = [f"{p['title']}. {p['abstract']}" for p in to_encode]
+        texts = [f"{w['title']}. {w['abstract']}" for w in to_encode]
         t0 = time.time()
         vec_ret = encoder.encode_passages(texts)
         vec_clust = encoder.encode_clustering(texts)
@@ -101,13 +104,13 @@ def run(batch_size: int = 5000, limit: int | None = None, start_pmid: int = 0):
 
         # Build rows for LanceDB upsert
         rows = []
-        for i, p in enumerate(to_encode):
+        for i, w in enumerate(to_encode):
             rows.append(
                 {
-                    "pmid": p["pmid"],
-                    "content_hash": hashes[p["pmid"]],
-                    "title": p["title"],
-                    "abstract": p["abstract"],
+                    "work_id": w["work_id"],
+                    "content_hash": hashes[w["work_id"]],
+                    "title": w["title"],
+                    "abstract": w["abstract"],
                     "vec_retrieval": vec_ret[i].tolist(),
                     "vec_cluster": vec_clust[i].tolist(),
                 }
@@ -116,13 +119,13 @@ def run(batch_size: int = 5000, limit: int | None = None, start_pmid: int = 0):
         lance.upsert(rows)
 
         total_encoded += len(to_encode)
-        total_skipped += len(papers) - len(to_encode)
+        total_skipped += len(works) - len(to_encode)
         batch_num += 1
         throughput = len(texts) / elapsed if elapsed > 0 else 0
 
         print(
             f"  batch {batch_num}: encoded={len(to_encode)}, "
-            f"skipped={len(papers) - len(to_encode)}, "
+            f"skipped={len(works) - len(to_encode)}, "
             f"{throughput:.0f} vec/s, {elapsed:.1f}s"
         )
 

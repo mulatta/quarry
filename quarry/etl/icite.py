@@ -1,8 +1,6 @@
-"""iCite Open Citation Collection → CSR mmap build + papers metrics UPDATE.
+"""iCite metrics UPDATE for papers and works tables.
 
-Two data files from figshare:
-  1. open_citation_collection.csv (citing_pmid, cited_pmid) → CSR mmap
-  2. icite_metadata.csv → papers table bulk UPDATE (rcr, apt, etc.)
+icite_metadata.csv → papers/works table bulk UPDATE (rcr, apt, etc.)
 """
 
 import csv
@@ -11,22 +9,7 @@ from pathlib import Path
 
 import pyarrow as pa
 
-from quarry.config import settings
 from quarry.store.duckdb import DuckDBStore
-
-
-def build_csr_from_csv(
-    csv_path: Path,
-    csr_dir: Path | None = None,
-) -> dict:
-    """Build CSR mmap files from iCite open_citation_collection.csv.
-
-    Delegates to quarry_graph Rust extension (rayon parallel, ~31s for 805M edges).
-    """
-    import quarry_graph
-
-    csr_dir = csr_dir or settings.csr_dir
-    return quarry_graph.build_from_csv(str(csv_path), str(csr_dir))
 
 
 def update_metrics(
