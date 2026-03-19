@@ -8,6 +8,7 @@ DO NOT use `from __future__ import annotations` here — Dagster inspects types 
 """
 
 import pyarrow as pa
+import quarry_parse
 from dagster import (
     AssetExecutionContext,
     AutomationCondition,
@@ -41,8 +42,6 @@ _EAGER_ON_VERSION_CHANGE = AutomationCondition.eager().replace(
 def mesh_stage(
     context: AssetExecutionContext,
 ) -> MaterializeResult:
-    from quarry.etl.mesh import parse_mesh_descriptors
-
     staging = settings.staging_dir / "mesh"
     clear(staging)
 
@@ -53,19 +52,12 @@ def mesh_stage(
 
     xml_path = xml_files[-1]
     context.log.info(f"Parsing MeSH from {xml_path}")
-    rows = parse_mesh_descriptors(xml_path)
 
-    table = pa.table(
-        {
-            "descriptor_ui": pa.array(
-                [r["descriptor_ui"] for r in rows], type=pa.string()
-            ),
-            "descriptor_name": pa.array(
-                [r["descriptor_name"] for r in rows], type=pa.string()
-            ),
-            "tree_number": pa.array([r["tree_number"] for r in rows], type=pa.string()),
-        }
-    )
+    # Rust quick-xml parser → Arrow RecordBatch directly
+    batch = quarry_parse.parse_mesh_xml(str(xml_path))
+    table = pa.Table.from_batches([batch])
     write_tables(staging, {"mesh_tree": table})
 
-    return MaterializeResult(metadata={"tree_entries": MetadataValue.int(len(rows))})
+    return MaterializeResult(
+        metadata={"tree_entries": MetadataValue.int(table.num_rows)}
+    )

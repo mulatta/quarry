@@ -4,30 +4,15 @@ Reads papers in batches from DuckDB, skips unchanged (blake3 match), encodes
 new/modified papers with jina-v5 nano, upserts to LanceDB.
 """
 
-import re
 import time
 
 import blake3
+import quarry_parse
 
 from quarry.config import settings
 from quarry.embed.jina import JinaEncoder
 from quarry.store.duckdb import DuckDBStore
 from quarry.store.lance import LanceStore
-
-# Strip HTML tags while preserving math inequalities (< 0.05, > 18, etc.)
-_HTML_TAG = re.compile(
-    r"</?\w[\w.-]*"
-    r'(?:\s+\w[\w.-]*(?:\s*=\s*(?:"[^"]*"|\'[^\']*\'|[^\s>]*))?)*'
-    r"\s*/?>"
-)
-_MULTI_SP = re.compile(r"\s+")
-
-
-def normalize_text(text: str) -> str:
-    """Strip HTML tags, collapse whitespace."""
-    text = _HTML_TAG.sub(" ", text)
-    text = _MULTI_SP.sub(" ", text)
-    return text.strip()
 
 
 def content_hash(title: str, abstract: str) -> bytes:
@@ -69,10 +54,12 @@ def run(batch_size: int = 5000, limit: int | None = None, start_work_id: str = "
         cursor = works[-1][0]
         works = [{"work_id": r[0], "title": r[1], "abstract": r[2]} for r in works]
 
-        # Normalize and compute blake3 hashes
-        for w in works:
-            w["title"] = normalize_text(w["title"])
-            w["abstract"] = normalize_text(w["abstract"])
+        # Batch normalize via Rust (regex + rayon parallel)
+        titles = quarry_parse.normalize_texts([w["title"] for w in works])
+        abstracts = quarry_parse.normalize_texts([w["abstract"] for w in works])
+        for w, t, a in zip(works, titles, abstracts):
+            w["title"] = t
+            w["abstract"] = a
 
         hashes = {w["work_id"]: content_hash(w["title"], w["abstract"]) for w in works}
 

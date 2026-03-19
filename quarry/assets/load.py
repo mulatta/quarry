@@ -340,11 +340,8 @@ def oa_snapshot_load(
 ) -> MaterializeResult:
     """DuckDB httpfs → S3 glob → works + child tables.
 
-    ELT pattern: raw load → SQL transform → Python abstract post-processing.
+    ELT pattern: raw load → SQL transform → Rust abstract post-processing.
     """
-    import json
-    from quarry.etl.openalex import reconstruct_abstract
-
     db = duckdb.store
     conn = db.conn
     stats: dict[str, int] = {}
@@ -558,7 +555,7 @@ def oa_snapshot_load(
 
     # Abstract reconstruction (T1+T2 only, Python post-processing)
     context.log.info("Reconstructing abstracts (T1+T2)")
-    n_abstracts = _reconstruct_abstracts(conn, context, reconstruct_abstract, json)
+    n_abstracts = _reconstruct_abstracts(conn, context)
     stats["abstracts_reconstructed"] = n_abstracts
 
     # Drop temp table
@@ -590,10 +587,15 @@ def oa_snapshot_load(
     )
 
 
-def _reconstruct_abstracts(conn, context, reconstruct_fn, json_mod) -> int:
-    """Reconstruct abstracts from abstract_inverted_index for T1+T2 works."""
+def _reconstruct_abstracts(conn, context) -> int:
+    """Reconstruct abstracts from abstract_inverted_index for T1+T2 works.
+
+    Uses Rust quarry_parse.reconstruct_abstracts() for batch processing
+    (sonic-rs SIMD JSON + rayon parallel).
+    """
     cursor = ""
     total = 0
+    batch_size = 50000
     while True:
         rows = conn.execute(
             """
@@ -603,29 +605,30 @@ def _reconstruct_abstracts(conn, context, reconstruct_fn, json_mod) -> int:
             WHERE w.tier IN ('t1', 't2')
               AND r.abstract_inverted_index IS NOT NULL
               AND r.id > ?
-            ORDER BY r.id LIMIT 10000
+            ORDER BY r.id LIMIT ?
         """,
-            [cursor],
+            [cursor, batch_size],
         ).fetchall()
         if not rows:
             break
-        updates = []
+
+        work_ids = []
+        jsons = []
         for work_url, inv_idx_str in rows:
-            if not inv_idx_str:
-                continue
-            try:
-                inv_idx = json_mod.loads(inv_idx_str)
-                abstract = reconstruct_fn(inv_idx)
-                if abstract:
-                    work_id = work_url.replace("https://openalex.org/", "")
-                    updates.append((abstract, work_id))
-            except Exception:
-                continue
+            if inv_idx_str:
+                work_ids.append(work_url.replace("https://openalex.org/", ""))
+                jsons.append(inv_idx_str)
+
+        # Rust batch: sonic-rs SIMD parse + rayon parallel reconstruct
+        abstracts = quarry_parse.reconstruct_abstracts(jsons)
+
+        updates = [(ab, wid) for ab, wid in zip(abstracts, work_ids) if ab]
         if updates:
             conn.executemany("UPDATE works SET abstract = ? WHERE work_id = ?", updates)
+
         cursor = rows[-1][0]
         total += len(updates)
-        if total % 100000 < 10000:
+        if total % 100000 < batch_size:
             context.log.info(f"  Abstracts: {total:,} reconstructed")
     return total
 
