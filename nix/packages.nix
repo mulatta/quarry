@@ -3,7 +3,7 @@
     { pkgs, ... }:
     let
       python = pkgs.python313;
-      inherit (pkgs) rustPlatform;
+      inherit (pkgs) rustPlatform lib;
 
       mkMaturinPackage =
         {
@@ -39,6 +39,27 @@
           pname = "quarry-graph";
           src = ../quarry-graph;
           lockFile = ../quarry-graph/Cargo.lock;
+        };
+
+        quarry-build = rustPlatform.buildRustPackage {
+          pname = "quarry-build";
+          version = "0.1.0";
+
+          # Include both crates so path dependency resolves
+          src = lib.fileset.toSource {
+            root = ../.;
+            fileset = lib.fileset.unions [
+              ../quarry-build
+              ../quarry-parse
+            ];
+          };
+
+          cargoRoot = "quarry-build";
+          cargoLock.lockFile = ../quarry-build/Cargo.lock;
+
+          buildAndTestSubdir = "quarry-build";
+
+          doCheck = false;
         };
       };
     };

@@ -1,0 +1,29 @@
+[package]
+name = "quarry-build"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "quarry-build"
+path = "src/main.rs"
+
+[lib]
+name = "quarry_build"
+path = "src/lib.rs"
+
+[dependencies]
+quarry-parse = { path = "../quarry-parse" }
+
+arrow = "55"
+parquet = { version = "55", features = ["zstd"] }
+rayon = "1.10"
+clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1
+opt-level = 3
