@@ -48,6 +48,15 @@ class Settings(BaseSettings):
     # iCite figshare collection ID (stable, auto-discovers latest monthly snapshot)
     icite_figshare_collection: int = 4586573
 
+    # OpenAlex
+    oa_s3_prefix: str = "s3://openalex/data/works"
+    oa_t2_domains: set[str] = {
+        "Health Sciences",
+        "Life Sciences",
+        "Physical Sciences",
+        "Engineering",
+    }
+
     # Batch sizes
     duckdb_batch_size: int = 10_000
 

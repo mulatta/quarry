@@ -109,6 +109,85 @@ CREATE TABLE IF NOT EXISTS preprints (
 );
 """
 
+DDL_V2 = """
+-- ── v2: OpenAlex-primary tables ──
+
+CREATE TABLE IF NOT EXISTS works (
+    work_id        VARCHAR PRIMARY KEY,
+    work_id_int    BIGINT NOT NULL,
+    tier           VARCHAR NOT NULL,
+    pmid           INTEGER,
+    doi            VARCHAR,
+    title          VARCHAR NOT NULL,
+    abstract       VARCHAR,
+    pub_year       SMALLINT,
+    pub_date       DATE,
+    type           VARCHAR,
+    cited_by_count INTEGER,
+    host_venue     VARCHAR,
+    oa_status      VARCHAR,
+    oa_url         VARCHAR,
+    rcr            FLOAT,
+    nih_percentile FLOAT,
+    apt            FLOAT,
+    is_clinical    BOOLEAN,
+    is_retracted   BOOLEAN DEFAULT FALSE,
+    updated_date   DATE
+);
+
+CREATE TABLE IF NOT EXISTS work_authors (
+    work_id          VARCHAR NOT NULL,
+    author_position  SMALLINT,
+    display_name     VARCHAR,
+    orcid            VARCHAR,
+    institution_name VARCHAR,
+    institution_ror  VARCHAR,
+    raw_affiliation  VARCHAR
+);
+
+CREATE TABLE IF NOT EXISTS work_topics (
+    work_id    VARCHAR NOT NULL,
+    topic_id   VARCHAR NOT NULL,
+    topic_name VARCHAR,
+    subfield   VARCHAR,
+    field      VARCHAR,
+    domain     VARCHAR,
+    score      FLOAT
+);
+
+CREATE TABLE IF NOT EXISTS work_mesh (
+    work_id         VARCHAR NOT NULL,
+    descriptor_ui   VARCHAR NOT NULL,
+    descriptor_name VARCHAR NOT NULL,
+    qualifier_ui    VARCHAR,
+    qualifier_name  VARCHAR,
+    is_major_topic  BOOLEAN DEFAULT FALSE
+);
+
+CREATE TABLE IF NOT EXISTS work_citations (
+    citing_work_id VARCHAR NOT NULL,
+    cited_work_id  VARCHAR NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS id_crosswalk (
+    work_id VARCHAR PRIMARY KEY,
+    pmid    INTEGER NOT NULL
+);
+"""
+
+DDL_V2_INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_works_pmid ON works(pmid);
+CREATE INDEX IF NOT EXISTS idx_works_tier ON works(tier);
+CREATE INDEX IF NOT EXISTS idx_works_pub_year ON works(pub_year);
+CREATE INDEX IF NOT EXISTS idx_work_authors_wid ON work_authors(work_id);
+CREATE INDEX IF NOT EXISTS idx_work_topics_wid ON work_topics(work_id);
+CREATE INDEX IF NOT EXISTS idx_work_mesh_wid ON work_mesh(work_id);
+CREATE INDEX IF NOT EXISTS idx_work_mesh_desc ON work_mesh(descriptor_ui);
+CREATE INDEX IF NOT EXISTS idx_work_cit_citing ON work_citations(citing_work_id);
+CREATE INDEX IF NOT EXISTS idx_work_cit_cited ON work_citations(cited_work_id);
+CREATE INDEX IF NOT EXISTS idx_crosswalk_pmid ON id_crosswalk(pmid);
+"""
+
 
 class DuckDBStore:
     """DuckDB embedded store for PubMed metadata."""
@@ -130,13 +209,14 @@ class DuckDBStore:
             self._conn = None
 
     def init_schema(self):
-        """Create all tables if they don't exist."""
+        """Create all tables if they don't exist (v1 + v2)."""
         self.conn.execute("BEGIN TRANSACTION")
         try:
-            for stmt in DDL.split(";"):
-                stmt = stmt.strip()
-                if stmt:
-                    self.conn.execute(stmt)
+            for ddl in (DDL, DDL_V2, DDL_V2_INDEXES):
+                for stmt in ddl.split(";"):
+                    stmt = stmt.strip()
+                    if stmt:
+                        self.conn.execute(stmt)
             self.conn.execute("COMMIT")
         except Exception:
             self.conn.execute("ROLLBACK")
@@ -550,3 +630,50 @@ class DuckDBStore:
         )
         cols = [d[0] for d in result.description]
         return [dict(zip(cols, row)) for row in result.fetchall()]
+
+    # -- v2 (OpenAlex) read queries --
+
+    def get_work(self, work_id: str) -> dict | None:
+        """Get a single work by OpenAlex work_id."""
+        result = self.conn.execute(
+            "SELECT * FROM works WHERE work_id = ?", [work_id]
+        ).fetchone()
+        if not result:
+            return None
+        cols = [d[0] for d in self.conn.description]
+        return dict(zip(cols, result))
+
+    def get_works(self, work_ids: list[str]) -> list[dict]:
+        """Get multiple works by work_id list."""
+        if not work_ids:
+            return []
+        result = self.conn.execute(
+            "SELECT * FROM works WHERE work_id IN (SELECT unnest(?))",
+            [work_ids],
+        )
+        cols = [d[0] for d in result.description]
+        return [dict(zip(cols, row)) for row in result.fetchall()]
+
+    def get_work_by_pmid(self, pmid: int) -> dict | None:
+        """Get a single work by PMID (via works table)."""
+        result = self.conn.execute(
+            "SELECT * FROM works WHERE pmid = ?", [pmid]
+        ).fetchone()
+        if not result:
+            return None
+        cols = [d[0] for d in self.conn.description]
+        return dict(zip(cols, result))
+
+    def resolve_pmid_to_work_id(self, pmid: int) -> str | None:
+        """Resolve PMID → work_id via id_crosswalk."""
+        row = self.conn.execute(
+            "SELECT work_id FROM id_crosswalk WHERE pmid = ?", [pmid]
+        ).fetchone()
+        return row[0] if row else None
+
+    def resolve_work_id_to_pmid(self, work_id: str) -> int | None:
+        """Resolve work_id → PMID via id_crosswalk."""
+        row = self.conn.execute(
+            "SELECT pmid FROM id_crosswalk WHERE work_id = ?", [work_id]
+        ).fetchone()
+        return row[0] if row else None
