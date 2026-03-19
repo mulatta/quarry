@@ -11,8 +11,8 @@ use crate::graph::Graph;
 /// Find papers bibliographically coupled with `pmid`, returning
 /// (pmid, shared_count) where shared_count >= min_shared, sorted descending.
 /// limit=0 for unlimited.
-pub fn compute(graph: &Graph, pmid: i32, min_shared: usize, limit: usize) -> Vec<(i32, usize)> {
-    let Some(idx) = graph.resolve(pmid) else {
+pub fn compute(graph: &Graph, id: i64, min_shared: usize, limit: usize) -> Vec<(i64, usize)> {
+    let Some(idx) = graph.resolve(id) else {
         return vec![];
     };
 
@@ -27,10 +27,10 @@ pub fn compute(graph: &Graph, pmid: i32, min_shared: usize, limit: usize) -> Vec
         }
     }
 
-    let mut result: Vec<(i32, usize)> = coupled
+    let mut result: Vec<(i64, usize)> = coupled
         .into_iter()
         .filter(|&(_, count)| count >= min_shared)
-        .map(|(idx, count)| (graph.pmid_of(idx), count))
+        .map(|(idx, count)| (graph.id_of(idx), count))
         .collect();
     result.sort_unstable_by(|a, b| b.1.cmp(&a.1));
     if limit > 0 {

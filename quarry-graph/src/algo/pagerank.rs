@@ -7,12 +7,12 @@ use rayon::prelude::*;
 
 use crate::graph::Graph;
 
-fn f64_cmp_desc(a: &(i32, f64), b: &(i32, f64)) -> std::cmp::Ordering {
+fn f64_cmp_desc(a: &(i64, f64), b: &(i64, f64)) -> std::cmp::Ordering {
     b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
 }
 
 /// Full-graph PageRank. Returns all (pmid, score) sorted by score descending.
-pub fn compute(graph: &Graph, alpha: f64, max_iter: usize, tol: f64) -> Vec<(i32, f64)> {
+pub fn compute(graph: &Graph, alpha: f64, max_iter: usize, tol: f64) -> Vec<(i64, f64)> {
     let n = graph.node_count();
     if n == 0 {
         return vec![];
@@ -70,10 +70,10 @@ pub fn compute(graph: &Graph, alpha: f64, max_iter: usize, tol: f64) -> Vec<(i32
         }
     }
 
-    let mut result: Vec<(i32, f64)> = rank
+    let mut result: Vec<(i64, f64)> = rank
         .into_iter()
         .enumerate()
-        .map(|(i, score)| (graph.pmid_of(i as u32), score))
+        .map(|(i, score)| (graph.id_of(i as u32), score))
         .collect();
     result.par_sort_unstable_by(f64_cmp_desc);
     result
@@ -82,15 +82,15 @@ pub fn compute(graph: &Graph, alpha: f64, max_iter: usize, tol: f64) -> Vec<(i32
 /// PageRank on an induced subgraph. All parameters exposed.
 pub fn subgraph(
     graph: &Graph,
-    pmids: &[i32],
+    ids: &[i64],
     alpha: f64,
     max_iter: usize,
     tol: f64,
-) -> Vec<(i32, f64)> {
+) -> Vec<(i64, f64)> {
     let mut idx_set = std::collections::HashSet::new();
     let mut local_nodes = Vec::new();
-    for &pmid in pmids {
-        if let Some(idx) = graph.resolve(pmid)
+    for &id in ids {
+        if let Some(idx) = graph.resolve(id)
             && idx_set.insert(idx)
         {
             local_nodes.push(idx);
@@ -153,10 +153,10 @@ pub fn subgraph(
         }
     }
 
-    let mut result: Vec<(i32, f64)> = local_nodes
+    let mut result: Vec<(i64, f64)> = local_nodes
         .iter()
         .zip(rank.iter())
-        .map(|(&gi, &score)| (graph.pmid_of(gi), score))
+        .map(|(&gi, &score)| (graph.id_of(gi), score))
         .collect();
     result.sort_unstable_by(f64_cmp_desc);
     result

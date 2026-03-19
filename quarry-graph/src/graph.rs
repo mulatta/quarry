@@ -1,6 +1,6 @@
 //! Graph PyClass: mmap-backed CSR with query methods.
 //!
-//! Replaces quarry/store/csr.py — all traversal in Rust.
+//! Node IDs are i64 (OpenAlex work_id_int). Internal indices are u32.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::File;
@@ -134,17 +134,17 @@ impl CsrArrays {
 pub struct Graph {
     fwd: CsrArrays,
     rev: CsrArrays,
-    /// node index → PMID
-    idx_to_pmid: Vec<i32>,
+    /// node index → external ID (i64)
+    idx_to_id: Vec<i64>,
     num_nodes: usize,
     num_edges: usize,
 }
 
 impl Graph {
-    /// Resolve PMID to node index via binary search on sorted idx_to_pmid.
-    pub(crate) fn resolve(&self, pmid: i32) -> Option<u32> {
-        self.idx_to_pmid
-            .binary_search(&pmid)
+    /// Resolve external ID to node index via binary search on sorted idx_to_id.
+    pub(crate) fn resolve(&self, id: i64) -> Option<u32> {
+        self.idx_to_id
+            .binary_search(&id)
             .ok()
             .map(|i| i as u32)
     }
@@ -185,8 +185,8 @@ impl Graph {
         self.num_nodes
     }
 
-    pub(crate) fn pmid_of(&self, idx: u32) -> i32 {
-        self.idx_to_pmid[idx as usize]
+    pub(crate) fn id_of(&self, idx: u32) -> i64 {
+        self.idx_to_id[idx as usize]
     }
 
     /// Pure-Rust constructor for tests.
@@ -201,16 +201,16 @@ impl Graph {
 
         let id_map_str =
             std::fs::read_to_string(graph_dir.join("id_map.bin")).map_err(|e| e.to_string())?;
-        let idx_to_pmid: Vec<i32> = id_map_str
+        let idx_to_id: Vec<i64> = id_map_str
             .lines()
             .filter(|l| !l.is_empty())
-            .map(|l| l.parse::<i32>().map_err(|e| e.to_string()))
+            .map(|l| l.parse::<i64>().map_err(|e| e.to_string()))
             .collect::<Result<Vec<_>, _>>()?;
 
-        if idx_to_pmid.len() != num_nodes {
+        if idx_to_id.len() != num_nodes {
             return Err(format!(
                 "id_map has {} entries but meta says {}",
-                idx_to_pmid.len(),
+                idx_to_id.len(),
                 num_nodes
             ));
         }
@@ -221,7 +221,7 @@ impl Graph {
         Ok(Self {
             fwd,
             rev,
-            idx_to_pmid,
+            idx_to_id,
             num_nodes,
             num_edges,
         })
@@ -249,19 +249,19 @@ impl Graph {
 
         let id_map_str = std::fs::read_to_string(dir.join("id_map.bin"))
             .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
-        let idx_to_pmid: Vec<i32> = id_map_str
+        let idx_to_id: Vec<i64> = id_map_str
             .lines()
             .filter(|l| !l.is_empty())
             .map(|l| {
-                l.parse::<i32>()
+                l.parse::<i64>()
                     .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
             })
             .collect::<PyResult<Vec<_>>>()?;
 
-        if idx_to_pmid.len() != num_nodes {
+        if idx_to_id.len() != num_nodes {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "id_map has {} entries but meta says {}",
-                idx_to_pmid.len(),
+                idx_to_id.len(),
                 num_nodes
             )));
         }
@@ -272,7 +272,7 @@ impl Graph {
         Ok(Self {
             fwd,
             rev,
-            idx_to_pmid,
+            idx_to_id,
             num_nodes,
             num_edges,
         })
@@ -290,30 +290,30 @@ impl Graph {
         self.num_edges
     }
 
-    /// Check if a PMID exists in the graph.
-    fn has_node(&self, pmid: i32) -> bool {
-        self.resolve(pmid).is_some()
+    /// Check if a node ID exists in the graph.
+    fn has_node(&self, id: i64) -> bool {
+        self.resolve(id).is_some()
     }
 
     // -- Query methods --
 
     /// Direct neighbors. direction: "forward" or "reverse".
-    fn neighbors(&self, pmid: i32, direction: &str) -> PyResult<Vec<i32>> {
+    fn neighbors(&self, id: i64, direction: &str) -> PyResult<Vec<i64>> {
         validate_direction(direction)?;
-        let Some(idx) = self.resolve(pmid) else {
+        let Some(idx) = self.resolve(id) else {
             return Ok(vec![]);
         };
         Ok(self
             .csr_validated(direction)
             .neighbors(idx)
             .iter()
-            .map(|&i| self.idx_to_pmid[i as usize])
+            .map(|&i| self.idx_to_id[i as usize])
             .collect())
     }
 
     /// (out_degree, in_degree).
-    fn degree(&self, pmid: i32) -> (usize, usize) {
-        let Some(idx) = self.resolve(pmid) else {
+    fn degree(&self, id: i64) -> (usize, usize) {
+        let Some(idx) = self.resolve(id) else {
             return (0, 0);
         };
         (self.fwd.degree(idx), self.rev.degree(idx))
@@ -323,13 +323,13 @@ impl Graph {
     fn k_hop(
         &self,
         py: Python<'_>,
-        pmid: i32,
+        id: i64,
         k: usize,
         direction: &str,
         max_nodes: usize,
-    ) -> PyResult<Vec<i32>> {
+    ) -> PyResult<Vec<i64>> {
         validate_direction(direction)?;
-        let Some(start) = self.resolve(pmid) else {
+        let Some(start) = self.resolve(id) else {
             return Ok(vec![]);
         };
 
@@ -354,7 +354,7 @@ impl Graph {
                                 if visited.len() >= max_nodes {
                                     return Ok(visited
                                         .iter()
-                                        .map(|&i| self.idx_to_pmid[i as usize])
+                                        .map(|&i| self.idx_to_id[i as usize])
                                         .collect());
                                 }
                             }
@@ -369,7 +369,7 @@ impl Graph {
 
             Ok(visited
                 .iter()
-                .map(|&i| self.idx_to_pmid[i as usize])
+                .map(|&i| self.idx_to_id[i as usize])
                 .collect())
         })
     }
@@ -378,10 +378,10 @@ impl Graph {
     fn shortest_path(
         &self,
         py: Python<'_>,
-        src: i32,
-        dst: i32,
+        src: i64,
+        dst: i64,
         max_depth: usize,
-    ) -> PyResult<Option<Vec<i32>>> {
+    ) -> PyResult<Option<Vec<i64>>> {
         let src_idx = match self.resolve(src) {
             Some(i) => i,
             None => return Ok(None),
@@ -464,47 +464,47 @@ impl Graph {
         alpha: f64,
         max_iter: usize,
         tol: f64,
-    ) -> PyResult<Vec<(i32, f64)>> {
+    ) -> PyResult<Vec<(i64, f64)>> {
         py.allow_threads(|| Ok(algo::pagerank::compute(self, alpha, max_iter, tol)))
     }
 
     /// Weakly connected components via atomic union-find.
-    fn wcc(&self, py: Python<'_>) -> PyResult<Vec<(i32, u32)>> {
+    fn wcc(&self, py: Python<'_>) -> PyResult<Vec<(i64, u32)>> {
         py.allow_threads(|| Ok(algo::wcc::compute(self)))
     }
 
     // -- Pattern queries --
 
-    /// Papers co-cited with pmid. limit=0 for unlimited.
+    /// Papers co-cited with id. limit=0 for unlimited.
     fn co_citation(
         &self,
         py: Python<'_>,
-        pmid: i32,
+        id: i64,
         min_shared: usize,
         limit: usize,
-    ) -> PyResult<Vec<(i32, usize)>> {
-        py.allow_threads(|| Ok(pattern::co_citation::compute(self, pmid, min_shared, limit)))
+    ) -> PyResult<Vec<(i64, usize)>> {
+        py.allow_threads(|| Ok(pattern::co_citation::compute(self, id, min_shared, limit)))
     }
 
-    /// Papers bibliographically coupled with pmid. limit=0 for unlimited.
+    /// Papers bibliographically coupled with id. limit=0 for unlimited.
     fn bibliographic_coupling(
         &self,
         py: Python<'_>,
-        pmid: i32,
+        id: i64,
         min_shared: usize,
         limit: usize,
-    ) -> PyResult<Vec<(i32, usize)>> {
-        py.allow_threads(|| Ok(pattern::bibcoupling::compute(self, pmid, min_shared, limit)))
+    ) -> PyResult<Vec<(i64, usize)>> {
+        py.allow_threads(|| Ok(pattern::bibcoupling::compute(self, id, min_shared, limit)))
     }
 
     /// Nodes on shortest paths between src and dst.
     fn bridge_nodes(
         &self,
         py: Python<'_>,
-        src: i32,
-        dst: i32,
+        src: i64,
+        dst: i64,
         max_depth: usize,
-    ) -> PyResult<Vec<i32>> {
+    ) -> PyResult<Vec<i64>> {
         py.allow_threads(|| Ok(pattern::bridge::compute(self, src, dst, max_depth)))
     }
 
@@ -514,44 +514,44 @@ impl Graph {
     fn subgraph_pagerank(
         &self,
         py: Python<'_>,
-        pmids: Vec<i32>,
+        ids: Vec<i64>,
         alpha: f64,
         max_iter: usize,
         tol: f64,
-    ) -> PyResult<Vec<(i32, f64)>> {
-        py.allow_threads(|| Ok(algo::pagerank::subgraph(self, &pmids, alpha, max_iter, tol)))
+    ) -> PyResult<Vec<(i64, f64)>> {
+        py.allow_threads(|| Ok(algo::pagerank::subgraph(self, &ids, alpha, max_iter, tol)))
     }
 
     /// Brandes betweenness centrality on induced subgraph.
     fn subgraph_betweenness(
         &self,
         py: Python<'_>,
-        pmids: Vec<i32>,
+        ids: Vec<i64>,
         normalized: bool,
-    ) -> PyResult<Vec<(i32, f64)>> {
-        py.allow_threads(|| Ok(algo::betweenness::compute(self, &pmids, normalized)))
+    ) -> PyResult<Vec<(i64, f64)>> {
+        py.allow_threads(|| Ok(algo::betweenness::compute(self, &ids, normalized)))
     }
 
     /// Weakly connected components of induced subgraph.
     fn subgraph_components(
         &self,
         py: Python<'_>,
-        pmids: Vec<i32>,
-    ) -> PyResult<Vec<Vec<i32>>> {
-        py.allow_threads(|| Ok(algo::wcc::subgraph_components(self, &pmids)))
+        ids: Vec<i64>,
+    ) -> PyResult<Vec<Vec<i64>>> {
+        py.allow_threads(|| Ok(algo::wcc::subgraph_components(self, &ids)))
     }
 
     /// Edges within the induced subgraph.
-    fn subgraph_edges(&self, py: Python<'_>, pmids: Vec<i32>) -> PyResult<Vec<(i32, i32)>> {
+    fn subgraph_edges(&self, py: Python<'_>, ids: Vec<i64>) -> PyResult<Vec<(i64, i64)>> {
         py.allow_threads(|| {
-            let set: HashSet<u32> = pmids.iter().filter_map(|&p| self.resolve(p)).collect();
+            let set: HashSet<u32> = ids.iter().filter_map(|&p| self.resolve(p)).collect();
             let mut edges = Vec::new();
             for &idx in &set {
                 for &nb in self.fwd.neighbors(idx) {
                     if set.contains(&nb) {
                         edges.push((
-                            self.idx_to_pmid[idx as usize],
-                            self.idx_to_pmid[nb as usize],
+                            self.idx_to_id[idx as usize],
+                            self.idx_to_id[nb as usize],
                         ));
                     }
                 }
@@ -568,7 +568,7 @@ impl Graph {
         rev_parent: &HashMap<u32, Option<u32>>,
         fwd_meet: u32,
         rev_meet: u32,
-    ) -> Vec<i32> {
+    ) -> Vec<i64> {
         let mut fwd_path = Vec::new();
         let mut node = Some(fwd_meet);
         while let Some(n) = node {
@@ -585,7 +585,7 @@ impl Graph {
 
         fwd_path
             .iter()
-            .map(|&i| self.idx_to_pmid[i as usize])
+            .map(|&i| self.idx_to_id[i as usize])
             .collect()
     }
 }
@@ -615,6 +615,24 @@ mod tests {
         Graph::open(&graph_dir).unwrap()
     }
 
+    /// Test graph with large i64 IDs (OpenAlex-scale)
+    fn test_graph_large_ids() -> Graph {
+        let dir = tempfile::tempdir().unwrap();
+        let csv_path = dir.path().join("large.csv");
+        {
+            use std::io::Write;
+            let mut f = std::fs::File::create(&csv_path).unwrap();
+            writeln!(f, "src,dst").unwrap();
+            writeln!(f, "2741809807,3141592653").unwrap();
+            writeln!(f, "2741809807,2718281828").unwrap();
+            writeln!(f, "3141592653,2718281828").unwrap();
+        }
+        let graph_dir = dir.path().join("graph");
+        crate::build::build_from_csv_raw(&csv_path, &graph_dir).unwrap();
+        std::mem::forget(dir);
+        Graph::open(&graph_dir).unwrap()
+    }
+
     // -- Properties --
 
     #[test]
@@ -631,6 +649,26 @@ mod tests {
         assert!(g.has_node(5));
         assert!(!g.has_node(0));
         assert!(!g.has_node(999));
+    }
+
+    #[test]
+    fn test_large_id_graph() {
+        let g = test_graph_large_ids();
+        assert_eq!(g.num_nodes, 3);
+        assert_eq!(g.num_edges, 3);
+        assert!(g.has_node(2741809807));
+        assert!(g.has_node(3141592653));
+        assert!(g.has_node(2718281828));
+        assert!(!g.has_node(1));
+    }
+
+    #[test]
+    fn test_large_id_neighbors() {
+        let g = test_graph_large_ids();
+        // 2741809807 → 3141592653, 2741809807 → 2718281828
+        let mut fwd = g.neighbors(2741809807, "forward").unwrap();
+        fwd.sort();
+        assert_eq!(fwd, vec![2718281828, 3141592653]);
     }
 
     // -- Query: neighbors --
@@ -654,7 +692,7 @@ mod tests {
     #[test]
     fn test_neighbors_missing_node() {
         let g = test_graph();
-        assert_eq!(g.neighbors(999, "forward").unwrap(), Vec::<i32>::new());
+        assert_eq!(g.neighbors(999, "forward").unwrap(), Vec::<i64>::new());
     }
 
     #[test]
@@ -714,7 +752,7 @@ mod tests {
     #[test]
     fn test_k_hop_missing_node() {
         let g = test_graph();
-        assert_eq!(g.k_hop_inner(999, 1, "forward", 100), Vec::<i32>::new());
+        assert_eq!(g.k_hop_inner(999, 1, "forward", 100), Vec::<i64>::new());
     }
 
     // -- Query: shortest_path --
@@ -754,7 +792,7 @@ mod tests {
         let g = test_graph();
         // Node 3 is cited by 1 and 2. Citer 1 also cites 2.
         let result = pattern::co_citation::compute(&g, 3, 1, 0);
-        assert!(result.iter().any(|&(pmid, _)| pmid == 2));
+        assert!(result.iter().any(|&(id, _)| id == 2));
     }
 
     #[test]
@@ -785,7 +823,7 @@ mod tests {
         let g = test_graph();
         // Node 1 cites 2,3. Node 2 cites 3. Both cite 3 → coupled with count 1.
         let result = pattern::bibcoupling::compute(&g, 1, 1, 0);
-        assert!(result.iter().any(|&(pmid, _)| pmid == 2));
+        assert!(result.iter().any(|&(id, _)| id == 2));
     }
 
     #[test]
@@ -893,8 +931,8 @@ mod tests {
 
     // -- Helpers for tests (avoid PyO3 `py` parameter) --
     impl Graph {
-        fn k_hop_inner(&self, pmid: i32, k: usize, direction: &str, max_nodes: usize) -> Vec<i32> {
-            let Some(start) = self.resolve(pmid) else {
+        fn k_hop_inner(&self, id: i64, k: usize, direction: &str, max_nodes: usize) -> Vec<i64> {
+            let Some(start) = self.resolve(id) else {
                 return vec![];
             };
             let directions: Vec<&str> = if direction == "both" {
@@ -915,7 +953,7 @@ mod tests {
                                 if visited.len() >= max_nodes {
                                     return visited
                                         .iter()
-                                        .map(|&i| self.idx_to_pmid[i as usize])
+                                        .map(|&i| self.idx_to_id[i as usize])
                                         .collect();
                                 }
                             }
@@ -929,11 +967,11 @@ mod tests {
             }
             visited
                 .iter()
-                .map(|&i| self.idx_to_pmid[i as usize])
+                .map(|&i| self.idx_to_id[i as usize])
                 .collect()
         }
 
-        fn shortest_path_inner(&self, src: i32, dst: i32, max_depth: usize) -> Option<Vec<i32>> {
+        fn shortest_path_inner(&self, src: i64, dst: i64, max_depth: usize) -> Option<Vec<i64>> {
             let src_idx = self.resolve(src)?;
             let dst_idx = self.resolve(dst)?;
             if src_idx == dst_idx {
@@ -990,15 +1028,15 @@ mod tests {
             None
         }
 
-        fn subgraph_edges_inner(&self, pmids: Vec<i32>) -> Vec<(i32, i32)> {
-            let set: HashSet<u32> = pmids.iter().filter_map(|&p| self.resolve(p)).collect();
+        fn subgraph_edges_inner(&self, ids: Vec<i64>) -> Vec<(i64, i64)> {
+            let set: HashSet<u32> = ids.iter().filter_map(|&p| self.resolve(p)).collect();
             let mut edges = Vec::new();
             for &idx in &set {
                 for &nb in self.fwd.neighbors(idx) {
                     if set.contains(&nb) {
                         edges.push((
-                            self.idx_to_pmid[idx as usize],
-                            self.idx_to_pmid[nb as usize],
+                            self.idx_to_id[idx as usize],
+                            self.idx_to_id[nb as usize],
                         ));
                     }
                 }

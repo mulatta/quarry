@@ -10,7 +10,7 @@ use rayon::prelude::*;
 use crate::graph::Graph;
 
 /// Full-graph WCC. Returns (pmid, component_id) for all nodes.
-pub fn compute(graph: &Graph) -> Vec<(i32, u32)> {
+pub fn compute(graph: &Graph) -> Vec<(i64, u32)> {
     let n = graph.node_count();
     if n == 0 {
         return vec![];
@@ -33,16 +33,16 @@ pub fn compute(graph: &Graph) -> Vec<(i32, u32)> {
 
     // Collect results with path-compressed root
     (0..n as u32)
-        .map(|i| (graph.pmid_of(i), find(&parent, i)))
+        .map(|i| (graph.id_of(i), find(&parent, i)))
         .collect()
 }
 
 /// WCC on an induced subgraph.
-pub fn subgraph_components(graph: &Graph, pmids: &[i32]) -> Vec<Vec<i32>> {
+pub fn subgraph_components(graph: &Graph, ids: &[i64]) -> Vec<Vec<i64>> {
     let mut idx_set = HashSet::new();
     let mut local_nodes = Vec::new();
-    for &pmid in pmids {
-        if let Some(idx) = graph.resolve(pmid)
+    for &id in ids {
+        if let Some(idx) = graph.resolve(id)
             && idx_set.insert(idx)
         {
             local_nodes.push(idx);
@@ -72,13 +72,13 @@ pub fn subgraph_components(graph: &Graph, pmids: &[i32]) -> Vec<Vec<i32>> {
     }
 
     // Group by component
-    let mut components: HashMap<usize, Vec<i32>> = HashMap::new();
+    let mut components: HashMap<usize, Vec<i64>> = HashMap::new();
     for (i, &node) in local_nodes.iter().enumerate() {
         let root = seq_find(&mut uf_parent, i);
         components
             .entry(root)
             .or_default()
-            .push(graph.pmid_of(node));
+            .push(graph.id_of(node));
     }
 
     components.into_values().collect()

@@ -8,7 +8,7 @@ use std::collections::{HashMap, VecDeque};
 use crate::graph::Graph;
 
 /// Find all nodes that lie on a shortest path between src and dst.
-pub fn compute(graph: &Graph, src: i32, dst: i32, max_depth: usize) -> Vec<i32> {
+pub fn compute(graph: &Graph, src: i64, dst: i64, max_depth: usize) -> Vec<i64> {
     let Some(src_idx) = graph.resolve(src) else {
         return vec![];
     };
@@ -32,12 +32,12 @@ pub fn compute(graph: &Graph, src: i32, dst: i32, max_depth: usize) -> Vec<i32> 
     let dist_to_dst = bfs_distances(graph, dst_idx, max_depth, "reverse");
 
     // Collect bridge nodes: dist_from_src[v] + dist_to_dst[v] == total_dist
-    let mut bridges: Vec<i32> = dist_from_src
+    let mut bridges: Vec<i64> = dist_from_src
         .iter()
         .filter_map(|(&v, &d_src)| {
             dist_to_dst.get(&v).and_then(|&d_dst| {
                 if d_src + d_dst == total_dist {
-                    Some(graph.pmid_of(v))
+                    Some(graph.id_of(v))
                 } else {
                     None
                 }

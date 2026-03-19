@@ -1,7 +1,8 @@
-//! CSV → CSR build: parallel parse + bitset PMID mapping + forward/reverse CSR.
+//! CSV → CSR build: parallel parse + HashMap ID mapping + forward/reverse CSR.
 //!
-//! Ported from quarry-csr with identical output format.
+//! Supports i64 node IDs (OpenAlex work_id_int, range ~10^10).
 
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::Path;
@@ -12,23 +13,23 @@ use pyo3::prelude::*;
 use rayon::prelude::*;
 
 #[inline]
-fn parse_line(line: &[u8]) -> Option<(i32, i32)> {
+fn parse_line(line: &[u8]) -> Option<(i64, i64)> {
     if line.is_empty() || !line[0].is_ascii_digit() {
         return None;
     }
-    let mut src: i32 = 0;
+    let mut src: i64 = 0;
     let mut i = 0;
     while i < line.len() && line[i].is_ascii_digit() {
-        src = src * 10 + (line[i] - b'0') as i32;
+        src = src * 10 + (line[i] - b'0') as i64;
         i += 1;
     }
     if i >= line.len() || line[i] != b',' {
         return None;
     }
     i += 1;
-    let mut dst: i32 = 0;
+    let mut dst: i64 = 0;
     while i < line.len() && line[i].is_ascii_digit() {
-        dst = dst * 10 + (line[i] - b'0') as i32;
+        dst = dst * 10 + (line[i] - b'0') as i64;
         i += 1;
     }
     Some((src, dst))
@@ -44,7 +45,7 @@ fn line_offsets(data: &[u8]) -> Vec<usize> {
     offsets
 }
 
-fn parse_chunk(data: &[u8], offsets: &[usize], start: usize, end: usize) -> (Vec<i32>, Vec<i32>) {
+fn parse_chunk(data: &[u8], offsets: &[usize], start: usize, end: usize) -> (Vec<i64>, Vec<i64>) {
     let cap = end - start;
     let mut srcs = Vec::with_capacity(cap);
     let mut dsts = Vec::with_capacity(cap);
@@ -139,8 +140,8 @@ fn is_leap(y: i32) -> bool {
     y % 4 == 0 && (y % 100 != 0 || y % 400 == 0)
 }
 
-/// Core build logic shared by PyO3 wrapper and test helper.
-/// Returns (num_nodes, num_edges, sorted_pmids).
+/// Core build logic. Uses HashMap for ID→index mapping (supports i64 IDs).
+/// Returns (num_nodes, num_edges).
 fn build_core(csv_path: &Path, graph_dir: &Path) -> Result<(usize, usize), String> {
     fs::create_dir_all(graph_dir).map_err(|e| e.to_string())?;
 
@@ -157,7 +158,7 @@ fn build_core(csv_path: &Path, graph_dir: &Path) -> Result<(usize, usize), Strin
     let chunk_size = 2_000_000;
     let num_chunks = num_lines.div_ceil(chunk_size);
 
-    let results: Vec<(Vec<i32>, Vec<i32>)> = (0..num_chunks)
+    let results: Vec<(Vec<i64>, Vec<i64>)> = (0..num_chunks)
         .into_par_iter()
         .map(|i| {
             let start = i * chunk_size;
@@ -167,8 +168,8 @@ fn build_core(csv_path: &Path, graph_dir: &Path) -> Result<(usize, usize), Strin
         .collect();
 
     let total_edges: usize = results.iter().map(|(s, _)| s.len()).sum();
-    let mut src_raw: Vec<i32> = Vec::with_capacity(total_edges);
-    let mut dst_raw: Vec<i32> = Vec::with_capacity(total_edges);
+    let mut src_raw: Vec<i64> = Vec::with_capacity(total_edges);
+    let mut dst_raw: Vec<i64> = Vec::with_capacity(total_edges);
     for (s, d) in results {
         src_raw.extend(s);
         dst_raw.extend(d);
@@ -176,58 +177,30 @@ fn build_core(csv_path: &Path, graph_dir: &Path) -> Result<(usize, usize), Strin
     drop(mmap);
     let num_edges = src_raw.len();
 
-    // Bitset PMID mapping
-    let max_pmid = *src_raw
+    // Pass 1: collect all unique IDs → sorted Vec<i64> → HashMap<i64, u32>
+    let mut id_set: HashMap<i64, ()> = HashMap::with_capacity(num_edges / 3);
+    for &id in &src_raw {
+        id_set.entry(id).or_insert(());
+    }
+    for &id in &dst_raw {
+        id_set.entry(id).or_insert(());
+    }
+    let mut sorted_ids: Vec<i64> = id_set.into_keys().collect();
+    sorted_ids.par_sort_unstable();
+    let num_nodes = sorted_ids.len();
+
+    let id_to_idx: HashMap<i64, u32> = sorted_ids
         .iter()
-        .max()
-        .unwrap_or(&0)
-        .max(dst_raw.iter().max().unwrap_or(&0)) as usize;
-    let bitset_words = (max_pmid + 64) / 64;
-    let mut bitset = vec![0u64; bitset_words + 1];
-    for &pmid in &src_raw {
-        bitset[pmid as usize / 64] |= 1u64 << (pmid as usize % 64);
-    }
-    for &pmid in &dst_raw {
-        bitset[pmid as usize / 64] |= 1u64 << (pmid as usize % 64);
-    }
-    let num_nodes: usize = bitset.iter().map(|w| w.count_ones() as usize).sum();
+        .enumerate()
+        .map(|(i, &id)| (id, i as u32))
+        .collect();
 
-    let mut sorted_pmids: Vec<i32> = Vec::with_capacity(num_nodes);
-    for (wi, &w) in bitset.iter().enumerate() {
-        if w == 0 {
-            continue;
-        }
-        let base = (wi * 64) as i32;
-        for bit in 0..64 {
-            if w & (1u64 << bit) != 0 {
-                sorted_pmids.push(base + bit);
-            }
-        }
-    }
-
-    // Rank lookup
-    let mut word_rank: Vec<u32> = Vec::with_capacity(bitset.len() + 1);
-    word_rank.push(0u32);
-    let mut cum = 0u32;
-    for &w in &bitset {
-        cum += w.count_ones();
-        word_rank.push(cum);
-    }
-
-    // Map PMIDs → node indices (i32 → u32, values are non-negative ranks)
-    let map_to_idx = |pmid: i32| -> u32 {
-        let p = pmid as usize;
-        let wi = p / 64;
-        let bi = p % 64;
-        let mask = (1u64 << bi) - 1;
-        word_rank[wi] + (bitset[wi] & mask).count_ones()
-    };
-    let src_idx: Vec<u32> = src_raw.par_iter().map(|&p| map_to_idx(p)).collect();
-    let dst_idx: Vec<u32> = dst_raw.par_iter().map(|&p| map_to_idx(p)).collect();
+    // Pass 2: map edges (i64, i64) → (u32, u32)
+    let src_idx: Vec<u32> = src_raw.par_iter().map(|&p| id_to_idx[&p]).collect();
+    let dst_idx: Vec<u32> = dst_raw.par_iter().map(|&p| id_to_idx[&p]).collect();
     drop(src_raw);
     drop(dst_raw);
-    drop(bitset);
-    drop(word_rank);
+    drop(id_to_idx);
 
     // Forward CSR
     let fwd_dir = graph_dir.join("forward");
@@ -243,13 +216,13 @@ fn build_core(csv_path: &Path, graph_dir: &Path) -> Result<(usize, usize), Strin
     write_bin(&rev_dir.join("indptr.bin"), &rev_indptr).map_err(|e| e.to_string())?;
     write_bin(&rev_dir.join("indices.bin"), &rev_indices).map_err(|e| e.to_string())?;
 
-    // id_map + meta
+    // id_map.bin: one i64 per line (text format, sorted, binary-search ready)
     {
         let mut w = BufWriter::new(
             File::create(graph_dir.join("id_map.bin")).map_err(|e| e.to_string())?,
         );
-        for &pmid in &sorted_pmids {
-            writeln!(w, "{}", pmid).map_err(|e| e.to_string())?;
+        for &id in &sorted_ids {
+            writeln!(w, "{}", id).map_err(|e| e.to_string())?;
         }
         w.flush().map_err(|e| e.to_string())?;
     }
@@ -332,6 +305,17 @@ mod tests {
         csv_path
     }
 
+    /// Large i64 IDs (simulating OpenAlex work_id_int ~10^10 range)
+    pub(crate) fn create_large_id_csv(dir: &Path) -> std::path::PathBuf {
+        let csv_path = dir.join("large.csv");
+        let mut f = File::create(&csv_path).unwrap();
+        writeln!(f, "src,dst").unwrap();
+        writeln!(f, "2741809807,3141592653").unwrap();
+        writeln!(f, "2741809807,2718281828").unwrap();
+        writeln!(f, "3141592653,2718281828").unwrap();
+        csv_path
+    }
+
     #[test]
     fn test_parse_line() {
         assert_eq!(parse_line(b"123,456"), Some((123, 456)));
@@ -339,6 +323,18 @@ mod tests {
         assert_eq!(parse_line(b""), None);
         assert_eq!(parse_line(b"123"), None); // no comma
         assert_eq!(parse_line(b",456"), None); // leading comma
+    }
+
+    #[test]
+    fn test_parse_line_large_ids() {
+        assert_eq!(
+            parse_line(b"2741809807,3141592653"),
+            Some((2741809807, 3141592653))
+        );
+        assert_eq!(
+            parse_line(b"10000000000,20000000000"),
+            Some((10000000000, 20000000000))
+        );
     }
 
     #[test]
@@ -363,6 +359,30 @@ mod tests {
         let meta: serde_json::Value = serde_json::from_str(&meta_str).unwrap();
         assert_eq!(meta["num_nodes"], 5);
         assert_eq!(meta["num_edges"], 5);
+    }
+
+    #[test]
+    fn test_build_large_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let csv_path = create_large_id_csv(dir.path());
+        let graph_dir = dir.path().join("graph");
+
+        let (num_nodes, num_edges) = build_from_csv_raw(&csv_path, &graph_dir).unwrap();
+        assert_eq!(num_nodes, 3);
+        assert_eq!(num_edges, 3);
+
+        // Verify id_map contains sorted large IDs
+        let id_map_str = std::fs::read_to_string(graph_dir.join("id_map.bin")).unwrap();
+        let ids: Vec<i64> = id_map_str
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|l| l.parse::<i64>().unwrap())
+            .collect();
+        assert_eq!(ids.len(), 3);
+        assert!(ids.windows(2).all(|w| w[0] < w[1]), "IDs must be sorted");
+        assert!(ids.contains(&2741809807));
+        assert!(ids.contains(&3141592653));
+        assert!(ids.contains(&2718281828));
     }
 
     #[test]

@@ -8,11 +8,11 @@ use crate::graph::Graph;
 
 /// Betweenness centrality on the induced subgraph of given PMIDs.
 /// If `normalized` is true, scores are divided by (n-1)(n-2) for directed graphs.
-pub fn compute(graph: &Graph, pmids: &[i32], normalized: bool) -> Vec<(i32, f64)> {
+pub fn compute(graph: &Graph, ids: &[i64], normalized: bool) -> Vec<(i64, f64)> {
     let mut idx_set = HashSet::new();
     let mut local_nodes = Vec::new();
-    for &pmid in pmids {
-        if let Some(idx) = graph.resolve(pmid)
+    for &id in ids {
+        if let Some(idx) = graph.resolve(id)
             && idx_set.insert(idx)
         {
             local_nodes.push(idx);
@@ -87,10 +87,10 @@ pub fn compute(graph: &Graph, pmids: &[i32], normalized: bool) -> Vec<(i32, f64)
         }
     }
 
-    let mut result: Vec<(i32, f64)> = local_nodes
+    let mut result: Vec<(i64, f64)> = local_nodes
         .iter()
         .zip(cb.iter())
-        .map(|(&gi, &score)| (graph.pmid_of(gi), score))
+        .map(|(&gi, &score)| (graph.id_of(gi), score))
         .collect();
     result.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     result
