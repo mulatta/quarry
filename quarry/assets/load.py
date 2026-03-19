@@ -299,20 +299,19 @@ def _load_updates_direct(conn, context) -> int:
 
             conn.execute("BEGIN TRANSACTION")
 
-            # DELETE existing rows, then INSERT (upsert pattern)
+            # Upsert papers (INSERT OR REPLACE handles both existing rows
+            # and duplicate PMIDs within the same batch)
             papers = result["papers"]
             if papers is not None and papers.num_rows > 0:
                 conn.register("_stg_papers", papers)
                 registered.append("_stg_papers")
                 conn.execute(
-                    "DELETE FROM papers WHERE pmid IN (SELECT pmid FROM _stg_papers)"
-                )
-                conn.execute(
-                    f"INSERT INTO papers ({_COLS_INSERT}) "
+                    f"INSERT OR REPLACE INTO papers ({_COLS_INSERT}) "
                     f"SELECT {_COLS_SELECT} FROM _stg_papers"
                 )
                 total += papers.num_rows
 
+            # Child tables: DELETE by pmid set from papers staging, then INSERT
             for table_name, columns in _CHILD_TABLES.items():
                 t = result.get(table_name)
                 if t is not None and t.num_rows > 0:
