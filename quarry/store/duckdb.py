@@ -212,6 +212,7 @@ class DuckDBStore:
         """Create all tables if they don't exist (v1 + v2)."""
         self.conn.execute("BEGIN TRANSACTION")
         try:
+            self._migrate_work_citations()
             for ddl in (DDL, DDL_V2, DDL_V2_INDEXES):
                 for stmt in ddl.split(";"):
                     stmt = stmt.strip()
@@ -221,6 +222,21 @@ class DuckDBStore:
         except Exception:
             self.conn.execute("ROLLBACK")
             raise
+
+    def _migrate_work_citations(self):
+        """Drop work_citations if it has the old VARCHAR schema (citing_work_id)."""
+        try:
+            cols = self.conn.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'work_citations'"
+            ).fetchall()
+        except Exception:
+            return
+        col_names = {r[0] for r in cols}
+        if "citing_work_id" in col_names:
+            self.conn.execute("DROP TABLE work_citations")
+            self.conn.execute("DROP INDEX IF EXISTS idx_work_cit_citing")
+            self.conn.execute("DROP INDEX IF EXISTS idx_work_cit_cited")
 
     # -- Bulk insert helpers --
 
