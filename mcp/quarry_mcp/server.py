@@ -2,7 +2,7 @@
 
 Tools:
   search_papers   — hybrid search (BM25 + ANN + reranker) + MeSH expansion
-  get_paper       — single paper detail by PMID or DOI
+  get_paper       — single paper detail by work_id, PMID, or DOI
   expand_citations — citation/cited-by N-hop expansion
   find_path       — citation chain between two papers
   similar_papers  — embedding similarity search
@@ -38,6 +38,25 @@ def _get_graph() -> quarry_graph.Graph:
     return _graph
 
 
+def _resolve_graph_id(
+    db: DuckDBStore,
+    work_id: str | None = None,
+    pmid: int | None = None,
+) -> int | None:
+    """Resolve work_id or pmid → work_id_int (CSR graph node ID)."""
+    if work_id:
+        row = db.conn.execute(
+            "SELECT work_id_int FROM works WHERE work_id = ?", [work_id]
+        ).fetchone()
+    elif pmid:
+        row = db.conn.execute(
+            "SELECT work_id_int FROM works WHERE pmid = ?", [pmid]
+        ).fetchone()
+    else:
+        return None
+    return row[0] if row else None
+
+
 @mcp.tool()
 def search_papers(
     query: str,
@@ -60,24 +79,36 @@ def search_papers(
 
 
 @mcp.tool()
-def get_paper(pmid: int | None = None, doi: str | None = None) -> dict | None:
-    """Get detailed paper metadata by PMID or DOI.
+def get_paper(
+    work_id: str | None = None,
+    pmid: int | None = None,
+    doi: str | None = None,
+) -> dict | None:
+    """Get detailed paper metadata by work_id, PMID, or DOI.
 
     Args:
+        work_id: OpenAlex work ID (e.g., "W2741809807")
         pmid: PubMed ID (integer)
-        doi: DOI string (alternative to pmid)
+        doi: DOI string
     """
     db = _get_db()
+    if work_id is not None:
+        return db.get_work(work_id)
     if pmid is not None:
-        return db.get_paper(pmid)
+        return db.get_work_by_pmid(pmid)
     if doi is not None:
-        return db.get_paper_by_doi(doi)
+        result = db.conn.execute("SELECT * FROM works WHERE doi = ?", [doi]).fetchone()
+        if not result:
+            return None
+        cols = [d[0] for d in db.conn.description]
+        return dict(zip(cols, result))
     return None
 
 
 @mcp.tool()
 def expand_citations(
-    pmid: int,
+    work_id: str | None = None,
+    pmid: int | None = None,
     direction: str = "both",
     hops: int = 1,
     max_nodes: int = 500,
@@ -86,115 +117,176 @@ def expand_citations(
     """Expand citation graph around a paper.
 
     Args:
-        pmid: Center paper PMID
+        work_id: OpenAlex work ID
+        pmid: PubMed ID (alternative)
         direction: "forward" (cites), "reverse" (cited by), or "both"
         hops: Number of hops (default 1)
         max_nodes: Maximum nodes to return
         enrich: Include paper metadata
     """
+    db = _get_db()
     graph = _get_graph()
-    neighbors = graph.k_hop(pmid, k=hops, direction=direction, max_nodes=max_nodes)
+
+    node_id = _resolve_graph_id(db, work_id=work_id, pmid=pmid)
+    if node_id is None:
+        return {"error": "Paper not found in graph"}
+
+    neighbors = graph.k_hop(node_id, k=hops, direction=direction, max_nodes=max_nodes)
 
     result = {
-        "center": pmid,
+        "center": work_id or f"pmid:{pmid}",
         "direction": direction,
         "hops": hops,
         "count": len(neighbors),
     }
 
     if enrich:
-        db = _get_db()
-        papers = db.get_papers(neighbors[:100])  # limit enrichment
-        result["papers"] = papers
+        # Map graph node IDs (work_id_int) back to work_ids for metadata lookup
+        work_id_int_list = neighbors[:100]
+        rows = db.conn.execute(
+            "SELECT work_id FROM works WHERE work_id_int IN (SELECT unnest(?))",
+            [work_id_int_list],
+        ).fetchall()
+        found_work_ids = [r[0] for r in rows]
+        result["papers"] = db.get_works(found_work_ids)
     else:
-        result["pmids"] = neighbors
+        result["node_ids"] = neighbors
 
     return result
 
 
 @mcp.tool()
 def find_path(
-    source_pmid: int,
-    target_pmid: int,
+    source_work_id: str | None = None,
+    source_pmid: int | None = None,
+    target_work_id: str | None = None,
+    target_pmid: int | None = None,
     max_depth: int = 6,
     enrich: bool = True,
 ) -> dict:
     """Find citation chain path between two papers.
 
     Args:
-        source_pmid: Starting paper PMID
-        target_pmid: Target paper PMID
+        source_work_id: Starting paper work_id
+        source_pmid: Starting paper PMID (alternative)
+        target_work_id: Target paper work_id
+        target_pmid: Target paper PMID (alternative)
         max_depth: Maximum path length to search
         enrich: Include paper metadata for path nodes
     """
+    db = _get_db()
     graph = _get_graph()
-    path = graph.shortest_path(source_pmid, target_pmid, max_depth=max_depth)
+
+    src_id = _resolve_graph_id(db, work_id=source_work_id, pmid=source_pmid)
+    dst_id = _resolve_graph_id(db, work_id=target_work_id, pmid=target_pmid)
+
+    if src_id is None or dst_id is None:
+        return {"found": False, "error": "Source or target not found in graph"}
+
+    path = graph.shortest_path(src_id, dst_id, max_depth=max_depth)
 
     if path is None:
-        return {"found": False, "source": source_pmid, "target": target_pmid}
+        return {"found": False}
 
     result = {
         "found": True,
         "path_length": len(path),
-        "path_pmids": path,
+        "path_node_ids": path,
     }
 
     if enrich:
-        db = _get_db()
-        papers = db.get_papers(path)
-        paper_map = {p["pmid"]: p for p in papers}
-        result["path_papers"] = [paper_map.get(p, {"pmid": p}) for p in path]
+        rows = db.conn.execute(
+            "SELECT work_id FROM works WHERE work_id_int IN (SELECT unnest(?))",
+            [path],
+        ).fetchall()
+        path_work_ids = [r[0] for r in rows]
+        papers = db.get_works(path_work_ids)
+        paper_map = {p["work_id"]: p for p in papers}
+        # Preserve path order by work_id_int → work_id mapping
+        int_to_wid = {}
+        for r in db.conn.execute(
+            "SELECT work_id_int, work_id FROM works WHERE work_id_int IN (SELECT unnest(?))",
+            [path],
+        ).fetchall():
+            int_to_wid[r[0]] = r[1]
+        result["path_papers"] = [
+            paper_map.get(int_to_wid.get(nid), {"work_id_int": nid}) for nid in path
+        ]
 
     return result
 
 
 @mcp.tool()
 def similar_papers(
-    pmid: int,
+    work_id: str | None = None,
+    pmid: int | None = None,
     limit: int = 20,
 ) -> list[dict]:
     """Find papers similar to a given paper using embedding similarity.
 
     Args:
-        pmid: Source paper PMID
+        work_id: OpenAlex work ID
+        pmid: PubMed ID (alternative — resolved to work_id)
         limit: Max results
     """
     from quarry.search.hybrid import HybridSearcher
 
-    searcher = HybridSearcher(db=_get_db())
-    return searcher.similar(pmid, limit=limit)
+    db = _get_db()
+    if pmid is not None and work_id is None:
+        work_id = db.resolve_pmid_to_work_id(pmid)
+        if work_id is None:
+            return []
+
+    searcher = HybridSearcher(db=db)
+    return searcher.similar(work_id, limit=limit)
 
 
 @mcp.tool()
 def get_subgraph(
-    pmids: list[int],
+    work_ids: list[str] | None = None,
+    pmids: list[int] | None = None,
     include_metrics: bool = True,
 ) -> dict:
     """Build session subgraph from a set of papers and compute graph metrics.
 
     Args:
-        pmids: List of PMIDs to include in the subgraph
+        work_ids: List of OpenAlex work IDs
+        pmids: List of PMIDs (alternative — resolved to work_id_ints)
         include_metrics: If true, compute PageRank and betweenness centrality
     """
+    db = _get_db()
     graph = _get_graph()
 
-    edges = graph.subgraph_edges(pmids)
+    # Resolve all IDs to work_id_int (graph node IDs)
+    node_ids = []
+    if work_ids:
+        for wid in work_ids:
+            nid = _resolve_graph_id(db, work_id=wid)
+            if nid is not None:
+                node_ids.append(nid)
+    if pmids:
+        for p in pmids:
+            nid = _resolve_graph_id(db, pmid=p)
+            if nid is not None:
+                node_ids.append(nid)
+
+    edges = graph.subgraph_edges(node_ids)
     result = {
-        "nodes": [{"id": p} for p in pmids],
+        "nodes": [{"id": n} for n in node_ids],
         "edges": [{"source": s, "target": t} for s, t in edges],
-        "num_nodes": len(pmids),
+        "num_nodes": len(node_ids),
         "num_edges": len(edges),
     }
 
-    if include_metrics and len(pmids) > 0:
+    if include_metrics and len(node_ids) > 0:
         result["pagerank"] = dict(
-            graph.subgraph_pagerank(pmids, alpha=0.85, max_iter=100, tol=1e-6)
+            graph.subgraph_pagerank(node_ids, alpha=0.85, max_iter=100, tol=1e-6)
         )
-        if len(pmids) < 10_000:
+        if len(node_ids) < 10_000:
             result["betweenness"] = dict(
-                graph.subgraph_betweenness(pmids, normalized=True)
+                graph.subgraph_betweenness(node_ids, normalized=True)
             )
-        result["components"] = graph.subgraph_components(pmids)
+        result["components"] = graph.subgraph_components(node_ids)
 
     return result
 
@@ -204,6 +296,7 @@ def query_metadata(sql: str) -> list[dict]:
     """Execute a read-only SQL query against DuckDB metadata.
 
     Only SELECT/WITH/EXPLAIN queries are allowed.
+    Both v1 (papers) and v2 (works) tables are accessible.
 
     Args:
         sql: SQL query string
