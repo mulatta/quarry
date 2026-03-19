@@ -37,10 +37,8 @@ def csr_graph(
     context.log.info(f"Exporting citation edges → {csv_path}")
     conn.execute(f"""
         COPY (
-            SELECT citing.work_id_int AS src, cited.work_id_int AS dst
-            FROM work_citations wc
-            JOIN works citing ON wc.citing_work_id = citing.work_id
-            JOIN works cited ON wc.cited_work_id = cited.work_id
+            SELECT citing_id AS src, cited_id AS dst
+            FROM work_citations
         ) TO '{csv_path}' (HEADER)
     """)
 

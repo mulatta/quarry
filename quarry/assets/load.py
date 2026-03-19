@@ -21,14 +21,14 @@ from dagster import (
     asset,
 )
 
-from quarry.assets.download import icite_metadata_sync, pubmed_baseline_sync
-from quarry.assets.stage import (
-    biorxiv_stage,
-    mesh_stage,
-    pubmed_updates_stage,
+from quarry.assets.download import (
+    icite_metadata_sync,
+    pubmed_baseline_sync,
+    pubmed_updates_sync,
 )
+from quarry.assets.stage import mesh_stage
 from quarry.config import settings
-from quarry.etl.staging import iter_chunks, read_tables
+from quarry.etl.staging import read_tables
 from quarry.resources import DuckDBResource
 
 import quarry_parse
@@ -102,9 +102,8 @@ _COLS_SELECT = ", ".join(
     group_name="load",
     deps=[
         pubmed_baseline_sync,
-        pubmed_updates_stage,
+        pubmed_updates_sync,
         mesh_stage,
-        biorxiv_stage,
         icite_metadata_sync,
     ],
     description="Bulk load all data into DuckDB (single writer).",
@@ -135,8 +134,8 @@ def duckdb_load(
     stats["baseline_papers"] = n
     context.log.info(f"Baseline: {n:,} papers loaded")
 
-    # 2. PubMed updates (from Feather staging — incremental)
-    n = _load_updates(conn, staging / "pubmed_updates", context)
+    # 2. PubMed updates (parse XML directly — same as baseline)
+    n = _load_updates_direct(conn, context)
     stats["update_papers"] = n
     context.log.info(f"Updates: {n:,} papers loaded")
 
@@ -154,25 +153,7 @@ def duckdb_load(
         stats["mesh_entries"] = t.num_rows
         context.log.info(f"MeSH: {t.num_rows:,} entries loaded")
 
-    # 4. bioRxiv preprints
-    tables = read_tables(staging / "biorxiv")
-    if "preprints" in tables:
-        t = tables["preprints"]
-        conn.register("_stg_preprints", t)
-        conn.execute(
-            "DELETE FROM preprints WHERE doi IN (SELECT doi FROM _stg_preprints)"
-        )
-        conn.execute(
-            "INSERT INTO preprints (doi, title, abstract, date, server, category, "
-            "version, published_doi) "
-            "SELECT doi, title, abstract, TRY_CAST(date AS DATE), server, category, "
-            "version, published_doi FROM _stg_preprints"
-        )
-        conn.unregister("_stg_preprints")
-        stats["preprints"] = t.num_rows
-        context.log.info(f"bioRxiv: {t.num_rows:,} preprints loaded")
-
-    # 5. iCite metrics (DuckDB reads CSV directly)
+    # 4. iCite metrics (DuckDB reads CSV directly)
     meta_csv = settings.icite_dir / "icite_metadata.csv"
     if meta_csv.exists():
         context.log.info(f"iCite: loading from {meta_csv}")
@@ -248,65 +229,64 @@ def _load_baseline_direct(conn, context) -> int:
     return total
 
 
-def _load_updates(conn, staging_dir: Path, context) -> int:
-    """Incremental: INSERT OR REPLACE for papers, DELETE+INSERT for child tables."""
-    chunks = list(iter_chunks(staging_dir))
-    if not chunks:
+def _load_updates_direct(conn, context) -> int:
+    """Parse update XML directly into DuckDB — no Feather staging.
+
+    Same pattern as _load_baseline_direct but with DELETE+INSERT (incremental).
+    """
+    files = sorted(settings.pubmed_update_dir.glob("pubmed*.xml.gz"))
+    if not files:
         return 0
-    n_chunks = len(chunks)
-    context.log.info(f"Updates: loading {n_chunks} chunks")
+
+    context.log.info(f"Updates: parsing {len(files)} XML files → DuckDB directly")
 
     total = 0
-    for i, chunk in enumerate(chunks):
-        conn.execute("BEGIN TRANSACTION")
-        try:
-            papers = chunk.get("papers")
-            if papers is not None and papers.num_rows > 0:
-                conn.register("_stg_papers", papers)
-                conn.execute(
-                    "DELETE FROM papers WHERE pmid IN (SELECT pmid FROM _stg_papers)"
-                )
-                conn.execute(
-                    f"INSERT OR REPLACE INTO papers ({_COLS_INSERT}) "
-                    f"SELECT {_COLS_SELECT} FROM _stg_papers"
-                )
-                conn.unregister("_stg_papers")
-                total += papers.num_rows
+    for i, f in enumerate(files):
+        result = quarry_parse.parse_pubmed_file(str(f))
 
-            for table_name, columns in _CHILD_TABLES.items():
-                t = chunk.get(table_name)
-                if t is not None and t.num_rows > 0:
-                    tmp = f"_stg_{table_name}"
-                    conn.register(tmp, t)
-                    conn.execute(
-                        f"DELETE FROM {table_name} "
-                        f"WHERE pmid IN (SELECT DISTINCT pmid FROM {tmp})"
-                    )
-                    cols = ", ".join(columns)
-                    conn.execute(
-                        f"INSERT INTO {table_name} ({cols}) SELECT {cols} FROM {tmp}"
-                    )
-                    conn.unregister(tmp)
+        papers = result["papers"]
+        if papers is not None and papers.num_rows > 0:
+            conn.register("_stg_papers", papers)
+            conn.execute(
+                "DELETE FROM papers WHERE pmid IN (SELECT pmid FROM _stg_papers)"
+            )
+            conn.execute(
+                f"INSERT INTO papers ({_COLS_INSERT}) "
+                f"SELECT {_COLS_SELECT} FROM _stg_papers"
+            )
+            conn.unregister("_stg_papers")
+            total += papers.num_rows
 
-            del_t = chunk.get("delete_pmids")
-            if del_t is not None and del_t.num_rows > 0:
-                conn.register("_stg_del", del_t)
+        for table_name, columns in _CHILD_TABLES.items():
+            t = result.get(table_name)
+            if t is not None and t.num_rows > 0:
+                tmp = f"_stg_{table_name}"
+                conn.register(tmp, t)
                 conn.execute(
-                    "UPDATE papers SET is_deleted = TRUE, deleted_date = CURRENT_DATE "
-                    "WHERE pmid IN (SELECT pmid FROM _stg_del)"
+                    f"DELETE FROM {table_name} "
+                    f"WHERE pmid IN (SELECT DISTINCT pmid FROM {tmp})"
                 )
-                conn.unregister("_stg_del")
+                cols = ", ".join(columns)
+                conn.execute(
+                    f"INSERT INTO {table_name} ({cols}) SELECT {cols} FROM {tmp}"
+                )
+                conn.unregister(tmp)
 
-            conn.execute("COMMIT")
-        except Exception:
-            try:
-                conn.execute("ROLLBACK")
-            except Exception:
-                pass
-            raise
+        if result["delete_pmids"]:
+            import pyarrow as pa
+
+            del_t = pa.table(
+                {"pmid": pa.array(result["delete_pmids"], type=pa.int32())}
+            )
+            conn.register("_stg_del", del_t)
+            conn.execute(
+                "UPDATE papers SET is_deleted = TRUE, deleted_date = CURRENT_DATE "
+                "WHERE pmid IN (SELECT pmid FROM _stg_del)"
+            )
+            conn.unregister("_stg_del")
+
         context.log.info(
-            f"  [{i + 1}/{n_chunks}] +{papers.num_rows if papers is not None else 0:,} papers "
-            f"(total: {total:,})"
+            f"  [{i + 1}/{len(files)}] {f.name}: papers={result['stats']['num_papers']}"
         )
     return total
 
@@ -342,8 +322,8 @@ _V2_INDEXES = [
     ("idx_work_topics_wid", "work_topics", "work_id"),
     ("idx_work_mesh_wid", "work_mesh", "work_id"),
     ("idx_work_mesh_desc", "work_mesh", "descriptor_ui"),
-    ("idx_work_cit_citing", "work_citations", "citing_work_id"),
-    ("idx_work_cit_cited", "work_citations", "cited_work_id"),
+    ("idx_work_cit_citing", "work_citations", "citing_id"),
+    ("idx_work_cit_cited", "work_citations", "cited_id"),
     ("idx_crosswalk_pmid", "id_crosswalk", "pmid"),
 ]
 
@@ -351,6 +331,7 @@ _V2_INDEXES = [
 @asset(
     group_name="openalex",
     description="Load OpenAlex S3 snapshot → DuckDB works + child tables via httpfs ELT.",
+    deps=[duckdb_load],
     kinds={"duckdb", "s3"},
 )
 def oa_snapshot_load(
@@ -401,9 +382,9 @@ def oa_snapshot_load(
     # List S3 partitions
     context.log.info(f"Listing S3 partitions from {oa_prefix}")
     partitions = conn.execute(f"""
-        SELECT DISTINCT filename
+        SELECT DISTINCT file
         FROM glob('{oa_prefix}/updated_date=*/*.gz')
-        ORDER BY filename
+        ORDER BY file
     """).fetchall()
 
     if not partitions:
@@ -413,17 +394,8 @@ def oa_snapshot_load(
     # Build domain list for tier SQL
     domain_list = ", ".join(f"'{d}'" for d in t2_domains)
 
-    # ELT: raw load → transform per partition batch
+    # ELT: raw load → transform
     total_works = 0
-    batch_partitions = 10  # process N partitions at a time
-    partition_dirs = sorted(
-        set(
-            "/".join(p[0].rsplit("/", 1)[:-1]) if "/" in p[0] else p[0]
-            for p in partitions
-        )
-    )
-
-    # Use single glob for simplicity (DuckDB handles partitioned reads)
     glob_pattern = f"{oa_prefix}/updated_date=*/*.gz"
     context.log.info(f"Loading raw data from {glob_pattern}")
 
@@ -546,10 +518,10 @@ def oa_snapshot_load(
     # Transform: work_citations (all tiers — graph completeness)
     context.log.info("Transforming → work_citations")
     conn.execute("""
-        INSERT INTO work_citations
+        INSERT INTO work_citations (citing_id, cited_id)
         SELECT
-            REPLACE(r.id, 'https://openalex.org/', ''),
-            REPLACE(UNNEST(r.referenced_works), 'https://openalex.org/', '')
+            CAST(REPLACE(r.id, 'https://openalex.org/W', '') AS BIGINT),
+            CAST(REPLACE(UNNEST(r.referenced_works), 'https://openalex.org/W', '') AS BIGINT)
         FROM oa_raw r
         WHERE r.referenced_works IS NOT NULL
     """)

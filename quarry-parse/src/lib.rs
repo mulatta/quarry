@@ -75,7 +75,7 @@ fn parse_pubmed_files(py: Python<'_>, paths: Vec<String>) -> PyResult<PyObject> 
     // Merge into single result
     let mut merged = xml::ParseResult::default();
     for r in results {
-        let r = r.map_err(|e| pyo3::exceptions::PyIOError::new_err(e))?;
+        let r = r.map_err(pyo3::exceptions::PyIOError::new_err)?;
         merged.extend(r);
     }
 

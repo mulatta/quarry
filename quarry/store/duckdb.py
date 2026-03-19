@@ -165,8 +165,8 @@ CREATE TABLE IF NOT EXISTS work_mesh (
 );
 
 CREATE TABLE IF NOT EXISTS work_citations (
-    citing_work_id VARCHAR NOT NULL,
-    cited_work_id  VARCHAR NOT NULL
+    citing_id BIGINT NOT NULL,
+    cited_id  BIGINT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS id_crosswalk (
@@ -183,8 +183,8 @@ CREATE INDEX IF NOT EXISTS idx_work_authors_wid ON work_authors(work_id);
 CREATE INDEX IF NOT EXISTS idx_work_topics_wid ON work_topics(work_id);
 CREATE INDEX IF NOT EXISTS idx_work_mesh_wid ON work_mesh(work_id);
 CREATE INDEX IF NOT EXISTS idx_work_mesh_desc ON work_mesh(descriptor_ui);
-CREATE INDEX IF NOT EXISTS idx_work_cit_citing ON work_citations(citing_work_id);
-CREATE INDEX IF NOT EXISTS idx_work_cit_cited ON work_citations(cited_work_id);
+CREATE INDEX IF NOT EXISTS idx_work_cit_citing ON work_citations(citing_id);
+CREATE INDEX IF NOT EXISTS idx_work_cit_cited ON work_citations(cited_id);
 CREATE INDEX IF NOT EXISTS idx_crosswalk_pmid ON id_crosswalk(pmid);
 """
 

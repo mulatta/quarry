@@ -16,7 +16,6 @@ daily_update_schedule = ScheduleDefinition(
     name="daily_update",
     target=AssetSelection.keys(
         "pubmed_updates_sync",
-        "biorxiv_stage",
     ),
     cron_schedule="0 6 * * *",  # 06:00 UTC daily
 )
@@ -26,7 +25,6 @@ daily_update_schedule = ScheduleDefinition(
 monthly_citation_schedule = ScheduleDefinition(
     name="monthly_citation",
     target=AssetSelection.keys(
-        "icite_occ_sync",
         "icite_metadata_sync",
         "csr_graph",
     ),

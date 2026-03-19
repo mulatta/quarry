@@ -148,42 +148,6 @@ def mesh_descriptor_sync(
 
 @asset(
     group_name="citations",
-    description="Download iCite Open Citation Collection CSV from figshare (~6GB zip).",
-    kinds={"http"},
-)
-def icite_occ_sync(
-    context: AssetExecutionContext,
-) -> MaterializeResult:
-    files = resolve_figshare_files(settings.icite_figshare_collection)
-    url = files.get("open_citation_collection.zip")
-    if not url:
-        context.log.warning(
-            "open_citation_collection.zip not found in figshare collection"
-        )
-        return MaterializeResult(metadata={"status": MetadataValue.text("skipped")})
-
-    context.log.info(f"Downloading iCite OCC: {url}")
-    info = download_and_extract_zip(
-        url=url,
-        local_dir=settings.icite_dir,
-        expected_file="open_citation_collection.csv",
-        max_age_days=35,
-    )
-    # DataVersion from figshare article file listing (changes on new monthly release)
-    version_str = str(sorted(files.items()))
-    digest = hashlib.sha256(version_str.encode()).hexdigest()[:16]
-    return MaterializeResult(
-        data_version=DataVersion(digest),
-        metadata={
-            "status": MetadataValue.text(str(info["status"])),
-            "path": MetadataValue.path(str(info["path"])),
-            "bytes": MetadataValue.int(int(info["bytes"])),
-        },
-    )
-
-
-@asset(
-    group_name="citations",
     description="Download iCite metadata CSV from figshare.",
     kinds={"http"},
 )

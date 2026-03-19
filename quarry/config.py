@@ -27,9 +27,6 @@ class Settings(BaseSettings):
     # Staging (Arrow Feather intermediate files)
     staging_dir: Path = _DATA_DIR / "staging"
 
-    # bioRxiv API cache
-    biorxiv_cache_dir: Path = _DATA_DIR / "biorxiv"
-
     # CSR mmap output
     csr_dir: Path = _DATA_DIR / "csr"
 

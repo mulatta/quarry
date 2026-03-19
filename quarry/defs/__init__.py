@@ -1,6 +1,6 @@
 """Dagster Definitions: combine all assets, resources, and schedules."""
 
-from dagster import Definitions, load_assets_from_modules
+from dagster import Definitions, in_process_executor, load_assets_from_modules
 
 from quarry.assets import citations, download, load, search, stage
 from quarry.resources import DuckDBResource, LanceDBResource
@@ -18,4 +18,5 @@ defs = Definitions(
         daily_update_schedule,
         monthly_citation_schedule,
     ],
+    executor=in_process_executor,
 )
