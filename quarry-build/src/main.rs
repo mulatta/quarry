@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 use quarry_build::config::BuildConfig;
-use quarry_build::{oa, pubmed};
+use quarry_build::{enrich, oa, pubmed};
 
 #[derive(Parser)]
 #[command(name = "quarry-build", about = "Quarry ETL build pipeline")]
@@ -48,6 +48,9 @@ enum Command {
         #[arg(long, default_value_t = 50_000)]
         batch_size: usize,
     },
+    /// Enrich: JOIN works + papers → enriched works with pm_ fields,
+    /// JOIN mesh_headings + id_crosswalk → work_mesh.
+    Enrich,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -88,6 +91,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 stats.num_works,
                 stats.num_citations,
                 stats.num_files_processed,
+                stats.elapsed_secs,
+            );
+        }
+        Command::Enrich => {
+            let stats = enrich::enrich(&config)?;
+            eprintln!(
+                "done: enriched_works ({} parts), work_mesh ({} parts) in {:.1}s",
+                stats.enriched_works_files,
+                stats.work_mesh_files,
                 stats.elapsed_secs,
             );
         }
