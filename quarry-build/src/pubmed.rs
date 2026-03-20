@@ -10,6 +10,8 @@ use std::time::Instant;
 
 use rayon::prelude::*;
 
+use arrow::array::Int32Array;
+use arrow::record_batch::RecordBatch;
 use quarry_parse::{arrow as qp_arrow, xml};
 
 use crate::config::BuildConfig;
@@ -58,19 +60,21 @@ pub fn build_pubmed(
 
     let rg_size = config.row_group_size;
     let max_rows = config.max_rows_per_file;
-    let papers_dir = config.papers_dir();
 
     let mut papers_sink =
-        ParquetSink::new(&papers_dir, "papers", Arc::new(schema::papers_schema()), rg_size, max_rows);
+        ParquetSink::new(&config.papers_dir(), "papers", Arc::new(schema::papers_schema()), rg_size, max_rows);
     let mut authors_sink =
-        ParquetSink::new(&papers_dir, "authors", Arc::new(schema::authors_schema()), rg_size, max_rows);
+        ParquetSink::new(&config.pubmed_authors_dir(), "authors", Arc::new(schema::authors_schema()), rg_size, max_rows);
     let mut mesh_sink = ParquetSink::new(
-        &papers_dir, "mesh_headings", Arc::new(schema::mesh_headings_schema()), rg_size, max_rows,
+        &config.mesh_headings_dir(), "mesh_headings", Arc::new(schema::mesh_headings_schema()), rg_size, max_rows,
     );
     let mut grants_sink =
-        ParquetSink::new(&papers_dir, "grants", Arc::new(schema::grants_schema()), rg_size, max_rows);
+        ParquetSink::new(&config.grants_dir(), "grants", Arc::new(schema::grants_schema()), rg_size, max_rows);
     let mut chemicals_sink = ParquetSink::new(
-        &papers_dir, "chemicals", Arc::new(schema::chemicals_schema()), rg_size, max_rows,
+        &config.chemicals_dir(), "chemicals", Arc::new(schema::chemicals_schema()), rg_size, max_rows,
+    );
+    let mut delete_sink = ParquetSink::new(
+        &config.delete_pmids_dir(), "delete_pmids", Arc::new(schema::delete_pmids_schema()), rg_size, max_rows,
     );
 
     let mut total_papers = 0usize;
@@ -117,6 +121,15 @@ pub fn build_pubmed(
         grants_sink.write_batch(&grants_batch)?;
         chemicals_sink.write_batch(&chemicals_batch)?;
 
+        // Write delete PMIDs
+        if !merged.delete_pmids.is_empty() {
+            let del_batch = RecordBatch::try_new(
+                Arc::new(schema::delete_pmids_schema()),
+                vec![Arc::new(Int32Array::from(merged.delete_pmids.clone()))],
+            )?;
+            delete_sink.write_batch(&del_batch)?;
+        }
+
         // merged + batches dropped here — memory freed before next chunk
 
         let processed = (chunk_idx + 1) * CHUNK_SIZE;
@@ -134,6 +147,7 @@ pub fn build_pubmed(
     mesh_sink.finish()?;
     grants_sink.finish()?;
     chemicals_sink.finish()?;
+    delete_sink.finish()?;
 
     let elapsed = t0.elapsed().as_secs_f64();
     eprintln!(

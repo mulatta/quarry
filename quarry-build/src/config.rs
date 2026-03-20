@@ -45,10 +45,31 @@ impl BuildConfig {
 }
 
 /// Parquet output subdirectories.
+///
+/// Each table gets its own directory so DataFusion / DuckDB can
+/// register a directory as a single logical table.
 impl BuildConfig {
+    // PubMed tables (one dir per table)
     pub fn papers_dir(&self) -> PathBuf {
         self.output_dir.join("papers")
     }
+    pub fn pubmed_authors_dir(&self) -> PathBuf {
+        self.output_dir.join("pubmed_authors")
+    }
+    pub fn mesh_headings_dir(&self) -> PathBuf {
+        self.output_dir.join("mesh_headings")
+    }
+    pub fn grants_dir(&self) -> PathBuf {
+        self.output_dir.join("grants")
+    }
+    pub fn chemicals_dir(&self) -> PathBuf {
+        self.output_dir.join("chemicals")
+    }
+    pub fn delete_pmids_dir(&self) -> PathBuf {
+        self.output_dir.join("delete_pmids")
+    }
+
+    // OA tables
     pub fn works_dir(&self) -> PathBuf {
         self.output_dir.join("works")
     }
@@ -61,27 +82,34 @@ impl BuildConfig {
     pub fn work_citations_dir(&self) -> PathBuf {
         self.output_dir.join("work_citations")
     }
-    pub fn work_mesh_dir(&self) -> PathBuf {
-        self.output_dir.join("work_mesh")
-    }
     pub fn id_crosswalk_dir(&self) -> PathBuf {
         self.output_dir.join("id_crosswalk")
     }
-    pub fn delete_pmids_dir(&self) -> PathBuf {
-        self.output_dir.join("delete_pmids")
+
+    // Enrich outputs
+    pub fn enriched_works_dir(&self) -> PathBuf {
+        self.output_dir.join("enriched_works")
+    }
+    pub fn work_mesh_dir(&self) -> PathBuf {
+        self.output_dir.join("work_mesh")
     }
 
     pub fn ensure_dirs(&self) -> std::io::Result<()> {
         for dir in [
             self.output_dir.clone(),
             self.papers_dir(),
+            self.pubmed_authors_dir(),
+            self.mesh_headings_dir(),
+            self.grants_dir(),
+            self.chemicals_dir(),
+            self.delete_pmids_dir(),
             self.works_dir(),
             self.work_authors_dir(),
             self.work_topics_dir(),
             self.work_citations_dir(),
-            self.work_mesh_dir(),
             self.id_crosswalk_dir(),
-            self.delete_pmids_dir(),
+            self.enriched_works_dir(),
+            self.work_mesh_dir(),
         ] {
             std::fs::create_dir_all(dir)?;
         }

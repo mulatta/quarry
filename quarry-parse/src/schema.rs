@@ -158,6 +158,11 @@ pub fn id_crosswalk_schema() -> Schema {
     ])
 }
 
+/// PubMed delete PMIDs schema (for soft-delete propagation).
+pub fn delete_pmids_schema() -> Schema {
+    Schema::new(vec![Field::new("pmid", DataType::Int32, false)])
+}
+
 /// OpenAlex work MeSH table schema.
 pub fn work_mesh_schema() -> Schema {
     Schema::new(vec![
