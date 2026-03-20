@@ -46,9 +46,15 @@ CREATE TABLE IF NOT EXISTS papers (
     human        FLOAT,
     animal       FLOAT,
     molecular_cellular FLOAT,
-    cited_by_clin INTEGER,
     field_citation_rate FLOAT
 );
+
+CREATE TABLE IF NOT EXISTS cited_by_clin (
+    pmid        INTEGER NOT NULL,
+    citing_pmid INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_cbc_pmid ON cited_by_clin(pmid);
+CREATE INDEX IF NOT EXISTS idx_cbc_citing ON cited_by_clin(citing_pmid);
 
 CREATE TABLE IF NOT EXISTS authors (
     pmid              INTEGER NOT NULL,
@@ -229,6 +235,7 @@ class DuckDBStore:
         self._migrate_work_citations()
         self._migrate_works_pm_fields()
         self._migrate_nullable_title()
+        self._migrate_cited_by_clin()
 
     def _migrate_works_pm_fields(self):
         """Add pm_ columns to works table if missing (backwards compat)."""
@@ -268,6 +275,18 @@ class DuckDBStore:
                     )
             except Exception:
                 pass
+
+    def _migrate_cited_by_clin(self):
+        """Drop cited_by_clin column from papers if it exists (moved to own table)."""
+        try:
+            cols = self.conn.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'papers' AND column_name = 'cited_by_clin'"
+            ).fetchall()
+        except Exception:
+            return
+        if cols:
+            self.conn.execute("ALTER TABLE papers DROP COLUMN cited_by_clin")
 
     def _migrate_work_citations(self):
         """Drop work_citations if it has the old VARCHAR schema (citing_work_id)."""

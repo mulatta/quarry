@@ -84,6 +84,8 @@ _INDEXES = [
     ("idx_mesh_descriptor", "mesh_headings", "descriptor_ui"),
     ("idx_grants_pmid", "grants", "pmid"),
     ("idx_chemicals_pmid", "chemicals", "pmid"),
+    ("idx_cbc_pmid", "cited_by_clin", "pmid"),
+    ("idx_cbc_citing", "cited_by_clin", "citing_pmid"),
 ]
 
 _COLS_INSERT = ", ".join(_PAPERS_COLS)
@@ -350,13 +352,26 @@ def _load_icite_csv(conn, csv_path: Path, context) -> int:
             human = m.human,
             animal = m.animal,
             molecular_cellular = m.molecular_cellular,
-            cited_by_clin = m.cited_by_clin,
             field_citation_rate = m.field_citation_rate
         FROM read_csv('{csv_path}',
              auto_detect=true, ignore_errors=true, parallel=true) m
         WHERE papers.pmid = m.pmid
     """)
     n = result.fetchone()[0]
+
+    # cited_by_clin: PMID list string → normalized rows
+    conn.execute("DELETE FROM cited_by_clin")
+    conn.execute(f"""
+        INSERT INTO cited_by_clin (pmid, citing_pmid)
+        SELECT m.pmid, CAST(unnest(string_split(m.cited_by_clin, ' ')) AS INTEGER)
+        FROM read_csv('{csv_path}',
+             auto_detect=true, ignore_errors=true, parallel=true) m
+        WHERE m.cited_by_clin IS NOT NULL
+          AND m.cited_by_clin != ''
+    """)
+    n_cbc = conn.execute("SELECT COUNT(*) FROM cited_by_clin").fetchone()[0]
+    context.log.info(f"  cited_by_clin: {n_cbc:,} rows")
+
     return n
 
 
