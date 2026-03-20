@@ -3,7 +3,7 @@
     { pkgs, ... }:
     let
       python = pkgs.python313;
-      inherit (pkgs) rustPlatform lib;
+      inherit (pkgs) rustPlatform;
 
       mkMaturinPackage =
         {
@@ -13,7 +13,7 @@
         }:
         python.pkgs.buildPythonPackage {
           inherit pname src;
-          version = "0.1.0";
+          version = "0.2.0";
           pyproject = true;
 
           cargoDeps = rustPlatform.importCargoLock { inherit lockFile; };
@@ -29,10 +29,11 @@
     in
     {
       packages = {
-        quarry-parse = mkMaturinPackage {
-          pname = "quarry-parse";
-          src = ../quarry-parse;
-          lockFile = ../quarry-parse/Cargo.lock;
+        # Python extension module (cdylib) — parse + normalize functions
+        quarry-rs = mkMaturinPackage {
+          pname = "quarry-rs";
+          src = ../quarry-rs;
+          lockFile = ../quarry-rs/Cargo.lock;
         };
 
         quarry-graph = mkMaturinPackage {
@@ -41,24 +42,12 @@
           lockFile = ../quarry-graph/Cargo.lock;
         };
 
+        # CLI binary — quarry-build (PubMed/OA → PG pipeline)
         quarry-build = rustPlatform.buildRustPackage {
           pname = "quarry-build";
-          version = "0.1.0";
-
-          # Include both crates so path dependency resolves
-          src = lib.fileset.toSource {
-            root = ../.;
-            fileset = lib.fileset.unions [
-              ../quarry-build
-              ../quarry-parse
-            ];
-          };
-
-          cargoRoot = "quarry-build";
-          cargoLock.lockFile = ../quarry-build/Cargo.lock;
-
-          buildAndTestSubdir = "quarry-build";
-
+          version = "0.2.0";
+          src = ../quarry-rs;
+          cargoLock.lockFile = ../quarry-rs/Cargo.lock;
           doCheck = false;
         };
       };

@@ -113,6 +113,17 @@ pub fn works_schema() -> Schema {
         Field::new("oa_url", DataType::Utf8, true),
         Field::new("is_retracted", DataType::Boolean, false),
         Field::new("updated_date", DataType::Utf8, true),
+        Field::new("pm_journal_abbr", DataType::Utf8, true),
+        Field::new("pm_country", DataType::Utf8, true),
+        Field::new("pm_medline_status", DataType::Utf8, true),
+        Field::new(
+            "pm_pub_type",
+            DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+            true,
+        ),
+        Field::new("pm_created_date", DataType::Utf8, true),
+        Field::new("pm_revised_date", DataType::Utf8, true),
+        Field::new("pm_indexed_date", DataType::Utf8, true),
     ])
 }
 

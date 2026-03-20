@@ -7,7 +7,7 @@ requires-python = ">=3.13"
 dependencies = [
     "dagster",
     "dagster-webserver",
-    "duckdb",
+    "psycopg[binary]",
     "lancedb",
     "numpy",
     "orjson",
@@ -21,15 +21,15 @@ dependencies = [
     "torch",
     "mcp[cli]",
     "dagster-dg-cli>=1.12.19",
-    "quarry-parse",
+    "quarry-rs",
     "quarry-graph",
 ]
 
 [tool.uv.workspace]
-members = ["quarry-parse", "quarry-graph"]
+members = ["quarry-rs", "quarry-graph"]
 
 [tool.uv.sources]
-quarry-parse = { workspace = true }
+quarry-rs = { workspace = true }
 quarry-graph = { workspace = true }
 
 [tool.setuptools.packages.find]

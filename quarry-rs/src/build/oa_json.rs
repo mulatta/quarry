@@ -1,19 +1,14 @@
 //! OpenAlex JSONL line parser.
 //!
 //! Parses a single newline-delimited JSON line from the OpenAlex works dump
-//! into intermediate Rust structs, then provides batch conversion to Arrow
-//! RecordBatches. Transformation logic mirrors `quarry/assets/load.py:494-530`.
+//! into intermediate Rust structs. Transformation logic mirrors
+//! `quarry/assets/load.py:494-530`.
 
 use std::collections::HashSet;
-use std::sync::Arc;
 
-use arrow::array::*;
-use arrow::record_batch::RecordBatch;
 use serde::Deserialize;
 
-use quarry_parse::abstract_recon;
-
-use crate::schema;
+use crate::parse::abstract_recon;
 
 // ── URL prefixes (stripped during transformation) ──
 
@@ -58,6 +53,13 @@ pub struct OaWork {
     pub oa_url: Option<String>,
     pub is_retracted: bool,
     pub updated_date: Option<String>,
+    pub pm_journal_abbr: Option<String>,
+    pub pm_country: Option<String>,
+    pub pm_medline_status: Option<String>,
+    pub pm_pub_type: Vec<String>,
+    pub pm_created_date: Option<String>,
+    pub pm_revised_date: Option<String>,
+    pub pm_indexed_date: Option<String>,
 }
 
 pub struct OaAuthor {
@@ -213,7 +215,7 @@ pub fn parse_line(
         .id
         .strip_prefix(OA_W_PREFIX)
         .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
+        .ok_or_else(|| format!("cannot parse work_id_int from: {}", raw.id))?;
 
     // PMID: strip URL prefix, parse as i32
     let pmid: Option<i32> = raw
@@ -280,6 +282,13 @@ pub fn parse_line(
         oa_url,
         is_retracted: raw.is_retracted.unwrap_or(false),
         updated_date: raw.updated_date,
+        pm_journal_abbr: None,
+        pm_country: None,
+        pm_medline_status: None,
+        pm_pub_type: Vec::new(),
+        pm_created_date: None,
+        pm_revised_date: None,
+        pm_indexed_date: None,
     };
 
     // Authors — T1/T2 only (mirrors load.py:537-551)
@@ -368,131 +377,6 @@ pub fn parse_line(
         citations,
         crosswalk,
     })
-}
-
-// ── RecordBatch conversion ──
-
-pub fn works_to_batch(works: &[OaWork]) -> RecordBatch {
-    let work_id: StringArray = works.iter().map(|w| Some(w.work_id.as_str())).collect();
-    let work_id_int: Int64Array = works.iter().map(|w| Some(w.work_id_int)).collect();
-    let tier: StringArray = works.iter().map(|w| Some(w.tier.as_str())).collect();
-    let pmid: Int32Array = works.iter().map(|w| w.pmid).collect();
-    let doi: StringArray = works.iter().map(|w| w.doi.as_deref()).collect();
-    let title: StringArray = works.iter().map(|w| Some(w.title.as_str())).collect();
-    let abstract_text: StringArray =
-        works.iter().map(|w| w.abstract_text.as_deref()).collect();
-    let pub_year: Int16Array = works.iter().map(|w| w.pub_year).collect();
-    let pub_date: StringArray = works.iter().map(|w| w.pub_date.as_deref()).collect();
-    let work_type: StringArray = works.iter().map(|w| w.work_type.as_deref()).collect();
-    let cited_by_count: Int32Array = works.iter().map(|w| w.cited_by_count).collect();
-    let host_venue: StringArray = works.iter().map(|w| w.host_venue.as_deref()).collect();
-    let oa_status: StringArray = works.iter().map(|w| w.oa_status.as_deref()).collect();
-    let oa_url: StringArray = works.iter().map(|w| w.oa_url.as_deref()).collect();
-    let is_retracted: BooleanArray = works.iter().map(|w| Some(w.is_retracted)).collect();
-    let updated_date: StringArray =
-        works.iter().map(|w| w.updated_date.as_deref()).collect();
-
-    RecordBatch::try_new(
-        Arc::new(schema::works_schema()),
-        vec![
-            Arc::new(work_id),
-            Arc::new(work_id_int),
-            Arc::new(tier),
-            Arc::new(pmid),
-            Arc::new(doi),
-            Arc::new(title),
-            Arc::new(abstract_text),
-            Arc::new(pub_year),
-            Arc::new(pub_date),
-            Arc::new(work_type),
-            Arc::new(cited_by_count),
-            Arc::new(host_venue),
-            Arc::new(oa_status),
-            Arc::new(oa_url),
-            Arc::new(is_retracted),
-            Arc::new(updated_date),
-        ],
-    )
-    .expect("works_to_batch: schema mismatch")
-}
-
-pub fn authors_to_batch(authors: &[OaAuthor]) -> RecordBatch {
-    let work_id: StringArray = authors.iter().map(|a| Some(a.work_id.as_str())).collect();
-    let pos: Int16Array = authors.iter().map(|a| Some(a.author_position)).collect();
-    let name: StringArray = authors.iter().map(|a| a.display_name.as_deref()).collect();
-    let orcid: StringArray = authors.iter().map(|a| a.orcid.as_deref()).collect();
-    let inst_name: StringArray = authors
-        .iter()
-        .map(|a| a.institution_name.as_deref())
-        .collect();
-    let inst_ror: StringArray = authors
-        .iter()
-        .map(|a| a.institution_ror.as_deref())
-        .collect();
-    let raw_aff: StringArray = authors
-        .iter()
-        .map(|a| a.raw_affiliation.as_deref())
-        .collect();
-
-    RecordBatch::try_new(
-        Arc::new(schema::work_authors_schema()),
-        vec![
-            Arc::new(work_id),
-            Arc::new(pos),
-            Arc::new(name),
-            Arc::new(orcid),
-            Arc::new(inst_name),
-            Arc::new(inst_ror),
-            Arc::new(raw_aff),
-        ],
-    )
-    .expect("authors_to_batch: schema mismatch")
-}
-
-pub fn topics_to_batch(topics: &[OaTopic]) -> RecordBatch {
-    let work_id: StringArray = topics.iter().map(|t| Some(t.work_id.as_str())).collect();
-    let topic_id: StringArray = topics.iter().map(|t| Some(t.topic_id.as_str())).collect();
-    let name: StringArray = topics.iter().map(|t| t.topic_name.as_deref()).collect();
-    let subfield: StringArray = topics.iter().map(|t| t.subfield.as_deref()).collect();
-    let field: StringArray = topics.iter().map(|t| t.field.as_deref()).collect();
-    let domain: StringArray = topics.iter().map(|t| t.domain.as_deref()).collect();
-    let score: Float32Array = topics.iter().map(|t| t.score).collect();
-
-    RecordBatch::try_new(
-        Arc::new(schema::work_topics_schema()),
-        vec![
-            Arc::new(work_id),
-            Arc::new(topic_id),
-            Arc::new(name),
-            Arc::new(subfield),
-            Arc::new(field),
-            Arc::new(domain),
-            Arc::new(score),
-        ],
-    )
-    .expect("topics_to_batch: schema mismatch")
-}
-
-pub fn citations_to_batch(citations: &[OaCitation]) -> RecordBatch {
-    let citing: Int64Array = citations.iter().map(|c| Some(c.citing_id)).collect();
-    let cited: Int64Array = citations.iter().map(|c| Some(c.cited_id)).collect();
-
-    RecordBatch::try_new(
-        Arc::new(schema::work_citations_schema()),
-        vec![Arc::new(citing), Arc::new(cited)],
-    )
-    .expect("citations_to_batch: schema mismatch")
-}
-
-pub fn crosswalk_to_batch(cw: &[OaCrosswalk]) -> RecordBatch {
-    let work_id: StringArray = cw.iter().map(|c| Some(c.work_id.as_str())).collect();
-    let pmid: Int32Array = cw.iter().map(|c| Some(c.pmid)).collect();
-
-    RecordBatch::try_new(
-        Arc::new(schema::id_crosswalk_schema()),
-        vec![Arc::new(work_id), Arc::new(pmid)],
-    )
-    .expect("crosswalk_to_batch: schema mismatch")
 }
 
 #[cfg(test)]
@@ -598,22 +482,4 @@ mod tests {
         assert_eq!(result.work.tier, Tier::T2);
     }
 
-    #[test]
-    fn test_batch_conversion() {
-        let json = r#"{
-            "id": "https://openalex.org/W1",
-            "ids": {"pmid": "https://pubmed.ncbi.nlm.nih.gov/1"},
-            "title": "Test",
-            "referenced_works": ["https://openalex.org/W2"]
-        }"#;
-
-        let result = parse_line(json, &t2_set()).unwrap();
-
-        let wb = works_to_batch(&[result.work]);
-        assert_eq!(wb.num_rows(), 1);
-        assert_eq!(wb.num_columns(), 16);
-
-        let cb = citations_to_batch(&result.citations);
-        assert_eq!(cb.num_rows(), 1);
-    }
 }
