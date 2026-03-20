@@ -21,7 +21,16 @@ dependencies = [
     "torch",
     "mcp[cli]",
     "dagster-dg-cli>=1.12.19",
+    "quarry-parse",
+    "quarry-graph",
 ]
+
+[tool.uv.workspace]
+members = ["quarry-parse", "quarry-graph"]
+
+[tool.uv.sources]
+quarry-parse = { workspace = true }
+quarry-graph = { workspace = true }
 
 [tool.setuptools.packages.find]
 where = ["."]
