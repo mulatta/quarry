@@ -13,8 +13,8 @@ _DATA_DIR = Path.home() / "quarry-data"
 class Settings(BaseSettings):
     model_config = {"env_prefix": "QUARRY_"}
 
-    # DuckDB
-    duckdb_path: Path = _DATA_DIR / "quarry.duckdb"
+    # PostgreSQL
+    pg_conninfo: str = "postgresql:///quarry"
 
     # PubMed FTP paths (baseline + updates downloaded here)
     pubmed_baseline_dir: Path = _DATA_DIR / "pubmed" / "baseline"
@@ -23,9 +23,6 @@ class Settings(BaseSettings):
 
     # iCite (figshare monthly release)
     icite_dir: Path = _DATA_DIR / "icite"
-
-    # Staging (Arrow Feather intermediate files)
-    staging_dir: Path = _DATA_DIR / "staging"
 
     # CSR mmap output
     csr_dir: Path = _DATA_DIR / "csr"
@@ -53,15 +50,6 @@ class Settings(BaseSettings):
         "Physical Sciences",
         "Engineering",
     }
-
-    # Rust build output (quarry-build CLI)
-    build_output_dir: Path = _DATA_DIR / "build_output"
-
-    # OA S3 download cache (ETag-based, optional)
-    oa_cache_dir: Path = _DATA_DIR / "oa_cache"
-
-    # Batch sizes
-    duckdb_batch_size: int = 10_000
 
     # Download
     ftp_parallel: int = 4

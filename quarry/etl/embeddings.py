@@ -1,18 +1,18 @@
-"""Batch-encode papers from DuckDB → LanceDB with blake3 content caching.
+"""Batch-encode papers from PostgreSQL → LanceDB with blake3 content caching.
 
-Reads papers in batches from DuckDB, skips unchanged (blake3 match), encodes
+Reads papers in batches from PG, skips unchanged (blake3 match), encodes
 new/modified papers with jina-v5 nano, upserts to LanceDB.
 """
 
 import time
 
 import blake3
-import quarry_parse
+import quarry_rs
 
 from quarry.config import settings
 from quarry.embed.jina import JinaEncoder
-from quarry.store.duckdb import DuckDBStore
 from quarry.store.lance import LanceStore
+from quarry.store.pg import PGStore
 
 
 def content_hash(title: str, abstract: str) -> bytes:
@@ -21,7 +21,7 @@ def content_hash(title: str, abstract: str) -> bytes:
 
 
 def run(batch_size: int = 5000, limit: int | None = None, start_work_id: str = ""):
-    db = DuckDBStore()
+    db = PGStore(settings.pg_conninfo)
     lance = LanceStore(settings.lancedb_uri)
 
     # Ensure table exists
@@ -39,24 +39,25 @@ def run(batch_size: int = 5000, limit: int | None = None, start_work_id: str = "
 
     while True:
         # Keyset pagination on work_id (T1+T2 only, with abstract)
-        works = db.conn.execute(
-            "SELECT work_id, title, abstract FROM works "
-            "WHERE work_id > ? AND tier IN ('t1', 't2') "
-            "AND abstract IS NOT NULL AND abstract != '' AND title != '' "
-            "ORDER BY work_id LIMIT ?",
-            [cursor, batch_size],
-        ).fetchall()
+        with db.conn.cursor() as cur:
+            cur.execute(
+                "SELECT work_id, title, abstract FROM works "
+                "WHERE work_id > %s AND tier IN ('t1', 't2') "
+                "AND abstract IS NOT NULL AND abstract != '' AND title != '' "
+                "ORDER BY work_id LIMIT %s",
+                (cursor, batch_size),
+            )
+            rows = cur.fetchall()
 
-        if not works:
+        if not rows:
             break
 
-        # Advance cursor to last work_id in this batch
-        cursor = works[-1][0]
-        works = [{"work_id": r[0], "title": r[1], "abstract": r[2]} for r in works]
+        cursor = rows[-1][0]
+        works = [{"work_id": r[0], "title": r[1], "abstract": r[2]} for r in rows]
 
         # Batch normalize via Rust (regex + rayon parallel)
-        titles = quarry_parse.normalize_texts([w["title"] for w in works])
-        abstracts = quarry_parse.normalize_texts([w["abstract"] for w in works])
+        titles = quarry_rs.normalize_texts([w["title"] for w in works])
+        abstracts = quarry_rs.normalize_texts([w["abstract"] for w in works])
         for w, t, a in zip(works, titles, abstracts):
             w["title"] = t
             w["abstract"] = a
@@ -90,9 +91,9 @@ def run(batch_size: int = 5000, limit: int | None = None, start_work_id: str = "
         elapsed = time.time() - t0
 
         # Build rows for LanceDB upsert
-        rows = []
+        lance_rows = []
         for i, w in enumerate(to_encode):
-            rows.append(
+            lance_rows.append(
                 {
                     "work_id": w["work_id"],
                     "content_hash": hashes[w["work_id"]],
@@ -103,7 +104,7 @@ def run(batch_size: int = 5000, limit: int | None = None, start_work_id: str = "
                 }
             )
 
-        lance.upsert(rows)
+        lance.upsert(lance_rows)
 
         total_encoded += len(to_encode)
         total_skipped += len(works) - len(to_encode)

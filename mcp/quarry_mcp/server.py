@@ -7,7 +7,7 @@ Tools:
   find_path       — citation chain between two papers
   similar_papers  — embedding similarity search
   get_subgraph    — session papers graph structure
-  query_metadata  — DuckDB SQL (SELECT only)
+  query_metadata  — PG SQL (SELECT only)
   mesh_explore    — MeSH hierarchy navigation
 """
 
@@ -15,19 +15,19 @@ from mcp.server.fastmcp import FastMCP
 
 import quarry_graph
 from quarry.config import settings
-from quarry.store.duckdb import DuckDBStore
+from quarry.store.pg import PGStore
 
 mcp = FastMCP("quarry")
 
 # Lazy-initialized singletons
-_db: DuckDBStore | None = None
+_db: PGStore | None = None
 _graph: quarry_graph.Graph | None = None
 
 
-def _get_db() -> DuckDBStore:
+def _get_db() -> PGStore:
     global _db
     if _db is None:
-        _db = DuckDBStore()
+        _db = PGStore(settings.pg_conninfo)
     return _db
 
 
@@ -39,22 +39,20 @@ def _get_graph() -> quarry_graph.Graph:
 
 
 def _resolve_graph_id(
-    db: DuckDBStore,
+    db: PGStore,
     work_id: str | None = None,
     pmid: int | None = None,
 ) -> int | None:
     """Resolve work_id or pmid → work_id_int (CSR graph node ID)."""
-    if work_id:
-        row = db.conn.execute(
-            "SELECT work_id_int FROM works WHERE work_id = ?", [work_id]
-        ).fetchone()
-    elif pmid:
-        row = db.conn.execute(
-            "SELECT work_id_int FROM works WHERE pmid = ?", [pmid]
-        ).fetchone()
-    else:
-        return None
-    return row[0] if row else None
+    with db.conn.cursor() as cur:
+        if work_id:
+            cur.execute("SELECT work_id_int FROM works WHERE work_id = %s", (work_id,))
+        elif pmid:
+            cur.execute("SELECT work_id_int FROM works WHERE pmid = %s", (pmid,))
+        else:
+            return None
+        row = cur.fetchone()
+        return row[0] if row else None
 
 
 @mcp.tool()
@@ -70,7 +68,7 @@ def search_papers(
         query: Natural language search query
         limit: Max results (default 20)
         mode: "hybrid", "vector", or "text"
-        enrich: If true, include full DuckDB metadata
+        enrich: If true, include full metadata
     """
     from quarry.search.hybrid import HybridSearcher
 
@@ -97,11 +95,8 @@ def get_paper(
     if pmid is not None:
         return db.get_work_by_pmid(pmid)
     if doi is not None:
-        result = db.conn.execute("SELECT * FROM works WHERE doi = ?", [doi]).fetchone()
-        if not result:
-            return None
-        cols = [d[0] for d in db.conn.description]
-        return dict(zip(cols, result))
+        rows = db.query(f"SELECT * FROM works WHERE doi = '{doi}'")
+        return rows[0] if rows else None
     return None
 
 
@@ -141,13 +136,13 @@ def expand_citations(
     }
 
     if enrich:
-        # Map graph node IDs (work_id_int) back to work_ids for metadata lookup
         work_id_int_list = neighbors[:100]
-        rows = db.conn.execute(
-            "SELECT work_id FROM works WHERE work_id_int IN (SELECT unnest(?))",
-            [work_id_int_list],
-        ).fetchall()
-        found_work_ids = [r[0] for r in rows]
+        with db.conn.cursor() as cur:
+            cur.execute(
+                "SELECT work_id FROM works WHERE work_id_int = ANY(%s)",
+                (work_id_int_list,),
+            )
+            found_work_ids = [r[0] for r in cur.fetchall()]
         result["papers"] = db.get_works(found_work_ids)
     else:
         result["node_ids"] = neighbors
@@ -195,20 +190,15 @@ def find_path(
     }
 
     if enrich:
-        rows = db.conn.execute(
-            "SELECT work_id FROM works WHERE work_id_int IN (SELECT unnest(?))",
-            [path],
-        ).fetchall()
-        path_work_ids = [r[0] for r in rows]
+        with db.conn.cursor() as cur:
+            cur.execute(
+                "SELECT work_id_int, work_id FROM works WHERE work_id_int = ANY(%s)",
+                (path,),
+            )
+            int_to_wid = {r[0]: r[1] for r in cur.fetchall()}
+        path_work_ids = [int_to_wid[nid] for nid in path if nid in int_to_wid]
         papers = db.get_works(path_work_ids)
         paper_map = {p["work_id"]: p for p in papers}
-        # Preserve path order by work_id_int → work_id mapping
-        int_to_wid = {}
-        for r in db.conn.execute(
-            "SELECT work_id_int, work_id FROM works WHERE work_id_int IN (SELECT unnest(?))",
-            [path],
-        ).fetchall():
-            int_to_wid[r[0]] = r[1]
         result["path_papers"] = [
             paper_map.get(int_to_wid.get(nid), {"work_id_int": nid}) for nid in path
         ]
@@ -257,7 +247,6 @@ def get_subgraph(
     db = _get_db()
     graph = _get_graph()
 
-    # Resolve all IDs to work_id_int (graph node IDs)
     node_ids = []
     if work_ids:
         for wid in work_ids:
@@ -293,7 +282,7 @@ def get_subgraph(
 
 @mcp.tool()
 def query_metadata(sql: str) -> list[dict]:
-    """Execute a read-only SQL query against DuckDB metadata.
+    """Execute a read-only SQL query against PostgreSQL metadata.
 
     Only SELECT/WITH/EXPLAIN queries are allowed.
     Both v1 (papers) and v2 (works) tables are accessible.
@@ -320,7 +309,6 @@ def mesh_explore(
     """
     db = _get_db()
 
-    # Resolve descriptor
     if descriptor_name and not descriptor_ui:
         results = db.mesh_search_by_name(descriptor_name)
         if not results:
@@ -335,7 +323,6 @@ def mesh_explore(
     if not descriptor_ui:
         return {"error": "Provide descriptor_ui or descriptor_name"}
 
-    # Get tree numbers for this descriptor
     tree_entries = db.mesh_by_ui(descriptor_ui)
     if not tree_entries:
         return {"error": f"Descriptor {descriptor_ui} not found in mesh_tree"}
@@ -351,7 +338,6 @@ def mesh_explore(
         for entry in tree_entries:
             descendants = db.mesh_descendants(entry["tree_number"])
             all_descendants.extend(descendants)
-        # Deduplicate
         seen = set()
         unique = []
         for d in all_descendants:

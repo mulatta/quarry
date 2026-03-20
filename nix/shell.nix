@@ -1,18 +1,17 @@
 {
   perSystem =
-    { pkgs, self', ... }:
+    { pkgs, ... }:
     {
       devShells.default = pkgs.mkShell {
-        packages =
-          (with pkgs; [
-            python313
-            uv
-            rustc
-            cargo
-            clippy
-            maturin
-          ])
-          ++ [ self'.packages.quarry-build ];
+        packages = with pkgs; [
+          python313
+          uv
+          rustc
+          cargo
+          clippy
+          maturin
+          postgresql_16
+        ];
 
         env = {
           UV_PYTHON_DOWNLOADS = "never";

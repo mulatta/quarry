@@ -4,8 +4,8 @@ use arrow::array::*;
 use arrow::record_batch::RecordBatch;
 use std::sync::Arc;
 
-use crate::schema;
-use crate::xml::{Author, Chemical, Grant, MeshHeading, Paper, ParseResult};
+use crate::parse::schema;
+use crate::parse::xml::{Author, Chemical, Grant, MeshHeading, Paper, ParseResult};
 
 pub fn papers_to_batch(papers: &[Paper]) -> RecordBatch {
     let pmid = Int32Array::from(papers.iter().map(|p| p.pmid).collect::<Vec<_>>());
@@ -263,4 +263,117 @@ pub fn result_to_batches(
         grants_to_batch(&result.grants),
         chemicals_to_batch(&result.chemicals),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Empty slices should produce valid 0-row batches matching schema.
+
+    #[test]
+    fn test_papers_empty() {
+        let batch = papers_to_batch(&[]);
+        assert_eq!(batch.num_rows(), 0);
+        assert_eq!(*batch.schema(), schema::papers_schema());
+    }
+
+    #[test]
+    fn test_authors_empty() {
+        let batch = authors_to_batch(&[]);
+        assert_eq!(batch.num_rows(), 0);
+        assert_eq!(*batch.schema(), schema::authors_schema());
+    }
+
+    #[test]
+    fn test_mesh_empty() {
+        let batch = mesh_to_batch(&[]);
+        assert_eq!(batch.num_rows(), 0);
+        assert_eq!(*batch.schema(), schema::mesh_headings_schema());
+    }
+
+    #[test]
+    fn test_grants_empty() {
+        let batch = grants_to_batch(&[]);
+        assert_eq!(batch.num_rows(), 0);
+        assert_eq!(*batch.schema(), schema::grants_schema());
+    }
+
+    #[test]
+    fn test_chemicals_empty() {
+        let batch = chemicals_to_batch(&[]);
+        assert_eq!(batch.num_rows(), 0);
+        assert_eq!(*batch.schema(), schema::chemicals_schema());
+    }
+
+    // Single-row batches with all Optional fields populated.
+
+    #[test]
+    fn test_papers_single_row() {
+        let paper = Paper {
+            pmid: 1,
+            doi: Some("10.1234/test".into()),
+            pmc_id: Some("PMC123".into()),
+            title: Some("Title".into()),
+            r#abstract: Some("Abstract".into()),
+            pub_year: Some(2024),
+            pub_date: Some("2024-01-01".into()),
+            journal_title: Some("Journal".into()),
+            journal_issn: Some("1234-5678".into()),
+            journal_abbr: Some("J".into()),
+            volume: Some("1".into()),
+            issue: Some("1".into()),
+            pages: Some("1-10".into()),
+            language: Some("eng".into()),
+            pub_type: vec!["Journal Article".into()],
+            country: Some("US".into()),
+            medline_status: Some("MEDLINE".into()),
+            created_date: Some("2024-01-01".into()),
+            revised_date: Some("2024-02-01".into()),
+            indexed_date: Some("2024-03-01".into()),
+        };
+        let batch = papers_to_batch(&[paper]);
+        assert_eq!(batch.num_rows(), 1);
+        assert_eq!(*batch.schema(), schema::papers_schema());
+    }
+
+    #[test]
+    fn test_papers_all_nulls() {
+        let paper = Paper {
+            pmid: 1,
+            ..Paper::default()
+        };
+        let batch = papers_to_batch(&[paper]);
+        assert_eq!(batch.num_rows(), 1);
+        // pub_type should be null (empty vec → null list)
+        assert!(batch.column_by_name("pub_type").unwrap().is_null(0));
+    }
+
+    #[test]
+    fn test_authors_single_row() {
+        let auth = Author {
+            pmid: 1,
+            author_position: 1,
+            last_name: Some("Smith".into()),
+            fore_name: Some("John".into()),
+            initials: Some("JS".into()),
+            orcid: Some("0000-0001-2345-6789".into()),
+            affiliation: Some("MIT".into()),
+            is_collective: false,
+        };
+        let batch = authors_to_batch(&[auth]);
+        assert_eq!(batch.num_rows(), 1);
+        assert_eq!(*batch.schema(), schema::authors_schema());
+    }
+
+    #[test]
+    fn test_result_to_batches() {
+        let result = ParseResult::default();
+        let (papers, authors, mesh, grants, chemicals) = result_to_batches(&result);
+        assert_eq!(papers.num_rows(), 0);
+        assert_eq!(authors.num_rows(), 0);
+        assert_eq!(mesh.num_rows(), 0);
+        assert_eq!(grants.num_rows(), 0);
+        assert_eq!(chemicals.num_rows(), 0);
+    }
 }

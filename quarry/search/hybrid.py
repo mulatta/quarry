@@ -1,13 +1,13 @@
 """Hybrid search pipeline: query encoding → ANN + BM25 → RRF fusion.
 
 Combines JinaEncoder (query encoding) with LanceStore (hybrid search).
-Enriches results with DuckDB metadata and supports MeSH expansion.
+Enriches results with PG metadata and supports MeSH expansion.
 """
 
 from quarry.config import settings
 from quarry.embed.jina import JinaEncoder
-from quarry.store.duckdb import DuckDBStore
 from quarry.store.lance import LanceStore
+from quarry.store.pg import PGStore
 
 
 class HybridSearcher:
@@ -16,11 +16,11 @@ class HybridSearcher:
     def __init__(
         self,
         lance_uri: str | None = None,
-        db: DuckDBStore | None = None,
+        db: PGStore | None = None,
         encoder: JinaEncoder | None = None,
     ):
         self._lance = LanceStore(lance_uri or settings.lancedb_uri)
-        self._db = db or DuckDBStore()
+        self._db = db or PGStore(settings.pg_conninfo)
         self._encoder = encoder
 
     def _get_encoder(self) -> JinaEncoder:
@@ -36,15 +36,7 @@ class HybridSearcher:
         enrich: bool = True,
         mesh_expand: bool = False,
     ) -> list[dict]:
-        """Search papers by natural language query.
-
-        Args:
-            query: Natural language search query.
-            limit: Max results to return.
-            mode: "hybrid" (ANN + BM25), "vector" (ANN only), "text" (BM25 only).
-            enrich: If True, fetch full metadata from DuckDB.
-            mesh_expand: If True, expand query using MeSH tree hierarchy.
-        """
+        """Search papers by natural language query."""
         if mode == "text":
             results = self._lance.text_search(query, limit=limit)
         elif mode == "vector":
@@ -73,7 +65,6 @@ class HybridSearcher:
                             }
                         )
 
-            # Add MeSH facets
             if mesh_expand:
                 pmids = [r.get("pmid") for r in results if r.get("pmid")]
                 if pmids:
@@ -110,24 +101,17 @@ class HybridSearcher:
         descriptor_ui: str,
         limit: int = 50,
     ) -> list[int]:
-        """Search papers via MeSH tree expansion.
-
-        Finds all descendant descriptors of the given UI, then returns
-        PMIDs that have any of those MeSH headings.
-        """
-        # Get tree numbers for this descriptor
+        """Search papers via MeSH tree expansion."""
         tree_entries = self._db.query(
             f"SELECT tree_number FROM mesh_tree WHERE descriptor_ui = '{descriptor_ui}'"
         )
         if not tree_entries:
             return []
 
-        # Expand to all descendant UIs
         all_uis: set[str] = {descriptor_ui}
         for entry in tree_entries:
             descendants = self._db.mesh_descendants(entry["tree_number"])
             for d in descendants:
                 all_uis.add(d["descriptor_ui"])
 
-        # Get PMIDs
         return self._db.mesh_expand_pmids(list(all_uis))[:limit]
