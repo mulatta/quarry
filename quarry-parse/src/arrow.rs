@@ -1,10 +1,10 @@
 //! Convert parsed structs → Arrow RecordBatches for zero-copy transfer to Python.
 
 use arrow::array::*;
-use arrow::datatypes::*;
 use arrow::record_batch::RecordBatch;
 use std::sync::Arc;
 
+use crate::schema;
 use crate::xml::{Author, Chemical, Grant, MeshHeading, Paper, ParseResult};
 
 pub fn papers_to_batch(papers: &[Paper]) -> RecordBatch {
@@ -104,35 +104,8 @@ pub fn papers_to_batch(papers: &[Paper]) -> RecordBatch {
             .collect::<Vec<_>>(),
     );
 
-    let schema = Schema::new(vec![
-        Field::new("pmid", DataType::Int32, false),
-        Field::new("doi", DataType::Utf8, true),
-        Field::new("pmc_id", DataType::Utf8, true),
-        Field::new("title", DataType::Utf8, true),
-        Field::new("abstract", DataType::Utf8, true),
-        Field::new("pub_year", DataType::Int16, true),
-        Field::new("pub_date", DataType::Utf8, true),
-        Field::new("journal_title", DataType::Utf8, true),
-        Field::new("journal_issn", DataType::Utf8, true),
-        Field::new("journal_abbr", DataType::Utf8, true),
-        Field::new("volume", DataType::Utf8, true),
-        Field::new("issue", DataType::Utf8, true),
-        Field::new("pages", DataType::Utf8, true),
-        Field::new("language", DataType::Utf8, true),
-        Field::new(
-            "pub_type",
-            DataType::List(Arc::new(Field::new_list_field(DataType::Utf8, true))),
-            true,
-        ),
-        Field::new("country", DataType::Utf8, true),
-        Field::new("medline_status", DataType::Utf8, true),
-        Field::new("created_date", DataType::Utf8, true),
-        Field::new("revised_date", DataType::Utf8, true),
-        Field::new("indexed_date", DataType::Utf8, true),
-    ]);
-
     RecordBatch::try_new(
-        Arc::new(schema),
+        Arc::new(schema::papers_schema()),
         vec![
             Arc::new(pmid),
             Arc::new(doi),
@@ -160,19 +133,8 @@ pub fn papers_to_batch(papers: &[Paper]) -> RecordBatch {
 }
 
 pub fn authors_to_batch(authors: &[Author]) -> RecordBatch {
-    let schema = Schema::new(vec![
-        Field::new("pmid", DataType::Int32, false),
-        Field::new("author_position", DataType::Int16, false),
-        Field::new("last_name", DataType::Utf8, true),
-        Field::new("fore_name", DataType::Utf8, true),
-        Field::new("initials", DataType::Utf8, true),
-        Field::new("orcid", DataType::Utf8, true),
-        Field::new("affiliation", DataType::Utf8, true),
-        Field::new("is_collective", DataType::Boolean, false),
-    ]);
-
     RecordBatch::try_new(
-        Arc::new(schema),
+        Arc::new(schema::authors_schema()),
         vec![
             Arc::new(Int32Array::from(authors.iter().map(|a| a.pmid).collect::<Vec<_>>())),
             Arc::new(Int16Array::from(
@@ -202,17 +164,8 @@ pub fn authors_to_batch(authors: &[Author]) -> RecordBatch {
 }
 
 pub fn mesh_to_batch(headings: &[MeshHeading]) -> RecordBatch {
-    let schema = Schema::new(vec![
-        Field::new("pmid", DataType::Int32, false),
-        Field::new("descriptor_ui", DataType::Utf8, false),
-        Field::new("descriptor_name", DataType::Utf8, false),
-        Field::new("qualifier_ui", DataType::Utf8, true),
-        Field::new("qualifier_name", DataType::Utf8, true),
-        Field::new("is_major_topic", DataType::Boolean, false),
-    ]);
-
     RecordBatch::try_new(
-        Arc::new(schema),
+        Arc::new(schema::mesh_headings_schema()),
         vec![
             Arc::new(Int32Array::from(headings.iter().map(|m| m.pmid).collect::<Vec<_>>())),
             Arc::new(StringArray::from(
@@ -242,16 +195,8 @@ pub fn mesh_to_batch(headings: &[MeshHeading]) -> RecordBatch {
 }
 
 pub fn grants_to_batch(grants: &[Grant]) -> RecordBatch {
-    let schema = Schema::new(vec![
-        Field::new("pmid", DataType::Int32, false),
-        Field::new("grant_id", DataType::Utf8, true),
-        Field::new("acronym", DataType::Utf8, true),
-        Field::new("agency", DataType::Utf8, true),
-        Field::new("country", DataType::Utf8, true),
-    ]);
-
     RecordBatch::try_new(
-        Arc::new(schema),
+        Arc::new(schema::grants_schema()),
         vec![
             Arc::new(Int32Array::from(grants.iter().map(|g| g.pmid).collect::<Vec<_>>())),
             Arc::new(StringArray::from(
@@ -272,15 +217,8 @@ pub fn grants_to_batch(grants: &[Grant]) -> RecordBatch {
 }
 
 pub fn chemicals_to_batch(chemicals: &[Chemical]) -> RecordBatch {
-    let schema = Schema::new(vec![
-        Field::new("pmid", DataType::Int32, false),
-        Field::new("registry_number", DataType::Utf8, true),
-        Field::new("substance_ui", DataType::Utf8, true),
-        Field::new("substance_name", DataType::Utf8, true),
-    ]);
-
     RecordBatch::try_new(
-        Arc::new(schema),
+        Arc::new(schema::chemicals_schema()),
         vec![
             Arc::new(Int32Array::from(
                 chemicals.iter().map(|c| c.pmid).collect::<Vec<_>>(),
@@ -308,7 +246,7 @@ pub fn chemicals_to_batch(chemicals: &[Chemical]) -> RecordBatch {
     .expect("chemicals schema mismatch")
 }
 
-/// Convert full ParseResult into a tuple of RecordBatches + delete_pmids.
+/// Convert full ParseResult into a tuple of RecordBatches.
 pub fn result_to_batches(
     result: &ParseResult,
 ) -> (

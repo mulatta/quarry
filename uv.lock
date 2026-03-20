@@ -6,6 +6,13 @@ resolution-markers = [
     "python_full_version < '3.14'",
 ]
 
+[manifest]
+members = [
+    "quarry",
+    "quarry-graph",
+    "quarry-parse",
+]
+
 [[package]]
 name = "accelerate"
 version = "1.13.0"
@@ -1938,6 +1945,8 @@ dependencies = [
     { name = "peft" },
     { name = "pyarrow" },
     { name = "pydantic-settings" },
+    { name = "quarry-graph" },
+    { name = "quarry-parse" },
     { name = "sentence-transformers" },
     { name = "torch" },
 ]
@@ -1958,9 +1967,21 @@ requires-dist = [
     { name = "peft" },
     { name = "pyarrow" },
     { name = "pydantic-settings" },
+    { name = "quarry-graph", editable = "quarry-graph" },
+    { name = "quarry-parse", editable = "quarry-parse" },
     { name = "sentence-transformers" },
     { name = "torch" },
 ]
+
+[[package]]
+name = "quarry-graph"
+version = "0.1.0"
+source = { editable = "quarry-graph" }
+
+[[package]]
+name = "quarry-parse"
+version = "0.1.0"
+source = { editable = "quarry-parse" }
 
 [[package]]
 name = "questionary"

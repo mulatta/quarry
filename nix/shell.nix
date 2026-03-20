@@ -1,16 +1,18 @@
 {
   perSystem =
-    { pkgs, ... }:
+    { pkgs, self', ... }:
     {
       devShells.default = pkgs.mkShell {
-        packages = with pkgs; [
-          python313
-          uv
-          rustc
-          cargo
-          clippy
-          maturin
-        ];
+        packages =
+          (with pkgs; [
+            python313
+            uv
+            rustc
+            cargo
+            clippy
+            maturin
+          ])
+          ++ [ self'.packages.quarry-build ];
 
         env = {
           UV_PYTHON_DOWNLOADS = "never";
@@ -27,9 +29,6 @@
 
           export VIRTUAL_ENV="$PWD/.venv"
           export PATH="$VIRTUAL_ENV/bin:$PATH"
-
-          maturin develop --manifest-path quarry-parse/Cargo.toml --release --quiet
-          maturin develop --manifest-path quarry-graph/Cargo.toml --release --quiet
         '';
       };
     };
