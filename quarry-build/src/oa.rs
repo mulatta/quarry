@@ -297,9 +297,48 @@ pub fn build_oa_local(
     })
 }
 
+/// Parse a single downloaded gz buffer into a batch of `OaLineResult`s.
+///
+/// Runs decompression + JSON parsing on the calling (tokio) task.
+/// Returns the parsed results and a count of lines that failed to parse.
+fn parse_gz_bytes(
+    bytes: impl AsRef<[u8]>,
+    t2_domains: &HashSet<String>,
+) -> (Vec<OaLineResult>, usize) {
+    let reader = BufReader::with_capacity(
+        256 * 1024,
+        GzDecoder::new(std::io::Cursor::new(bytes)),
+    );
+    let mut results = Vec::new();
+    let mut failed = 0usize;
+    for line_result in reader.lines() {
+        let line = match line_result {
+            Ok(l) => l,
+            Err(_) => {
+                failed += 1;
+                continue;
+            }
+        };
+        if line.is_empty() {
+            continue;
+        }
+        match oa_json::parse_line(&line, t2_domains) {
+            Ok(parsed) => results.push(parsed),
+            Err(_) => {
+                failed += 1;
+            }
+        }
+    }
+    (results, failed)
+}
+
 /// Build OA Parquet files from S3.
 ///
-/// Downloads each .gz file entirely, decompresses, and streams lines.
+/// Downloads .gz files concurrently (controlled by
+/// `config.s3_download_concurrency`), decompresses and parses on
+/// tokio tasks, then sends parsed batches to the main thread via
+/// an mpsc channel for sequential sink writes.
+///
 /// Requires AWS credentials via environment (AWS_ACCESS_KEY_ID, etc.)
 /// or IAM role. For the public `openalex` bucket, unsigned requests
 /// may suffice depending on object_store configuration.
@@ -308,22 +347,24 @@ pub fn build_oa_s3(
     s3_url: &str,
 ) -> Result<OaBuildStats, Box<dyn std::error::Error>> {
     let t0 = Instant::now();
-    let t2_domains = config.t2_domains_set();
+    let t2_domains: Arc<HashSet<String>> = Arc::new(config.t2_domains_set());
+    let concurrency = config.s3_download_concurrency;
 
     let (bucket, prefix) = parse_s3_url(s3_url)?;
     eprintln!("oa: listing s3://{bucket}/{prefix}");
 
     let rt = tokio::runtime::Runtime::new()?;
-    let store = object_store::aws::AmazonS3Builder::from_env()
-        .with_bucket_name(&bucket)
-        .with_region("us-east-1")
-        .with_skip_signature(true)
-        .build()?;
+    let store: Arc<dyn object_store::ObjectStore> = Arc::new(
+        object_store::aws::AmazonS3Builder::from_env()
+            .with_bucket_name(&bucket)
+            .with_region("us-east-1")
+            .with_skip_signature(true)
+            .build()?,
+    );
 
     // List all .gz objects under prefix
     let objects = rt.block_on(async {
         use futures::TryStreamExt;
-        use object_store::ObjectStore;
         let prefix_path = object_store::path::Path::from(prefix.as_str());
         store
             .list(Some(&prefix_path))
@@ -337,34 +378,81 @@ pub fn build_oa_s3(
         .collect();
 
     let num_files = gz_objects.len();
-    eprintln!("oa: found {num_files} .gz objects in s3://{bucket}/{prefix}");
+    eprintln!(
+        "oa: found {num_files} .gz objects in s3://{bucket}/{prefix} (concurrency={concurrency})"
+    );
 
     let mut sinks = OaSinks::new(config);
     let mut acc = OaBatchAccumulator::new(config.oa_batch_size);
     let mut counters = OaCounters::default();
 
-    for (file_idx, obj) in gz_objects.iter().enumerate() {
-        let bytes = rt.block_on(async {
-            use object_store::ObjectStore;
-            let result = store.get(&obj.location).await?;
-            result.bytes().await
-        })?;
+    // Channel: download+parse tasks → main thread
+    let (tx, mut rx) =
+        tokio::sync::mpsc::channel::<(Vec<OaLineResult>, usize)>(concurrency);
 
-        let reader = BufReader::with_capacity(
-            256 * 1024,
-            GzDecoder::new(std::io::Cursor::new(bytes)),
-        );
-        process_gz_reader(reader, &t2_domains, &mut acc, &mut sinks, &mut counters)?;
+    // Spawn the producer: fans out downloads using buffer_unordered
+    let store_clone = Arc::clone(&store);
+    let t2_clone = Arc::clone(&t2_domains);
+    rt.spawn(async move {
+        use futures::StreamExt;
 
-        if (file_idx + 1) % 10 == 0 || file_idx + 1 == num_files {
+        let download_futures = gz_objects.into_iter().map(|obj| {
+            let store = Arc::clone(&store_clone);
+            let t2 = Arc::clone(&t2_clone);
+            async move {
+                let dl_result = async {
+                    let result = store.get(&obj.location).await?;
+                    result.bytes().await
+                }
+                .await;
+
+                match dl_result {
+                    Ok(bytes) => {
+                        let (results, failed) = parse_gz_bytes(bytes, &t2);
+                        (results, failed)
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "oa: WARN: failed to download {}: {}",
+                            obj.location, e
+                        );
+                        // Return empty batch, count as 1 failed line
+                        (Vec::new(), 1)
+                    }
+                }
+            }
+        });
+
+        let mut stream =
+            futures::stream::iter(download_futures).buffer_unordered(concurrency);
+
+        while let Some(batch) = stream.next().await {
+            if tx.send(batch).await.is_err() {
+                // Receiver dropped — stop downloading
+                break;
+            }
+        }
+        // tx is dropped here, closing the channel
+    });
+
+    // Main thread: receive parsed batches, accumulate, flush to sinks
+    let mut files_done = 0usize;
+    while let Some((batch, failed)) = rt.block_on(rx.recv()) {
+        counters.failed_lines += failed;
+        for result in batch {
+            acc.push(result);
+            if acc.should_flush() {
+                acc.flush(&mut sinks, &mut counters)?;
+            }
+        }
+        files_done += 1;
+
+        if files_done % 10 == 0 || files_done == num_files {
             let elapsed = t0.elapsed().as_secs_f64();
             let total_w = counters.works + acc.works.len();
             eprintln!(
                 "oa: {}/{} s3 objects, {} works ({:.1}s)",
-                file_idx + 1,
-                num_files,
-                total_w,
-                elapsed,
+                files_done, num_files, total_w, elapsed,
             );
         }
     }

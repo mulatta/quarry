@@ -47,6 +47,10 @@ enum Command {
         /// OA batch size — flush to Parquet every N works.
         #[arg(long, default_value_t = 50_000)]
         batch_size: usize,
+
+        /// Number of concurrent S3 downloads.
+        #[arg(long, default_value_t = 8)]
+        s3_concurrency: usize,
     },
     /// Enrich: JOIN works + papers → enriched works with pm_ fields,
     /// JOIN mesh_headings + id_crosswalk → work_mesh.
@@ -76,8 +80,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             s3_prefix,
             local_dir,
             batch_size,
+            s3_concurrency,
         } => {
             config.oa_batch_size = batch_size;
+            config.s3_download_concurrency = s3_concurrency;
 
             let stats = match (local_dir, s3_prefix) {
                 (Some(dir), _) => oa::build_oa_local(&config, &dir)?,

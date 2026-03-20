@@ -23,6 +23,8 @@ pub struct BuildConfig {
     pub t2_domains: Vec<String>,
     /// OA batch size — flush to Parquet every N works.
     pub oa_batch_size: usize,
+    /// Number of concurrent S3 downloads.
+    pub s3_download_concurrency: usize,
 }
 
 impl Default for BuildConfig {
@@ -33,6 +35,7 @@ impl Default for BuildConfig {
             max_rows_per_file: 500_000,
             t2_domains: DEFAULT_T2_DOMAINS.iter().map(|s| s.to_string()).collect(),
             oa_batch_size: 50_000,
+            s3_download_concurrency: 8,
         }
     }
 }
