@@ -357,11 +357,10 @@ fn cache_obj_dir(cache_dir: &Path, object_path: &str) -> PathBuf {
 fn cache_hit(cache_dir: &Path, object_path: &str, etag: &str) -> Option<PathBuf> {
     let dir = cache_obj_dir(cache_dir, object_path);
     let etag_path = dir.join("etag");
-    if let Ok(stored) = std::fs::read_to_string(etag_path) {
-        if stored.trim() == etag && dir.join("works.parquet").exists() {
+    if let Ok(stored) = std::fs::read_to_string(etag_path)
+        && stored.trim() == etag && dir.join("works.parquet").exists() {
             return Some(dir);
         }
-    }
     None
 }
 
@@ -599,14 +598,13 @@ pub fn build_oa_s3(
                 let etag = obj.e_tag.clone().unwrap_or_default();
 
                 // Check cache first — reads Parquet (no gz parsing)
-                if let Some(ref cache_dir) = cache {
-                    if let Some(cached_dir) = cache_hit(cache_dir, &obj_path, &etag) {
+                if let Some(ref cache_dir) = cache
+                    && let Some(cached_dir) = cache_hit(cache_dir, &obj_path, &etag) {
                         let output = tokio::task::spawn_blocking(move || cache_read(&cached_dir))
                             .await
                             .unwrap_or_else(|_| FileOutput::empty());
                         return output;
                     }
-                }
 
                 // Download from S3
                 let dl_result = async {
@@ -677,7 +675,7 @@ pub fn build_oa_s3(
 
         files_done += 1;
 
-        if files_done % 10 == 0 || files_done == num_files {
+        if files_done.is_multiple_of(10) || files_done == num_files {
             let elapsed = t0.elapsed().as_secs_f64();
             eprintln!(
                 "oa: {}/{} s3 objects, {} works, {} cached ({:.1}s)",

@@ -175,7 +175,7 @@ pub fn build_pubmed(
         }
         files_done += 1;
 
-        if files_done % 100 == 0 || files_done == num_files {
+        if files_done.is_multiple_of(100) || files_done == num_files {
             let elapsed = t0.elapsed().as_secs_f64();
             eprintln!(
                 "pubmed: {files_done}/{num_files} files, {total_papers} papers ({elapsed:.1}s)"
