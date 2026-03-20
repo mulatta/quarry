@@ -51,6 +51,11 @@ enum Command {
         /// Number of concurrent S3 downloads.
         #[arg(long, default_value_t = 8)]
         s3_concurrency: usize,
+
+        /// Local cache directory for downloaded S3 .gz files.
+        /// Enables ETag-based caching to skip re-downloads.
+        #[arg(long)]
+        cache_dir: Option<PathBuf>,
     },
     /// Enrich: JOIN works + papers → enriched works with pm_ fields,
     /// JOIN mesh_headings + id_crosswalk → work_mesh.
@@ -81,9 +86,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             local_dir,
             batch_size,
             s3_concurrency,
+            cache_dir,
         } => {
             config.oa_batch_size = batch_size;
             config.s3_download_concurrency = s3_concurrency;
+            config.oa_cache_dir = cache_dir;
 
             let stats = match (local_dir, s3_prefix) {
                 (Some(dir), _) => oa::build_oa_local(&config, &dir)?,
@@ -93,10 +100,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             };
             eprintln!(
-                "done: {} works, {} citations from {} files in {:.1}s",
+                "done: {} works, {} citations from {} files ({} cached) in {:.1}s",
                 stats.num_works,
                 stats.num_citations,
                 stats.num_files_processed,
+                stats.num_cache_hits,
                 stats.elapsed_secs,
             );
         }

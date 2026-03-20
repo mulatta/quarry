@@ -25,6 +25,8 @@ pub struct BuildConfig {
     pub oa_batch_size: usize,
     /// Number of concurrent S3 downloads.
     pub s3_download_concurrency: usize,
+    /// Optional local cache directory for downloaded .gz files.
+    pub oa_cache_dir: Option<PathBuf>,
 }
 
 impl Default for BuildConfig {
@@ -36,6 +38,7 @@ impl Default for BuildConfig {
             t2_domains: DEFAULT_T2_DOMAINS.iter().map(|s| s.to_string()).collect(),
             oa_batch_size: 50_000,
             s3_download_concurrency: 8,
+            oa_cache_dir: None,
         }
     }
 }

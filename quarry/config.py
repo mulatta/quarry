@@ -57,6 +57,9 @@ class Settings(BaseSettings):
     # Rust build output (quarry-build CLI)
     build_output_dir: Path = _DATA_DIR / "build_output"
 
+    # OA S3 download cache (ETag-based, optional)
+    oa_cache_dir: Path = _DATA_DIR / "oa_cache"
+
     # Batch sizes
     duckdb_batch_size: int = 10_000
 

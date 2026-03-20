@@ -105,6 +105,8 @@ def oa_parquet_build(context: AssetExecutionContext) -> MaterializeResult:
             "build-oa",
             "--s3-prefix",
             settings.oa_s3_prefix,
+            "--cache-dir",
+            str(settings.oa_cache_dir),
         ],
         check=True,
     )

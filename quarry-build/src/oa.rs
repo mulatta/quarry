@@ -4,9 +4,13 @@
 //! - Local directory of .gz files (`build_oa_local`)
 //! - S3 prefix (`build_oa_s3`)
 //!
-//! Architecture: sequential file streaming → line-by-line JSON parse →
-//! batch accumulate → flush to ParquetSink. Peak memory bounded to
-//! one gz file decompression + batch buffers (~50-100 MB).
+//! Architecture (S3 path):
+//!   tokio async tasks (download) → spawn_blocking (decompress+parse)
+//!   → mpsc channel → main thread (accumulate + sink write)
+//!
+//! Optional local cache (`--cache-dir`): downloaded .gz files are saved
+//! with ETag sidecar files. On re-run, files with matching ETag are
+//! read from cache instead of re-downloading.
 
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader};
@@ -32,6 +36,7 @@ pub struct OaBuildStats {
     pub num_crosswalk: usize,
     pub num_files_processed: usize,
     pub num_failed_lines: usize,
+    pub num_cache_hits: usize,
     pub elapsed_secs: f64,
 }
 
@@ -91,6 +96,7 @@ struct OaCounters {
     citations: usize,
     crosswalk: usize,
     failed_lines: usize,
+    cache_hits: usize,
 }
 
 struct OaBatchAccumulator {
@@ -226,6 +232,78 @@ fn collect_gz_files(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Parse a gz buffer (in-memory bytes) into parsed line results.
+/// Runs decompression + JSON parsing — CPU-heavy, should be called
+/// from spawn_blocking or a dedicated thread.
+fn parse_gz_bytes(
+    bytes: &[u8],
+    t2_domains: &HashSet<String>,
+) -> (Vec<OaLineResult>, usize) {
+    let reader = BufReader::with_capacity(256 * 1024, GzDecoder::new(bytes));
+    let mut results = Vec::new();
+    let mut failed = 0usize;
+    for line_result in reader.lines() {
+        let line = match line_result {
+            Ok(l) => l,
+            Err(_) => {
+                failed += 1;
+                continue;
+            }
+        };
+        if line.is_empty() {
+            continue;
+        }
+        match oa_json::parse_line(&line, t2_domains) {
+            Ok(parsed) => results.push(parsed),
+            Err(_) => {
+                failed += 1;
+            }
+        }
+    }
+    (results, failed)
+}
+
+// ── Cache helpers ──
+
+/// Derive a flat cache filename from an S3 object path.
+/// e.g. "data/works/updated_date=2024-01-01/part_000.gz"
+///   → "data__works__updated_date=2024-01-01__part_000.gz"
+fn cache_filename(object_path: &str) -> String {
+    object_path.replace('/', "__")
+}
+
+/// Check if a cached .gz file exists with a matching ETag.
+fn cache_hit(cache_dir: &Path, object_path: &str, etag: &str) -> Option<PathBuf> {
+    let name = cache_filename(object_path);
+    let gz_path = cache_dir.join(&name);
+    let etag_path = cache_dir.join(format!("{name}.etag"));
+
+    if gz_path.exists() && etag_path.exists() {
+        if let Ok(stored) = std::fs::read_to_string(&etag_path) {
+            if stored.trim() == etag {
+                return Some(gz_path);
+            }
+        }
+    }
+    None
+}
+
+/// Save downloaded bytes to cache with ETag sidecar.
+fn cache_save(cache_dir: &Path, object_path: &str, etag: &str, bytes: &[u8]) {
+    let name = cache_filename(object_path);
+    let gz_path = cache_dir.join(&name);
+    let etag_path = cache_dir.join(format!("{name}.etag"));
+
+    // Best-effort: don't fail the pipeline if cache write fails
+    if let Err(e) = std::fs::write(&gz_path, bytes) {
+        eprintln!("oa: WARN: cache write failed for {name}: {e}");
+        return;
+    }
+    if let Err(e) = std::fs::write(&etag_path, etag) {
+        eprintln!("oa: WARN: etag write failed for {name}: {e}");
+    }
+}
+
 // ── Public entry points ──
 
 /// Build OA Parquet files from a local directory of .gz JSONL files.
@@ -293,55 +371,21 @@ pub fn build_oa_local(
         num_crosswalk: counters.crosswalk,
         num_files_processed: num_files,
         num_failed_lines: counters.failed_lines,
+        num_cache_hits: 0,
         elapsed_secs: elapsed,
     })
-}
-
-/// Parse a single downloaded gz buffer into a batch of `OaLineResult`s.
-///
-/// Runs decompression + JSON parsing on the calling (tokio) task.
-/// Returns the parsed results and a count of lines that failed to parse.
-fn parse_gz_bytes(
-    bytes: impl AsRef<[u8]>,
-    t2_domains: &HashSet<String>,
-) -> (Vec<OaLineResult>, usize) {
-    let reader = BufReader::with_capacity(
-        256 * 1024,
-        GzDecoder::new(std::io::Cursor::new(bytes)),
-    );
-    let mut results = Vec::new();
-    let mut failed = 0usize;
-    for line_result in reader.lines() {
-        let line = match line_result {
-            Ok(l) => l,
-            Err(_) => {
-                failed += 1;
-                continue;
-            }
-        };
-        if line.is_empty() {
-            continue;
-        }
-        match oa_json::parse_line(&line, t2_domains) {
-            Ok(parsed) => results.push(parsed),
-            Err(_) => {
-                failed += 1;
-            }
-        }
-    }
-    (results, failed)
 }
 
 /// Build OA Parquet files from S3.
 ///
 /// Downloads .gz files concurrently (controlled by
-/// `config.s3_download_concurrency`), decompresses and parses on
-/// tokio tasks, then sends parsed batches to the main thread via
-/// an mpsc channel for sequential sink writes.
+/// `config.s3_download_concurrency`). Each file is:
+/// 1. Downloaded (async I/O on tokio runtime)
+/// 2. Decompressed + parsed (spawn_blocking — dedicated thread pool)
+/// 3. Sent to main thread via mpsc for sequential sink writes
 ///
-/// Requires AWS credentials via environment (AWS_ACCESS_KEY_ID, etc.)
-/// or IAM role. For the public `openalex` bucket, unsigned requests
-/// may suffice depending on object_store configuration.
+/// Optional `cache_dir`: downloaded .gz files are cached locally with
+/// ETag sidecar files. On re-run, cache hits skip the S3 download.
 pub fn build_oa_s3(
     config: &BuildConfig,
     s3_url: &str,
@@ -349,6 +393,12 @@ pub fn build_oa_s3(
     let t0 = Instant::now();
     let t2_domains: Arc<HashSet<String>> = Arc::new(config.t2_domains_set());
     let concurrency = config.s3_download_concurrency;
+    let cache_dir = config.oa_cache_dir.clone();
+
+    if let Some(ref dir) = cache_dir {
+        std::fs::create_dir_all(dir)?;
+        eprintln!("oa: cache dir: {}", dir.display());
+    }
 
     let (bucket, prefix) = parse_s3_url(s3_url)?;
     eprintln!("oa: listing s3://{bucket}/{prefix}");
@@ -388,18 +438,41 @@ pub fn build_oa_s3(
 
     // Channel: download+parse tasks → main thread
     let (tx, mut rx) =
-        tokio::sync::mpsc::channel::<(Vec<OaLineResult>, usize)>(concurrency);
+        tokio::sync::mpsc::channel::<(Vec<OaLineResult>, usize, bool)>(concurrency);
 
     // Spawn the producer: fans out downloads using buffer_unordered
     let store_clone = Arc::clone(&store);
     let t2_clone = Arc::clone(&t2_domains);
+    let cache_clone = cache_dir.clone();
     rt.spawn(async move {
         use futures::StreamExt;
 
         let download_futures = gz_objects.into_iter().map(|obj| {
             let store = Arc::clone(&store_clone);
             let t2 = Arc::clone(&t2_clone);
+            let cache = cache_clone.clone();
             async move {
+                let obj_path = obj.location.as_ref().to_string();
+                let etag = obj.e_tag.clone().unwrap_or_default();
+
+                // Check cache first
+                if let Some(ref cache_dir) = cache {
+                    if let Some(cached_path) = cache_hit(cache_dir, &obj_path, &etag) {
+                        // Cache hit: read from disk on blocking thread
+                        let t2 = Arc::clone(&t2);
+                        let result = tokio::task::spawn_blocking(move || {
+                            match std::fs::read(&cached_path) {
+                                Ok(bytes) => parse_gz_bytes(&bytes, &t2),
+                                Err(_) => (Vec::new(), 1),
+                            }
+                        })
+                        .await
+                        .unwrap_or((Vec::new(), 1));
+                        return (result.0, result.1, true); // cache_hit = true
+                    }
+                }
+
+                // Download from S3
                 let dl_result = async {
                     let result = store.get(&obj.location).await?;
                     result.bytes().await
@@ -408,16 +481,26 @@ pub fn build_oa_s3(
 
                 match dl_result {
                     Ok(bytes) => {
-                        let (results, failed) = parse_gz_bytes(bytes, &t2);
-                        (results, failed)
+                        // Save to cache before parsing
+                        if let Some(ref cache_dir) = cache {
+                            cache_save(cache_dir, &obj_path, &etag, &bytes);
+                        }
+
+                        // Parse on blocking thread pool
+                        let t2 = Arc::clone(&t2);
+                        let result = tokio::task::spawn_blocking(move || {
+                            parse_gz_bytes(&bytes, &t2)
+                        })
+                        .await
+                        .unwrap_or((Vec::new(), 1));
+                        (result.0, result.1, false)
                     }
                     Err(e) => {
                         eprintln!(
                             "oa: WARN: failed to download {}: {}",
                             obj.location, e
                         );
-                        // Return empty batch, count as 1 failed line
-                        (Vec::new(), 1)
+                        (Vec::new(), 1, false)
                     }
                 }
             }
@@ -428,17 +511,18 @@ pub fn build_oa_s3(
 
         while let Some(batch) = stream.next().await {
             if tx.send(batch).await.is_err() {
-                // Receiver dropped — stop downloading
                 break;
             }
         }
-        // tx is dropped here, closing the channel
     });
 
     // Main thread: receive parsed batches, accumulate, flush to sinks
     let mut files_done = 0usize;
-    while let Some((batch, failed)) = rt.block_on(rx.recv()) {
+    while let Some((batch, failed, was_cached)) = rt.block_on(rx.recv()) {
         counters.failed_lines += failed;
+        if was_cached {
+            counters.cache_hits += 1;
+        }
         for result in batch {
             acc.push(result);
             if acc.should_flush() {
@@ -451,8 +535,8 @@ pub fn build_oa_s3(
             let elapsed = t0.elapsed().as_secs_f64();
             let total_w = counters.works + acc.works.len();
             eprintln!(
-                "oa: {}/{} s3 objects, {} works ({:.1}s)",
-                files_done, num_files, total_w, elapsed,
+                "oa: {}/{} s3 objects, {} works, {} cached ({:.1}s)",
+                files_done, num_files, total_w, counters.cache_hits, elapsed,
             );
         }
     }
@@ -462,8 +546,8 @@ pub fn build_oa_s3(
 
     let elapsed = t0.elapsed().as_secs_f64();
     eprintln!(
-        "oa: done — {} works, {} citations in {:.1}s",
-        counters.works, counters.citations, elapsed,
+        "oa: done — {} works, {} citations, {} cache hits in {:.1}s",
+        counters.works, counters.citations, counters.cache_hits, elapsed,
     );
     if counters.failed_lines > 0 {
         eprintln!("oa: WARN: {} lines failed to parse", counters.failed_lines);
@@ -477,6 +561,7 @@ pub fn build_oa_s3(
         num_crosswalk: counters.crosswalk,
         num_files_processed: num_files,
         num_failed_lines: counters.failed_lines,
+        num_cache_hits: counters.cache_hits,
         elapsed_secs: elapsed,
     })
 }
@@ -507,5 +592,32 @@ mod tests {
     fn test_parse_s3_url_error() {
         assert!(parse_s3_url("https://example.com").is_err());
         assert!(parse_s3_url("s3://nobucket").is_err());
+    }
+
+    #[test]
+    fn test_cache_filename() {
+        assert_eq!(
+            cache_filename("data/works/updated_date=2024-01-01/part_000.gz"),
+            "data__works__updated_date=2024-01-01__part_000.gz"
+        );
+    }
+
+    #[test]
+    fn test_cache_hit_miss() {
+        let dir = std::env::temp_dir().join("quarry_test_cache");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // No cached file → miss
+        assert!(cache_hit(&dir, "test/file.gz", "etag123").is_none());
+
+        // Write cache
+        cache_save(&dir, "test/file.gz", "etag123", b"fake data");
+        assert!(cache_hit(&dir, "test/file.gz", "etag123").is_some());
+
+        // Different etag → miss
+        assert!(cache_hit(&dir, "test/file.gz", "etag456").is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
