@@ -1,4 +1,4 @@
-"""Staging assets: parse raw data → Arrow Feather files.
+"""Staging assets: parse raw data → Arrow Feather files, Rust build pipeline.
 
 No DuckDB access. All assets here can run in parallel.
 Uses AutomationCondition.eager() with data_version_changed() so that
@@ -6,6 +6,8 @@ scheduled runs skip re-processing when upstream data hasn't changed.
 
 DO NOT use `from __future__ import annotations` here — Dagster inspects types at runtime.
 """
+
+import subprocess
 
 import pyarrow as pa
 import quarry_parse
@@ -17,7 +19,7 @@ from dagster import (
     asset,
 )
 
-from quarry.assets.download import mesh_descriptor_sync
+from quarry.assets.download import mesh_descriptor_sync, pubmed_baseline_sync
 from quarry.config import settings
 from quarry.etl.feather import clear, write_tables
 
@@ -61,3 +63,64 @@ def mesh_stage(
     return MaterializeResult(
         metadata={"tree_entries": MetadataValue.int(table.num_rows)}
     )
+
+
+# -- Rust build pipeline ---------------------------------------------------
+
+
+@asset(
+    group_name="build",
+    deps=[pubmed_baseline_sync],
+    description="quarry-build build-pubmed → PubMed Parquet files.",
+    kinds={"rust", "parquet"},
+)
+def pubmed_parquet_build(context: AssetExecutionContext) -> MaterializeResult:
+    out = settings.build_output_dir
+    subprocess.run(
+        [
+            "quarry-build",
+            "--output",
+            str(out),
+            "build-pubmed",
+            "--xml-dir",
+            str(settings.pubmed_baseline_dir),
+        ],
+        check=True,
+    )
+    return MaterializeResult(metadata={"output_dir": MetadataValue.path(str(out))})
+
+
+@asset(
+    group_name="build",
+    description="quarry-build build-oa → OpenAlex Parquet files.",
+    kinds={"rust", "parquet"},
+)
+def oa_parquet_build(context: AssetExecutionContext) -> MaterializeResult:
+    out = settings.build_output_dir
+    subprocess.run(
+        [
+            "quarry-build",
+            "--output",
+            str(out),
+            "build-oa",
+            "--s3-prefix",
+            settings.oa_s3_prefix,
+        ],
+        check=True,
+    )
+    return MaterializeResult(metadata={"output_dir": MetadataValue.path(str(out))})
+
+
+@asset(
+    group_name="build",
+    deps=[pubmed_parquet_build, oa_parquet_build],
+    description="quarry-build enrich → enriched works + work_mesh Parquet.",
+    kinds={"rust", "parquet"},
+)
+def enrich_build(context: AssetExecutionContext) -> MaterializeResult:
+    out = settings.build_output_dir
+    subprocess.run(
+        ["quarry-build", "--output", str(out), "enrich"],
+        check=True,
+    )
+    return MaterializeResult(metadata={"output_dir": MetadataValue.path(str(out))})

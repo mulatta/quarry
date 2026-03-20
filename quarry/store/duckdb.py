@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS papers (
     pmid         INTEGER PRIMARY KEY,
     doi          VARCHAR,
     pmc_id       VARCHAR,
-    title        VARCHAR NOT NULL,
+    title        VARCHAR,
     abstract     VARCHAR,
     pub_year     SMALLINT,
     pub_date     DATE,
@@ -132,7 +132,14 @@ CREATE TABLE IF NOT EXISTS works (
     apt            FLOAT,
     is_clinical    BOOLEAN,
     is_retracted   BOOLEAN DEFAULT FALSE,
-    updated_date   DATE
+    updated_date   DATE,
+    pm_journal_abbr    VARCHAR,
+    pm_country         VARCHAR,
+    pm_medline_status  VARCHAR,
+    pm_pub_type        VARCHAR[],
+    pm_created_date    DATE,
+    pm_revised_date    DATE,
+    pm_indexed_date    DATE
 );
 
 CREATE TABLE IF NOT EXISTS work_authors (
@@ -210,18 +217,57 @@ class DuckDBStore:
 
     def init_schema(self):
         """Create all tables if they don't exist (v1 + v2)."""
-        self.conn.execute("BEGIN TRANSACTION")
+        # Run DDL first (idempotent CREATE IF NOT EXISTS)
+        for ddl in (DDL, DDL_V2, DDL_V2_INDEXES):
+            for stmt in ddl.split(";"):
+                stmt = stmt.strip()
+                if stmt:
+                    self.conn.execute(stmt)
+
+        # Migrations run outside transactions — ALTER TABLE in DuckDB
+        # auto-commits and aborts outer transactions on failure.
+        self._migrate_work_citations()
+        self._migrate_works_pm_fields()
+        self._migrate_nullable_title()
+
+    def _migrate_works_pm_fields(self):
+        """Add pm_ columns to works table if missing (backwards compat)."""
         try:
-            self._migrate_work_citations()
-            for ddl in (DDL, DDL_V2, DDL_V2_INDEXES):
-                for stmt in ddl.split(";"):
-                    stmt = stmt.strip()
-                    if stmt:
-                        self.conn.execute(stmt)
-            self.conn.execute("COMMIT")
+            cols = self.conn.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'works'"
+            ).fetchall()
         except Exception:
-            self.conn.execute("ROLLBACK")
-            raise
+            return
+        existing = {r[0] for r in cols}
+        pm_cols = [
+            ("pm_journal_abbr", "VARCHAR"),
+            ("pm_country", "VARCHAR"),
+            ("pm_medline_status", "VARCHAR"),
+            ("pm_pub_type", "VARCHAR[]"),
+            ("pm_created_date", "DATE"),
+            ("pm_revised_date", "DATE"),
+            ("pm_indexed_date", "DATE"),
+        ]
+        for col_name, col_type in pm_cols:
+            if col_name not in existing:
+                self.conn.execute(f"ALTER TABLE works ADD COLUMN {col_name} {col_type}")
+
+    def _migrate_nullable_title(self):
+        """Drop NOT NULL on papers.title and works.title if present."""
+        for table in ("papers", "works"):
+            try:
+                info = self.conn.execute(
+                    f"SELECT column_name, is_nullable FROM information_schema.columns "
+                    f"WHERE table_name = '{table}' AND column_name = 'title'"
+                ).fetchone()
+                if info and info[1] == "NO":
+                    # DuckDB: ALTER COLUMN ... DROP NOT NULL
+                    self.conn.execute(
+                        f"ALTER TABLE {table} ALTER COLUMN title DROP NOT NULL"
+                    )
+            except Exception:
+                pass
 
     def _migrate_work_citations(self):
         """Drop work_citations if it has the old VARCHAR schema (citing_work_id)."""

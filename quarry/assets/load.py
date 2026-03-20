@@ -3,8 +3,8 @@
 This is the ONLY asset that writes to DuckDB, eliminating lock contention.
 
 Performance strategy:
-- Baseline: parse XML directly → DuckDB INSERT (no Feather staging, saves 66GB I/O)
-- Updates: Feather staging → INSERT OR REPLACE (incremental, small volume)
+- Baseline: COPY FROM Parquet (built by quarry-build CLI)
+- Updates: parse XML directly → INSERT OR REPLACE (incremental, small volume)
 - Indexes dropped before load, recreated after
 - iCite: DuckDB read_csv() directly from CSV
 
@@ -23,17 +23,16 @@ from dagster import (
 
 from quarry.assets.download import (
     icite_metadata_sync,
-    pubmed_baseline_sync,
     pubmed_updates_sync,
 )
-from quarry.assets.stage import mesh_stage
+from quarry.assets.stage import enrich_build, mesh_stage, pubmed_parquet_build
 from quarry.config import settings
 from quarry.etl.feather import read_tables
 from quarry.resources import DuckDBResource
 
 import quarry_parse
 
-# Column order matching Rust Arrow schema
+# Column order matching Rust Arrow schema (used by updates path)
 _PAPERS_COLS = [
     "pmid",
     "doi",
@@ -101,12 +100,12 @@ _COLS_SELECT = ", ".join(
 @asset(
     group_name="load",
     deps=[
-        pubmed_baseline_sync,
+        pubmed_parquet_build,
         pubmed_updates_sync,
         mesh_stage,
         icite_metadata_sync,
     ],
-    description="Bulk load all data into DuckDB (single writer).",
+    description="Bulk load PubMed data into DuckDB: Parquet baseline → updates → MeSH → iCite.",
     kinds={"duckdb"},
     automation_condition=AutomationCondition.eager(),
 )
@@ -117,6 +116,7 @@ def duckdb_load(
     db = duckdb.store
     conn = db.conn
     staging = settings.staging_dir
+    build_dir = settings.build_output_dir
     stats: dict[str, int] = {}
 
     # Tune DuckDB for bulk load
@@ -129,17 +129,51 @@ def duckdb_load(
     for idx_name, _, _ in _INDEXES:
         conn.execute(f"DROP INDEX IF EXISTS {idx_name}")
 
-    # 1. PubMed baseline (parse XML → Arrow → DuckDB directly, no Feather)
-    n = _load_baseline_direct(conn, context)
-    stats["baseline_papers"] = n
-    context.log.info(f"Baseline: {n:,} papers loaded")
+    # 1. PubMed baseline from Parquet (built by quarry-build build-pubmed)
+    context.log.info("Loading PubMed baseline from Parquet")
+    conn.execute("DELETE FROM papers")
+    for table_name in _CHILD_TABLES:
+        conn.execute(f"DELETE FROM {table_name}")
 
-    # 2. PubMed updates (parse XML directly — same as baseline)
+    _PARQUET_TABLES = [
+        ("papers", "papers"),
+        ("authors", "pubmed_authors"),
+        ("mesh_headings", "mesh_headings"),
+        ("grants", "grants"),
+        ("chemicals", "chemicals"),
+    ]
+    for table, subdir in _PARQUET_TABLES:
+        pq_dir = build_dir / subdir
+        if not pq_dir.exists():
+            context.log.warning(f"Parquet dir missing: {pq_dir}")
+            continue
+        conn.execute(
+            f"INSERT INTO {table} BY NAME "
+            f"SELECT * FROM read_parquet('{pq_dir}/*.parquet')"
+        )
+        n = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        stats[f"baseline_{table}"] = n
+        context.log.info(f"  {table}: {n:,} rows")
+
+    # 2. Soft-delete retracted PMIDs from baseline
+    del_dir = build_dir / "delete_pmids"
+    if del_dir.exists() and any(del_dir.glob("*.parquet")):
+        conn.execute(
+            "UPDATE papers SET is_deleted = TRUE, deleted_date = CURRENT_DATE "
+            f"WHERE pmid IN (SELECT pmid FROM read_parquet('{del_dir}/*.parquet'))"
+        )
+        n_del = conn.execute(
+            "SELECT COUNT(*) FROM papers WHERE is_deleted = TRUE"
+        ).fetchone()[0]
+        stats["baseline_deleted"] = n_del
+        context.log.info(f"  Soft-deleted: {n_del:,} PMIDs")
+
+    # 3. PubMed updates (parse XML directly — incremental, small volume)
     n = _load_updates_direct(conn, context)
     stats["update_papers"] = n
     context.log.info(f"Updates: {n:,} papers loaded")
 
-    # 3. MeSH tree
+    # 4. MeSH tree
     tables = read_tables(staging / "mesh")
     if "mesh_tree" in tables:
         t = tables["mesh_tree"]
@@ -153,7 +187,7 @@ def duckdb_load(
         stats["mesh_entries"] = t.num_rows
         context.log.info(f"MeSH: {t.num_rows:,} entries loaded")
 
-    # 4. iCite metrics (DuckDB reads CSV directly)
+    # 5. iCite metrics (DuckDB reads CSV directly)
     meta_csv = settings.icite_dir / "icite_metadata.csv"
     if meta_csv.exists():
         context.log.info(f"iCite: loading from {meta_csv}")
@@ -175,8 +209,7 @@ def duckdb_load(
 def _register_and_insert(conn, result):
     """Register all Arrow tables, INSERT in a single transaction, then unregister.
 
-    Batches all 5 table INSERTs (papers + 4 child) under one transaction
-    to reduce commit overhead and GIL transitions.
+    Used by _load_updates_direct for incremental updates.
     """
     registered = []
 
@@ -216,57 +249,10 @@ def _register_and_insert(conn, result):
     return n_papers
 
 
-def _load_baseline_direct(conn, context) -> int:
-    """Parse baseline XML directly into DuckDB — no Feather staging.
-
-    Pipeline: parse chunk N+1 in background thread while DuckDB inserts chunk N.
-    DuckDB releases GIL during INSERT → background thread acquires GIL for Rust parse.
-    """
-    from concurrent.futures import ThreadPoolExecutor
-
-    files = sorted(settings.pubmed_baseline_dir.glob("pubmed*.xml.gz"))
-    if not files:
-        return 0
-
-    chunk_size = 20
-    chunks = [files[i : i + chunk_size] for i in range(0, len(files), chunk_size)]
-    n_chunks = len(chunks)
-    context.log.info(
-        f"Baseline: parsing {len(files)} XML files → DuckDB ({n_chunks} chunks, pipelined)"
-    )
-
-    # Truncate all PubMed tables
-    conn.execute("DELETE FROM papers")
-    for table_name in _CHILD_TABLES:
-        conn.execute(f"DELETE FROM {table_name}")
-
-    def _parse(chunk_files):
-        return quarry_parse.parse_pubmed_files([str(p) for p in chunk_files])
-
-    total = 0
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        # Kick off first parse
-        future = pool.submit(_parse, chunks[0])
-
-        for i in range(n_chunks):
-            result = future.result()
-
-            # Pipeline: start parsing next chunk while we INSERT current
-            if i + 1 < n_chunks:
-                future = pool.submit(_parse, chunks[i + 1])
-
-            n_papers = _register_and_insert(conn, result)
-            total += n_papers
-            context.log.info(
-                f"  [{i + 1}/{n_chunks}] +{n_papers:,} papers (total: {total:,})"
-            )
-    return total
-
-
 def _load_updates_direct(conn, context) -> int:
     """Parse update XML directly into DuckDB — pipelined.
 
-    Same pipeline pattern as baseline but with DELETE+INSERT (incremental).
+    Same pipeline pattern as before but with DELETE+INSERT (incremental).
     Batches multiple update files for better throughput.
     """
     from concurrent.futures import ThreadPoolExecutor
@@ -392,35 +378,24 @@ _V2_INDEXES = [
 
 @asset(
     group_name="openalex",
-    description="Load OpenAlex S3 snapshot → DuckDB works + child tables via httpfs ELT.",
-    deps=[duckdb_load],
-    kinds={"duckdb", "s3"},
+    description="Load OpenAlex Parquet → DuckDB works + child tables.",
+    deps=[duckdb_load, enrich_build],
+    kinds={"duckdb"},
 )
 def oa_snapshot_load(
     context: AssetExecutionContext,
     duckdb: DuckDBResource,
 ) -> MaterializeResult:
-    """DuckDB httpfs → S3 glob → works + child tables.
-
-    ELT pattern: raw load → SQL transform → Rust abstract post-processing.
-    """
+    """COPY FROM Parquet (built by quarry-build) → works + child tables."""
     db = duckdb.store
     conn = db.conn
     stats: dict[str, int] = {}
-    oa_prefix = settings.oa_s3_prefix
-    t2_domains = settings.oa_t2_domains
+    build_dir = settings.build_output_dir
 
     # Tune DuckDB for bulk load
     conn.execute("SET memory_limit='40GB'")
     conn.execute("SET threads=8")
     conn.execute("SET preserve_insertion_order=false")
-
-    # Install and load httpfs for S3 access
-    conn.execute("INSTALL httpfs")
-    conn.execute("LOAD httpfs")
-    conn.execute("SET s3_region = 'us-east-1'")
-    conn.execute("SET s3_access_key_id = ''")
-    conn.execute("SET s3_secret_access_key = ''")
 
     # Drop v2 indexes for bulk load
     context.log.info("Dropping v2 indexes for bulk load")
@@ -438,190 +413,27 @@ def oa_snapshot_load(
         conn.execute(f"DELETE FROM {table}")
     conn.execute("DELETE FROM works")
 
-    # List S3 partitions
-    context.log.info(f"Listing S3 partitions from {oa_prefix}")
-    partitions = conn.execute(f"""
-        SELECT DISTINCT file
-        FROM glob('{oa_prefix}/updated_date=*/*.gz')
-        ORDER BY file
-    """).fetchall()
-
-    if not partitions:
-        context.log.warning("No S3 partitions found — loading from single glob")
-        partitions = [(f"{oa_prefix}/updated_date=*/*.gz",)]
-
-    # Build domain list for tier SQL
-    domain_list = ", ".join(f"'{d}'" for d in t2_domains)
-
-    # ELT: raw load → transform
-    total_works = 0
-    glob_pattern = f"{oa_prefix}/updated_date=*/*.gz"
-    context.log.info(f"Loading raw data from {glob_pattern}")
-
-    # Create temp table with raw data
-    conn.execute(f"""
-        CREATE OR REPLACE TEMP TABLE oa_raw AS
-        SELECT id, ids, title, abstract_inverted_index,
-               publication_year, publication_date, type,
-               cited_by_count, is_retracted,
-               primary_location, open_access, primary_topic,
-               authorships, topics, referenced_works, updated_date
-        FROM read_json(
-            '{glob_pattern}',
-            format = 'newline_delimited',
-            compression = 'gzip',
-            ignore_errors = true,
-            columns = {{
-                id: 'VARCHAR', ids: 'JSON', title: 'VARCHAR',
-                abstract_inverted_index: 'JSON',
-                publication_year: 'SMALLINT', publication_date: 'VARCHAR',
-                type: 'VARCHAR', cited_by_count: 'INTEGER',
-                is_retracted: 'BOOLEAN',
-                primary_location: 'JSON', open_access: 'JSON',
-                primary_topic: 'JSON', authorships: 'JSON',
-                topics: 'JSON', referenced_works: 'VARCHAR[]',
-                updated_date: 'VARCHAR'
-            }}
+    # Load from Parquet (enriched_works has pm_ fields from enrich step)
+    _OA_PARQUET_TABLES = [
+        ("works", "enriched_works"),
+        ("work_authors", "work_authors"),
+        ("work_topics", "work_topics"),
+        ("work_citations", "work_citations"),
+        ("id_crosswalk", "id_crosswalk"),
+        ("work_mesh", "work_mesh"),
+    ]
+    for table, subdir in _OA_PARQUET_TABLES:
+        pq_dir = build_dir / subdir
+        if not pq_dir.exists():
+            context.log.warning(f"Parquet dir missing: {pq_dir}")
+            continue
+        conn.execute(
+            f"INSERT INTO {table} BY NAME "
+            f"SELECT * FROM read_parquet('{pq_dir}/*.parquet')"
         )
-    """)
-
-    raw_count = conn.execute("SELECT COUNT(*) FROM oa_raw").fetchone()[0]
-    context.log.info(f"Raw load: {raw_count:,} rows")
-    stats["raw_rows"] = raw_count
-
-    # Transform: works table
-    context.log.info("Transforming → works")
-    conn.execute(f"""
-        INSERT INTO works (
-            work_id, work_id_int, tier, pmid, doi, title, abstract,
-            pub_year, pub_date, type, cited_by_count,
-            host_venue, oa_status, oa_url,
-            is_retracted, updated_date
-        )
-        SELECT
-            REPLACE(id, 'https://openalex.org/', '') AS work_id,
-            CAST(REPLACE(id, 'https://openalex.org/W', '') AS BIGINT) AS work_id_int,
-            CASE
-                WHEN json_extract_string(ids, '$.pmid') IS NOT NULL THEN 't1'
-                WHEN json_extract_string(
-                    json_extract(primary_topic, '$.domain'), '$.display_name'
-                ) IN ({domain_list}) THEN 't2'
-                ELSE 't3'
-            END AS tier,
-            TRY_CAST(
-                REPLACE(json_extract_string(ids, '$.pmid'), 'https://pubmed.ncbi.nlm.nih.gov/', '')
-                AS INTEGER
-            ) AS pmid,
-            json_extract_string(ids, '$.doi') AS doi,
-            COALESCE(title, '') AS title,
-            NULL AS abstract,
-            publication_year,
-            TRY_CAST(publication_date AS DATE),
-            type,
-            cited_by_count,
-            json_extract_string(
-                json_extract(primary_location, '$.source'), '$.display_name'
-            ),
-            json_extract_string(open_access, '$.oa_status'),
-            json_extract_string(open_access, '$.oa_url'),
-            COALESCE(is_retracted, false),
-            TRY_CAST(updated_date AS DATE)
-        FROM oa_raw
-    """)
-    total_works = conn.execute("SELECT COUNT(*) FROM works").fetchone()[0]
-    context.log.info(f"Works: {total_works:,} rows inserted")
-    stats["works"] = total_works
-
-    # Transform: work_authors (T1+T2 only)
-    context.log.info("Transforming → work_authors")
-    conn.execute("""
-        INSERT INTO work_authors
-        SELECT
-            REPLACE(r.id, 'https://openalex.org/', ''),
-            CAST(ROW_NUMBER() OVER (PARTITION BY r.id ORDER BY (SELECT NULL)) AS SMALLINT),
-            json_extract_string(a, '$.author.display_name'),
-            json_extract_string(a, '$.author.orcid'),
-            json_extract_string(json_extract(a, '$.institutions[0]'), '$.display_name'),
-            json_extract_string(json_extract(a, '$.institutions[0]'), '$.ror'),
-            json_extract_string(a, '$.raw_affiliation_strings[0]')
-        FROM oa_raw r, UNNEST(CAST(r.authorships AS JSON[])) AS t(a)
-        WHERE EXISTS (SELECT 1 FROM works w
-                      WHERE w.work_id = REPLACE(r.id, 'https://openalex.org/', '')
-                      AND w.tier IN ('t1','t2'))
-    """)
-    n_authors = conn.execute("SELECT COUNT(*) FROM work_authors").fetchone()[0]
-    context.log.info(f"Work authors: {n_authors:,} rows")
-    stats["work_authors"] = n_authors
-
-    # Transform: work_topics (T1+T2 only)
-    context.log.info("Transforming → work_topics")
-    conn.execute("""
-        INSERT INTO work_topics
-        SELECT
-            REPLACE(r.id, 'https://openalex.org/', ''),
-            REPLACE(json_extract_string(t, '$.id'), 'https://openalex.org/', ''),
-            json_extract_string(t, '$.display_name'),
-            json_extract_string(json_extract(t, '$.subfield'), '$.display_name'),
-            json_extract_string(json_extract(t, '$.field'), '$.display_name'),
-            json_extract_string(json_extract(t, '$.domain'), '$.display_name'),
-            TRY_CAST(json_extract_string(t, '$.score') AS FLOAT)
-        FROM oa_raw r, UNNEST(CAST(r.topics AS JSON[])) AS u(t)
-        WHERE EXISTS (SELECT 1 FROM works w
-                      WHERE w.work_id = REPLACE(r.id, 'https://openalex.org/', '')
-                      AND w.tier IN ('t1','t2'))
-    """)
-    n_topics = conn.execute("SELECT COUNT(*) FROM work_topics").fetchone()[0]
-    context.log.info(f"Work topics: {n_topics:,} rows")
-    stats["work_topics"] = n_topics
-
-    # Transform: work_citations (all tiers — graph completeness)
-    context.log.info("Transforming → work_citations")
-    conn.execute("""
-        INSERT INTO work_citations (citing_id, cited_id)
-        SELECT
-            CAST(REPLACE(r.id, 'https://openalex.org/W', '') AS BIGINT),
-            CAST(REPLACE(UNNEST(r.referenced_works), 'https://openalex.org/W', '') AS BIGINT)
-        FROM oa_raw r
-        WHERE r.referenced_works IS NOT NULL
-    """)
-    n_citations = conn.execute("SELECT COUNT(*) FROM work_citations").fetchone()[0]
-    context.log.info(f"Work citations: {n_citations:,} rows")
-    stats["work_citations"] = n_citations
-
-    # id_crosswalk
-    context.log.info("Building id_crosswalk")
-    conn.execute("""
-        INSERT INTO id_crosswalk (work_id, pmid)
-        SELECT work_id, pmid FROM works WHERE pmid IS NOT NULL
-    """)
-    n_crosswalk = conn.execute("SELECT COUNT(*) FROM id_crosswalk").fetchone()[0]
-    stats["id_crosswalk"] = n_crosswalk
-
-    # work_mesh: JOIN mesh_headings (PMID-based) with id_crosswalk
-    context.log.info("Building work_mesh from mesh_headings JOIN id_crosswalk")
-    n_mesh_src = conn.execute("SELECT COUNT(*) FROM mesh_headings").fetchone()[0]
-    if n_mesh_src > 0:
-        conn.execute("""
-            INSERT INTO work_mesh
-            SELECT
-                c.work_id,
-                m.descriptor_ui, m.descriptor_name,
-                m.qualifier_ui, m.qualifier_name,
-                m.is_major_topic
-            FROM mesh_headings m
-            JOIN id_crosswalk c ON m.pmid = c.pmid
-        """)
-        n_work_mesh = conn.execute("SELECT COUNT(*) FROM work_mesh").fetchone()[0]
-        stats["work_mesh"] = n_work_mesh
-        context.log.info(f"Work mesh: {n_work_mesh:,} rows")
-
-    # Abstract reconstruction (T1+T2 only, Python post-processing)
-    context.log.info("Reconstructing abstracts (T1+T2)")
-    n_abstracts = _reconstruct_abstracts(conn, context)
-    stats["abstracts_reconstructed"] = n_abstracts
-
-    # Drop temp table
-    conn.execute("DROP TABLE IF EXISTS oa_raw")
+        n = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        stats[table] = n
+        context.log.info(f"  {table}: {n:,} rows")
 
     # iCite RCR enrichment for works table (T1 only)
     meta_csv = settings.icite_dir / "icite_metadata.csv"
@@ -647,52 +459,6 @@ def oa_snapshot_load(
     return MaterializeResult(
         metadata={k: MetadataValue.int(v) for k, v in stats.items()}
     )
-
-
-def _reconstruct_abstracts(conn, context) -> int:
-    """Reconstruct abstracts from abstract_inverted_index for T1+T2 works.
-
-    Uses Rust quarry_parse.reconstruct_abstracts() for batch processing
-    (sonic-rs SIMD JSON + rayon parallel).
-    """
-    cursor = ""
-    total = 0
-    batch_size = 50000
-    while True:
-        rows = conn.execute(
-            """
-            SELECT r.id, r.abstract_inverted_index
-            FROM oa_raw r
-            JOIN works w ON REPLACE(r.id, 'https://openalex.org/', '') = w.work_id
-            WHERE w.tier IN ('t1', 't2')
-              AND r.abstract_inverted_index IS NOT NULL
-              AND r.id > ?
-            ORDER BY r.id LIMIT ?
-        """,
-            [cursor, batch_size],
-        ).fetchall()
-        if not rows:
-            break
-
-        work_ids = []
-        jsons = []
-        for work_url, inv_idx_str in rows:
-            if inv_idx_str:
-                work_ids.append(work_url.replace("https://openalex.org/", ""))
-                jsons.append(inv_idx_str)
-
-        # Rust batch: sonic-rs SIMD parse + rayon parallel reconstruct
-        abstracts = quarry_parse.reconstruct_abstracts(jsons)
-
-        updates = [(ab, wid) for ab, wid in zip(abstracts, work_ids) if ab]
-        if updates:
-            conn.executemany("UPDATE works SET abstract = ? WHERE work_id = ?", updates)
-
-        cursor = rows[-1][0]
-        total += len(updates)
-        if total % 100000 < batch_size:
-            context.log.info(f"  Abstracts: {total:,} reconstructed")
-    return total
 
 
 def _load_icite_works(conn, csv_path: Path) -> int:

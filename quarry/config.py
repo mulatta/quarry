@@ -54,6 +54,9 @@ class Settings(BaseSettings):
         "Engineering",
     }
 
+    # Rust build output (quarry-build CLI)
+    build_output_dir: Path = _DATA_DIR / "build_output"
+
     # Batch sizes
     duckdb_batch_size: int = 10_000
 
