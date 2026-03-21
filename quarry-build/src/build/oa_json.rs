@@ -8,7 +8,7 @@ use std::collections::HashSet;
 
 use serde::Deserialize;
 
-use crate::parse::abstract_recon;
+use quarry_core::abstract_recon;
 
 // ── URL prefixes (stripped during transformation) ──
 

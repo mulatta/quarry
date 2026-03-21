@@ -1,17 +1,17 @@
 """PostgreSQL bulk load assets.
 
-Each data source loads directly into PG via quarry_rs PyO3 bindings:
-- PubMed: quarry_rs.build_pubmed_pg()
-- OpenAlex: quarry_rs.build_oa_s3_pg()
+Each data source loads directly into PG via quarry_build PyO3 bindings:
+- PubMed: quarry_build.build_pubmed_pg()
+- OpenAlex: quarry_build.build_oa_s3_pg()
 - iCite: psycopg COPY FROM CSV → UPDATE
-- Enrichment: quarry_rs.enrich_pg()
+- Enrichment: quarry_build.enrich_pg()
 
 DO NOT use `from __future__ import annotations` here — Dagster inspects types at runtime.
 """
 
 from pathlib import Path
 
-import quarry_rs
+import quarry_build
 from dagster import (
     AssetExecutionContext,
     AutomationCondition,
@@ -44,7 +44,7 @@ def pubmed_pg_load(context: AssetExecutionContext) -> MaterializeResult:
         else None
     )
 
-    stats = quarry_rs.build_pubmed_pg(
+    stats = quarry_build.build_pubmed_pg(
         pg_conninfo=settings.pg_conninfo,
         xml_dir=str(settings.pubmed_baseline_dir),
         updates_dir=updates,
@@ -63,7 +63,7 @@ def pubmed_pg_load(context: AssetExecutionContext) -> MaterializeResult:
     kinds={"rust", "postgres"},
 )
 def oa_pg_load(context: AssetExecutionContext) -> MaterializeResult:
-    stats = quarry_rs.build_oa_s3_pg(
+    stats = quarry_build.build_oa_s3_pg(
         pg_conninfo=settings.pg_conninfo,
         s3_prefix=settings.oa_s3_prefix,
     )
@@ -199,7 +199,7 @@ def _load_icite_csv(conn, csv_path: Path, context) -> int:
     kinds={"rust", "postgres"},
 )
 def enrich_pg(context: AssetExecutionContext) -> MaterializeResult:
-    stats = quarry_rs.enrich_pg(pg_conninfo=settings.pg_conninfo)
+    stats = quarry_build.enrich_pg(pg_conninfo=settings.pg_conninfo)
     return MaterializeResult(
         metadata={k: MetadataValue.int(v) for k, v in stats.items()},
     )

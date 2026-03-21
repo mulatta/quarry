@@ -3,10 +3,12 @@ result
 result-*
 .venv/
 __pycache__/
+*.egg-info/
 *.pyc
+quarry-build/target/
 quarry-graph/target/
-quarry-parse/target/
 .tmp_dagster_home_*/
 .dagster_home/
 target/
 dump.rdb
+.pg-data/

@@ -1,10 +1,10 @@
 [package]
-name = "quarry-rs"
-version = "0.2.0"
+name = "quarry-build"
+version = "0.1.0"
 edition = "2024"
 
 [lib]
-name = "quarry_rs"
+name = "quarry_build"
 crate-type = ["lib", "cdylib"]
 
 [features]
@@ -13,15 +13,17 @@ python = ["pyo3"]
 extension-module = ["python", "pyo3/extension-module"]
 
 [dependencies]
-# Parse: XML, JSON, text processing
+# Core crate (normalize, abstract_recon)
+quarry-core = { path = "../quarry-core" }
+
+# Parse: XML, JSON
 quick-xml = "0.37"
 sonic-rs = "0.5"
-regex = "1"
+serde = { version = "1", features = ["derive"] }
 flate2 = "1"
 rayon = "1.10"
 
 # Build: PG + S3
-serde = { version = "1", features = ["derive"] }
 object_store = { version = "0.12", features = ["aws"] }
 tokio = { version = "1", features = ["rt-multi-thread"] }
 futures = "0.3"

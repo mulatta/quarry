@@ -14,7 +14,8 @@ class Settings(BaseSettings):
     model_config = {"env_prefix": "QUARRY_"}
 
     # PostgreSQL
-    pg_conninfo: str = "postgresql:///quarry"
+    # Default for dev (overridden by QUARRY_PG_CONNINFO env var from nix shell)
+    pg_conninfo: str = "host=/tmp/quarry-pg dbname=quarry"
 
     # PubMed FTP paths (baseline + updates downloaded here)
     pubmed_baseline_dir: Path = _DATA_DIR / "pubmed" / "baseline"

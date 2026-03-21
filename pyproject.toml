@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "quarry"
 version = "0.2.0"
@@ -5,31 +9,47 @@ description = "PubMed-primary academic paper exploration + citation graph mining
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "dagster",
-    "dagster-webserver",
     "psycopg[binary]",
-    "lancedb",
-    "numpy",
-    "orjson",
-    "blake3",
-    "pyarrow",
     "pydantic-settings",
-    "httpx",
-    "lxml",
-    "peft",
-    "sentence-transformers",
-    "torch",
-    "mcp[cli]",
-    "dagster-dg-cli>=1.12.19",
-    "quarry-rs",
-    "quarry-graph",
 ]
 
+[project.optional-dependencies]
+server = [
+    "quarry-core",
+    "quarry-graph",
+    "lancedb",
+    "numpy",
+    "pyarrow",
+    "mcp[cli]",
+]
+cli = [
+    "quarry[server]",
+    "typer",
+]
+elt = [
+    "quarry[server]",
+    "quarry-build",
+    "dagster",
+    "dagster-webserver",
+    "dagster-dg-cli>=1.12.19",
+    "torch",
+    "sentence-transformers",
+    "peft",
+    "blake3",
+    "httpx",
+    "lxml",
+    "orjson",
+]
+
+[project.scripts]
+quarry = "quarry.cli:app"
+
 [tool.uv.workspace]
-members = ["quarry-rs", "quarry-graph"]
+members = ["quarry-core", "quarry-build", "quarry-graph"]
 
 [tool.uv.sources]
-quarry-rs = { workspace = true }
+quarry-core = { workspace = true }
+quarry-build = { workspace = true }
 quarry-graph = { workspace = true }
 
 [tool.setuptools.packages.find]
