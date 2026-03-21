@@ -1,27 +1,25 @@
-//! MeSH descriptor XML → Arrow RecordBatch.
+//! MeSH descriptor XML → structured entries.
 //!
 //! Streaming parser using quick-xml. Same pattern as existing PubMed XML parser.
 //! Replaces Python `etl/mesh.py::parse_mesh_descriptors()`.
 
-use arrow::array::{RecordBatch, StringArray};
-use arrow::datatypes::{DataType, Field, Schema};
 use quick_xml::events::Event;
 use quick_xml::Reader;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
-use std::sync::Arc;
 
-struct MeshEntry {
-    descriptor_ui: String,
-    descriptor_name: String,
-    tree_number: String,
+/// A single MeSH descriptor → tree_number entry.
+pub struct MeshEntry {
+    pub descriptor_ui: String,
+    pub descriptor_name: String,
+    pub tree_number: String,
 }
 
 /// Parse MeSH descriptor XML → list of (ui, name, tree_number) entries.
 ///
 /// Each DescriptorRecord with N TreeNumbers produces N entries.
-pub fn parse_mesh_xml(path: &Path) -> Result<RecordBatch, Box<dyn std::error::Error>> {
+pub fn parse_mesh_xml(path: &Path) -> Result<Vec<MeshEntry>, Box<dyn std::error::Error>> {
     let file = File::open(path)?;
     let reader = BufReader::with_capacity(256 * 1024, file);
     let mut xml = Reader::from_reader(reader);
@@ -104,29 +102,7 @@ pub fn parse_mesh_xml(path: &Path) -> Result<RecordBatch, Box<dyn std::error::Er
         buf.clear();
     }
 
-    // Build Arrow RecordBatch
-    let schema = Arc::new(Schema::new(vec![
-        Field::new("descriptor_ui", DataType::Utf8, false),
-        Field::new("descriptor_name", DataType::Utf8, false),
-        Field::new("tree_number", DataType::Utf8, false),
-    ]));
-
-    let ui_arr: StringArray = entries.iter().map(|e| Some(e.descriptor_ui.as_str())).collect();
-    let name_arr: StringArray = entries
-        .iter()
-        .map(|e| Some(e.descriptor_name.as_str()))
-        .collect();
-    let tree_arr: StringArray = entries
-        .iter()
-        .map(|e| Some(e.tree_number.as_str()))
-        .collect();
-
-    let batch = RecordBatch::try_new(
-        schema,
-        vec![Arc::new(ui_arr), Arc::new(name_arr), Arc::new(tree_arr)],
-    )?;
-
-    Ok(batch)
+    Ok(entries)
 }
 
 #[cfg(test)]
@@ -167,25 +143,13 @@ mod tests {
     #[test]
     fn test_parse_mesh_xml() {
         let f = write_test_xml();
-        let batch = parse_mesh_xml(f.path()).unwrap();
-        assert_eq!(batch.num_rows(), 3); // 1 + 2 tree numbers
-
-        let ui = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        assert_eq!(ui.value(0), "D000001");
-        assert_eq!(ui.value(1), "D000002");
-        assert_eq!(ui.value(2), "D000002");
-
-        let tree = batch
-            .column(2)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .unwrap();
-        assert_eq!(tree.value(0), "D03.633.100.221.173");
-        assert_eq!(tree.value(1), "D02.705.400.625.800");
-        assert_eq!(tree.value(2), "D02.886.300.692.800");
+        let entries = parse_mesh_xml(f.path()).unwrap();
+        assert_eq!(entries.len(), 3); // 1 + 2 tree numbers
+        assert_eq!(entries[0].descriptor_ui, "D000001");
+        assert_eq!(entries[1].descriptor_ui, "D000002");
+        assert_eq!(entries[2].descriptor_ui, "D000002");
+        assert_eq!(entries[0].tree_number, "D03.633.100.221.173");
+        assert_eq!(entries[1].tree_number, "D02.705.400.625.800");
+        assert_eq!(entries[2].tree_number, "D02.886.300.692.800");
     }
 }

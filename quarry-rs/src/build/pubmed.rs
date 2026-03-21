@@ -139,8 +139,7 @@ pub fn build_pubmed(
     let n_threads = config.effective_parse_threads();
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(n_threads)
-        .build()
-        .expect("failed to build rayon thread pool");
+        .build()?;
 
     let (tx, rx) = std::sync::mpsc::sync_channel::<Result<FileData, String>>(n_threads);
 

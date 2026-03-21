@@ -373,23 +373,32 @@ pub fn build_oa_s3(
     let producer_handle = rt.spawn(async move {
         use futures::StreamExt;
 
-        // Check progress upfront to skip already-done files
-        let done_files: Arc<HashSet<String>> = {
-            use postgres::{Client, NoTls};
-            Arc::new(if let Ok(mut client) = Client::connect(&pg_conninfo_owned, NoTls) {
-                client
-                    .query(
+        // Check progress upfront to skip already-done files.
+        // Uses spawn_blocking to avoid blocking the tokio runtime.
+        let pg_conn = pg_conninfo_owned.clone();
+        let done_files: Arc<HashSet<String>> = Arc::new(
+            tokio::task::spawn_blocking(move || {
+                use postgres::{Client, NoTls};
+                match Client::connect(&pg_conn, NoTls) {
+                    Ok(mut client) => match client.query(
                         "SELECT filename FROM _build_progress WHERE source = 'oa'",
                         &[],
-                    )
-                    .unwrap_or_default()
-                    .iter()
-                    .map(|r| r.get::<_, String>(0))
-                    .collect()
-            } else {
-                HashSet::new()
+                    ) {
+                        Ok(rows) => rows.iter().map(|r| r.get::<_, String>(0)).collect(),
+                        Err(e) => {
+                            eprintln!("oa: WARN: failed to query _build_progress: {e}");
+                            HashSet::new()
+                        }
+                    },
+                    Err(e) => {
+                        eprintln!("oa: WARN: failed to connect for progress check: {e}");
+                        HashSet::new()
+                    }
+                }
             })
-        };
+            .await
+            .unwrap_or_default(),
+        );
 
         let download_futures = gz_objects.into_iter().map(|obj| {
             let store = Arc::clone(&store_clone);
@@ -422,7 +431,10 @@ pub fn build_oa_s3(
                             parse_gz_to_structs(&bytes, &t2, &pm, filename)
                         })
                         .await
-                        .unwrap_or_else(|_| FileOutput::empty(String::new()))
+                        .unwrap_or_else(|e| {
+                            eprintln!("oa: WARN: parse task panicked for {obj_path}: {e}");
+                            FileOutput::empty(obj_path.rsplit('/').next().unwrap_or(&obj_path).to_string())
+                        })
                     }
                     Err(e) => {
                         eprintln!("oa: WARN: failed to download {obj_path}: {e}");

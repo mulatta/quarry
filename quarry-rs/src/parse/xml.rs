@@ -158,26 +158,6 @@ fn read_text_content<R: BufRead>(reader: &mut Reader<R>, buf: &mut Vec<u8>) -> S
     text.trim().to_string()
 }
 
-/// Skip to end of current element (handles nesting).
-#[allow(dead_code)]
-fn skip_element<R: BufRead>(reader: &mut Reader<R>, buf: &mut Vec<u8>) {
-    let mut depth: u32 = 1;
-    loop {
-        buf.clear();
-        match reader.read_event_into(buf) {
-            Ok(Event::Start(_)) => depth += 1,
-            Ok(Event::End(_)) => {
-                depth -= 1;
-                if depth == 0 {
-                    return;
-                }
-            }
-            Ok(Event::Eof) => return,
-            Err(_) => return,
-            _ => {}
-        }
-    }
-}
 
 /// Parse <Year>, <Month>, <Day> children of a date element.
 /// Returns ISO date string or None.
@@ -527,13 +507,13 @@ pub fn parse_pubmed_article_from_reader<R: BufRead>(
                     b"PubDate" if section == Section::PubDate => {
                         // Resolve pub_year and pub_date
                         if let Some(y) = pd_year {
-                            paper.pub_year = Some(y as i16);
+                            paper.pub_year = i16::try_from(y).ok();
                             paper.pub_date = Some(format_date(y, pd_month, pd_day));
                         } else if let Some(ref ml) = pd_medline_date {
                             // MedlineDate: extract first 4-digit year
                             let first4: String = ml.chars().take(4).collect();
                             if let Ok(y) = first4.parse::<u32>() {
-                                paper.pub_year = Some(y as i16);
+                                paper.pub_year = i16::try_from(y).ok();
                                 paper.pub_date = Some(format_date(y, 1, 1));
                             }
                         }
@@ -598,7 +578,7 @@ pub fn parse_pubmed_article_from_reader<R: BufRead>(
     // Set author PMIDs and positions
     for (i, a) in authors.iter_mut().enumerate() {
         a.pmid = pmid;
-        a.author_position = (i + 1) as i16;
+        a.author_position = i16::try_from(i + 1).unwrap_or(i16::MAX);
     }
     for mh in &mut mesh_headings {
         mh.pmid = pmid;

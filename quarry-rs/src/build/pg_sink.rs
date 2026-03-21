@@ -10,6 +10,7 @@ use std::io::Write;
 use postgres::{Client, NoTls};
 
 use crate::build::oa_json::{OaAuthor, OaCitation, OaCrosswalk, OaTopic, OaWork};
+use crate::parse::mesh::MeshEntry;
 use crate::parse::xml::{Author, Chemical, Grant, MeshHeading, Paper};
 
 /// PostgreSQL COPY sink — wraps a single connection.
@@ -503,6 +504,28 @@ impl PgSink {
         )?;
         Ok(n)
     }
+
+    /// Write MeSH descriptor tree entries via COPY.
+    /// Replaces all rows (DELETE + COPY).
+    pub fn write_mesh_tree(&mut self, entries: &[MeshEntry]) -> Result<u64, Box<dyn std::error::Error>> {
+        self.client.execute("DELETE FROM mesh_tree", &[])?;
+        let mut writer = self.client.copy_in(
+            "COPY mesh_tree (descriptor_ui, descriptor_name, tree_number) FROM STDIN"
+        )?;
+        let mut buf = String::with_capacity(256);
+        for entry in entries {
+            buf.clear();
+            write_text(&mut buf, &entry.descriptor_ui);
+            tab(&mut buf);
+            write_text(&mut buf, &entry.descriptor_name);
+            tab(&mut buf);
+            write_text(&mut buf, &entry.tree_number);
+            buf.push('\n');
+            writer.write_all(buf.as_bytes())?;
+        }
+        writer.finish()?;
+        Ok(entries.len() as u64)
+    }
 }
 
 // ── PG TEXT format COPY helpers ──
@@ -704,17 +727,6 @@ CREATE TABLE IF NOT EXISTS chemicals (
     substance_name    TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_chemicals_pmid ON chemicals(pmid);
-
-CREATE TABLE IF NOT EXISTS preprints (
-    doi          TEXT PRIMARY KEY,
-    title        TEXT,
-    abstract     TEXT,
-    date         DATE,
-    server       TEXT,
-    category     TEXT,
-    version      SMALLINT,
-    published_doi TEXT
-);
 
 CREATE TABLE IF NOT EXISTS works (
     work_id        TEXT PRIMARY KEY,

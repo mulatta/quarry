@@ -83,3 +83,69 @@ fn available_memory_gb() -> f64 {
     }
     16.0
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_t2_domains() {
+        let cfg = BuildConfig::default();
+        let set = cfg.t2_domains_set();
+        assert!(set.contains("Health Sciences"));
+        assert!(set.contains("Engineering"));
+        assert_eq!(set.len(), 4);
+    }
+
+    #[test]
+    fn test_s3_concurrency_clamp_zero() {
+        let cfg = BuildConfig {
+            s3_download_concurrency: 0,
+            ..Default::default()
+        };
+        assert_eq!(cfg.effective_s3_concurrency(), 1);
+    }
+
+    #[test]
+    fn test_s3_concurrency_clamp_high() {
+        let cfg = BuildConfig {
+            s3_download_concurrency: 1000,
+            ..Default::default()
+        };
+        assert_eq!(cfg.effective_s3_concurrency(), 64);
+    }
+
+    #[test]
+    fn test_s3_concurrency_normal() {
+        let cfg = BuildConfig {
+            s3_download_concurrency: 16,
+            ..Default::default()
+        };
+        assert_eq!(cfg.effective_s3_concurrency(), 16);
+    }
+
+    #[test]
+    fn test_parse_threads_explicit() {
+        let cfg = BuildConfig {
+            parse_threads: Some(4),
+            ..Default::default()
+        };
+        assert_eq!(cfg.effective_parse_threads(), 4);
+    }
+
+    #[test]
+    fn test_parse_threads_explicit_zero_becomes_one() {
+        let cfg = BuildConfig {
+            parse_threads: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(cfg.effective_parse_threads(), 1);
+    }
+
+    #[test]
+    fn test_parse_threads_auto() {
+        let cfg = BuildConfig::default();
+        let n = cfg.effective_parse_threads();
+        assert!(n >= 1);
+    }
+}

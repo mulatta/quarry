@@ -310,7 +310,7 @@ pub fn parse_line(
 
                 OaAuthor {
                     work_id: work_id.clone(),
-                    author_position: (i + 1) as i16,
+                    author_position: i16::try_from(i + 1).unwrap_or(i16::MAX),
                     display_name,
                     orcid,
                     institution_name: inst_name,
