@@ -4,6 +4,8 @@ Combines JinaEncoder (query encoding) with LanceStore (hybrid search).
 Enriches results with PG metadata and supports MeSH expansion.
 """
 
+import numpy as np
+
 from quarry.config import settings
 from quarry.embed.jina import JinaEncoder
 from quarry.store.lance import LanceStore
@@ -81,6 +83,10 @@ class HybridSearcher:
         column: str = "vec_retrieval",
     ) -> list[dict]:
         """Find works similar to a given work (by its stored embedding)."""
+        from quarry.store.lance import _WORK_ID_RE
+
+        if not _WORK_ID_RE.match(work_id):
+            return []
         rows = (
             self._lance.table.search()
             .where(f"work_id = '{work_id}'")
@@ -90,8 +96,6 @@ class HybridSearcher:
         )
         if not rows:
             return []
-        import numpy as np
-
         vec = np.array(rows[0][column], dtype=np.float32)
         results = self._lance.vector_search(vec, limit=limit + 1, column=column)
         return [r for r in results if r.get("work_id") != work_id][:limit]
@@ -102,9 +106,7 @@ class HybridSearcher:
         limit: int = 50,
     ) -> list[int]:
         """Search papers via MeSH tree expansion."""
-        tree_entries = self._db.query(
-            f"SELECT tree_number FROM mesh_tree WHERE descriptor_ui = '{descriptor_ui}'"
-        )
+        tree_entries = self._db.mesh_by_ui(descriptor_ui)
         if not tree_entries:
             return []
 

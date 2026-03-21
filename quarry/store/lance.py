@@ -9,10 +9,14 @@ Key API patterns (lancedb>=0.29):
             .when_not_matched_insert_all().execute(data)
 """
 
-import pyarrow as pa
+import re
+
 import lancedb
 import numpy as np
+import pyarrow as pa
 from lancedb.rerankers import RRFReranker
+
+_WORK_ID_RE = re.compile(r"^W\d+$")
 
 # LanceDB table schema (pyarrow) — work_id-based (OpenAlex)
 SCHEMA = pa.schema(
@@ -57,11 +61,13 @@ class LanceStore:
         """Delete rows by work_id list."""
         if not work_ids:
             return
+        _validate_work_ids(work_ids)
         id_list = ", ".join(f"'{w}'" for w in work_ids)
         self.table.delete(f"work_id IN ({id_list})")
 
     def existing_hashes(self, ids: list[str]) -> dict[str, bytes]:
         """Get content_hash for existing IDs (for blake3 cache check)."""
+        _validate_work_ids(ids)
         id_list = ", ".join(f"'{i}'" for i in ids)
         result = (
             self.table.search()
@@ -113,3 +119,10 @@ class LanceStore:
             .limit(limit)
             .to_list()
         )
+
+
+def _validate_work_ids(ids: list[str]) -> None:
+    """Reject work_ids that don't match OpenAlex format (W followed by digits)."""
+    for wid in ids:
+        if not _WORK_ID_RE.match(wid):
+            raise ValueError(f"Invalid work_id format: {wid!r}")

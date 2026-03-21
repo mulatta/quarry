@@ -100,16 +100,6 @@ CREATE TABLE IF NOT EXISTS chemicals (
 );
 CREATE INDEX IF NOT EXISTS idx_chemicals_pmid ON chemicals(pmid);
 
-CREATE TABLE IF NOT EXISTS preprints (
-    doi          TEXT PRIMARY KEY,
-    title        TEXT,
-    abstract     TEXT,
-    date         DATE,
-    server       TEXT,
-    category     TEXT,
-    version      SMALLINT,
-    published_doi TEXT
-);
 """
 
 DDL_V2 = """
@@ -324,6 +314,12 @@ class PGStore:
         """Get a single work by PMID (via works table)."""
         with self.conn.cursor(row_factory=dict_row) as cur:
             cur.execute("SELECT * FROM works WHERE pmid = %s", (pmid,))
+            return cur.fetchone()
+
+    def get_work_by_doi(self, doi: str) -> dict | None:
+        """Get a single work by DOI."""
+        with self.conn.cursor(row_factory=dict_row) as cur:
+            cur.execute("SELECT * FROM works WHERE doi = %s", (doi,))
             return cur.fetchone()
 
     def resolve_pmid_to_work_id(self, pmid: int) -> str | None:

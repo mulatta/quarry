@@ -44,12 +44,6 @@ class Settings(BaseSettings):
 
     # OpenAlex
     oa_s3_prefix: str = "s3://openalex/data/works"
-    oa_t2_domains: set[str] = {
-        "Health Sciences",
-        "Life Sciences",
-        "Physical Sciences",
-        "Engineering",
-    }
 
     # Download
     ftp_parallel: int = 4

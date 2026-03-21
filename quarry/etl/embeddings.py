@@ -4,6 +4,7 @@ Reads papers in batches from PG, skips unchanged (blake3 match), encodes
 new/modified papers with jina-v5 nano, upserts to LanceDB.
 """
 
+import logging
 import time
 
 import blake3
@@ -13,6 +14,8 @@ from quarry.config import settings
 from quarry.embed.jina import JinaEncoder
 from quarry.store.lance import LanceStore
 from quarry.store.pg import PGStore
+
+log = logging.getLogger(__name__)
 
 
 def content_hash(title: str, abstract: str) -> bytes:
@@ -68,7 +71,8 @@ def run(batch_size: int = 5000, limit: int | None = None, start_work_id: str = "
         ids = list(hashes.keys())
         try:
             existing = lance.existing_hashes(ids)
-        except Exception:
+        except Exception as exc:
+            log.warning("existing_hashes failed (%s), re-encoding all", exc)
             existing = {}
 
         # Filter to only new/changed works
@@ -111,10 +115,13 @@ def run(batch_size: int = 5000, limit: int | None = None, start_work_id: str = "
         batch_num += 1
         throughput = len(texts) / elapsed if elapsed > 0 else 0
 
-        print(
-            f"  batch {batch_num}: encoded={len(to_encode)}, "
-            f"skipped={len(works) - len(to_encode)}, "
-            f"{throughput:.0f} vec/s, {elapsed:.1f}s"
+        log.info(
+            "batch %d: encoded=%d, skipped=%d, %.0f vec/s, %.1fs",
+            batch_num,
+            len(to_encode),
+            len(works) - len(to_encode),
+            throughput,
+            elapsed,
         )
 
         if limit and (batch_num * batch_size) >= limit:
@@ -123,13 +130,13 @@ def run(batch_size: int = 5000, limit: int | None = None, start_work_id: str = "
     encoder.unload()
     db.close()
 
-    print(f"\nDone: encoded={total_encoded}, skipped={total_skipped}")
+    log.info("Done: encoded=%d, skipped=%d", total_encoded, total_skipped)
 
     # Build indices if we encoded anything
     if total_encoded > 0:
-        print("Building FTS index...")
+        log.info("Building FTS index...")
         lance.create_fts_index()
-        print("Building vector index...")
+        log.info("Building vector index...")
         lance.create_vector_index("vec_retrieval")
         lance.create_vector_index("vec_cluster")
-        print("Indices built.")
+        log.info("Indices built.")

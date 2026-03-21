@@ -20,13 +20,12 @@ daily_update_schedule = ScheduleDefinition(
     cron_schedule="0 6 * * *",  # 06:00 UTC daily
 )
 
-# Monthly: download iCite + CSR graph rebuild
-# Stage/load triggered by AutomationCondition on DataVersion change
+# Monthly: download iCite snapshot
+# Downstream load/enrich/CSR triggered by AutomationCondition on DataVersion change
 monthly_citation_schedule = ScheduleDefinition(
     name="monthly_citation",
     target=AssetSelection.keys(
         "icite_metadata_sync",
-        "csr_graph",
     ),
     cron_schedule="0 2 1 * *",  # 02:00 UTC, 1st of each month
 )

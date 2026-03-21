@@ -95,8 +95,7 @@ def get_paper(
     if pmid is not None:
         return db.get_work_by_pmid(pmid)
     if doi is not None:
-        rows = db.query(f"SELECT * FROM works WHERE doi = '{doi}'")
-        return rows[0] if rows else None
+        return db.get_work_by_doi(doi)
     return None
 
 

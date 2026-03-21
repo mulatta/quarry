@@ -41,15 +41,6 @@
           src = ../quarry-graph;
           lockFile = ../quarry-graph/Cargo.lock;
         };
-
-        # CLI binary — quarry-build (PubMed/OA → PG pipeline)
-        quarry-build = rustPlatform.buildRustPackage {
-          pname = "quarry-build";
-          version = "0.2.0";
-          src = ../quarry-rs;
-          cargoLock.lockFile = ../quarry-rs/Cargo.lock;
-          doCheck = false;
-        };
       };
     };
 }

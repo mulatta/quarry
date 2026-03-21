@@ -7,13 +7,9 @@ edition = "2024"
 name = "quarry_rs"
 crate-type = ["lib", "cdylib"]
 
-[[bin]]
-name = "quarry-build"
-path = "src/main.rs"
-
 [features]
 default = []
-python = ["pyo3", "pyo3-arrow", "arrow"]
+python = ["pyo3"]
 extension-module = ["python", "pyo3/extension-module"]
 
 [dependencies]
@@ -24,8 +20,7 @@ regex = "1"
 flate2 = "1"
 rayon = "1.10"
 
-# Build: CLI + PG + S3
-clap = { version = "4", features = ["derive"] }
+# Build: PG + S3
 serde = { version = "1", features = ["derive"] }
 object_store = { version = "0.12", features = ["aws"] }
 tokio = { version = "1", features = ["rt-multi-thread"] }
@@ -34,8 +29,6 @@ postgres = "0.19"
 
 # Python bindings (optional)
 pyo3 = { version = "0.24", optional = true }
-pyo3-arrow = { version = "0.9", optional = true }
-arrow = { version = "55", features = ["ffi"], optional = true }
 
 [dev-dependencies]
 tempfile = "3"

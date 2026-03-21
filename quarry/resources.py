@@ -1,4 +1,4 @@
-"""Dagster resources: shared connections for PostgreSQL and LanceDB.
+"""Dagster resources: shared connections for PostgreSQL.
 
 PGResource manages a single connection per run via yield_for_execution.
 """
@@ -9,7 +9,6 @@ from dagster import ConfigurableResource
 from pydantic import PrivateAttr
 
 from quarry.config import settings
-from quarry.store.lance import LanceStore
 from quarry.store.pg import PGStore
 
 
@@ -38,12 +37,3 @@ class PGResource(ConfigurableResource):
     def store(self) -> PGStore:
         assert self._store is not None, "PGResource not initialized"
         return self._store
-
-
-class LanceDBResource(ConfigurableResource):
-    """LanceDB connection as a Dagster resource."""
-
-    uri: str = settings.lancedb_uri
-
-    def get_store(self) -> LanceStore:
-        return LanceStore(self.uri)
