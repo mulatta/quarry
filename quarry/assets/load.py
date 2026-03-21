@@ -25,7 +25,6 @@ from quarry.assets.download import (
     pubmed_baseline_sync,
     pubmed_updates_sync,
 )
-from quarry.assets.stage import mesh_stage
 from quarry.config import settings
 from quarry.resources import PGResource
 
@@ -77,7 +76,7 @@ def oa_pg_load(context: AssetExecutionContext) -> MaterializeResult:
 
 @asset(
     group_name="load",
-    deps=[pubmed_pg_load, oa_pg_load, mesh_stage, icite_metadata_sync],
+    deps=[pubmed_pg_load, oa_pg_load, icite_metadata_sync],
     description="iCite metrics: COPY CSV → temp table → UPDATE papers + works.",
     kinds={"postgres"},
     automation_condition=AutomationCondition.eager(),
@@ -105,90 +104,96 @@ def icite_pg_load(
 
 
 def _load_icite_csv(conn, csv_path: Path, context) -> int:
-    """Load iCite metrics from CSV → temp table → UPDATE papers in chunks."""
-    # 1. Load CSV into temp table via COPY
-    conn.execute("DROP TABLE IF EXISTS _icite_tmp")
-    conn.execute("""
-        CREATE TEMPORARY TABLE _icite_tmp (
-            pmid INTEGER,
-            year SMALLINT,
-            title TEXT,
-            doi TEXT,
-            relative_citation_ratio REAL,
-            nih_percentile REAL,
-            apt REAL,
-            is_clinical TEXT,
-            human REAL,
-            animal REAL,
-            molecular_cellular REAL,
-            field_citation_rate REAL,
-            citation_count INTEGER,
-            citations_per_year REAL,
-            expected_citations_per_year REAL,
-            is_research_article TEXT,
-            cited_by_clin TEXT,
-            provisional TEXT,
-            x_relative_citation_ratio REAL,
-            x_nih_percentile REAL
-        )
-    """)
+    """Load iCite metrics from CSV → temp table → UPDATE papers atomically."""
+    with conn.transaction():
+        # 1. Load CSV into temp table via COPY
+        conn.execute("DROP TABLE IF EXISTS _icite_tmp")
+        conn.execute("""
+            CREATE TEMPORARY TABLE _icite_tmp (
+                pmid INTEGER,
+                doi TEXT,
+                title TEXT,
+                authors TEXT,
+                year SMALLINT,
+                journal TEXT,
+                is_research_article TEXT,
+                citation_count INTEGER,
+                field_citation_rate REAL,
+                expected_citations_per_year REAL,
+                citations_per_year REAL,
+                relative_citation_ratio REAL,
+                nih_percentile REAL,
+                human REAL,
+                animal REAL,
+                molecular_cellular REAL,
+                x_coord REAL,
+                y_coord REAL,
+                apt REAL,
+                is_clinical TEXT,
+                cited_by_clin TEXT,
+                cited_by TEXT,
+                "references" TEXT,
+                provisional TEXT,
+                last_modified TEXT
+            )
+        """)
 
-    # COPY from CSV
-    with open(csv_path, "r") as f:
-        # Skip header
-        f.readline()
+        # COPY from CSV (HEADER true skips the first line automatically)
+        with open(csv_path, "r") as f:
+            with conn.cursor() as cur:
+                with cur.copy(
+                    "COPY _icite_tmp FROM STDIN WITH (FORMAT csv, HEADER true)"
+                ) as copy:
+                    while chunk := f.read(8 * 1024 * 1024):
+                        copy.write(chunk)
+
+        context.log.info("  iCite CSV loaded into temp table")
+
+        # 2. UPDATE papers with iCite metrics
+        result = conn.execute("""
+            UPDATE papers SET
+                rcr = m.relative_citation_ratio,
+                nih_percentile = m.nih_percentile,
+                apt = m.apt,
+                is_clinical = (m.is_clinical = 'Yes'),
+                human = m.human,
+                animal = m.animal,
+                molecular_cellular = m.molecular_cellular,
+                field_citation_rate = m.field_citation_rate
+            FROM _icite_tmp m
+            WHERE papers.pmid = m.pmid
+        """)
+        total_updated = result.rowcount
+        context.log.info(f"  iCite UPDATE papers: {total_updated:,} rows")
+
+        # 3. Update works table too (T1 only — has PMID)
+        result = conn.execute("""
+            UPDATE works SET
+                rcr = m.relative_citation_ratio,
+                nih_percentile = m.nih_percentile,
+                apt = m.apt,
+                is_clinical = (m.is_clinical = 'Yes')
+            FROM _icite_tmp m
+            WHERE works.pmid = m.pmid
+        """)
+        context.log.info(f"  iCite UPDATE works: {result.rowcount:,} rows")
+
+        # 4. cited_by_clin table
+        conn.execute("TRUNCATE cited_by_clin")
+        conn.execute("""
+            INSERT INTO cited_by_clin (pmid, citing_pmid)
+            SELECT m.pmid, unnest(
+                string_to_array(m.cited_by_clin, ' ')
+            )::integer
+            FROM _icite_tmp m
+            WHERE m.cited_by_clin IS NOT NULL AND m.cited_by_clin != ''
+        """)
         with conn.cursor() as cur:
-            with cur.copy("COPY _icite_tmp FROM STDIN WITH (FORMAT csv)") as copy:
-                while chunk := f.read(8 * 1024 * 1024):
-                    copy.write(chunk)
+            cur.execute("SELECT count(*) FROM cited_by_clin")
+            n_cbc = cur.fetchone()[0]
+        context.log.info(f"  cited_by_clin: {n_cbc:,} rows")
 
-    context.log.info("  iCite CSV loaded into temp table")
-
-    # 2. UPDATE papers with iCite metrics
-    result = conn.execute("""
-        UPDATE papers SET
-            rcr = m.relative_citation_ratio,
-            nih_percentile = m.nih_percentile,
-            apt = m.apt,
-            is_clinical = (m.is_clinical = 'Yes'),
-            human = m.human,
-            animal = m.animal,
-            molecular_cellular = m.molecular_cellular,
-            field_citation_rate = m.field_citation_rate
-        FROM _icite_tmp m
-        WHERE papers.pmid = m.pmid
-    """)
-    total_updated = result.rowcount
-    context.log.info(f"  iCite UPDATE papers: {total_updated:,} rows")
-
-    # 3. Update works table too (T1 only — has PMID)
-    result = conn.execute("""
-        UPDATE works SET
-            rcr = m.relative_citation_ratio,
-            nih_percentile = m.nih_percentile,
-            apt = m.apt,
-            is_clinical = (m.is_clinical = 'Yes')
-        FROM _icite_tmp m
-        WHERE works.pmid = m.pmid
-    """)
-    context.log.info(f"  iCite UPDATE works: {result.rowcount:,} rows")
-
-    # 4. cited_by_clin table
-    conn.execute("TRUNCATE cited_by_clin")
-    conn.execute("""
-        INSERT INTO cited_by_clin (pmid, citing_pmid)
-        SELECT m.pmid, unnest(
-            string_to_array(m.cited_by_clin, ' ')
-        )::integer
-        FROM _icite_tmp m
-        WHERE m.cited_by_clin IS NOT NULL AND m.cited_by_clin != ''
-    """)
-    with conn.cursor() as cur:
-        cur.execute("SELECT count(*) FROM cited_by_clin")
-        n_cbc = cur.fetchone()[0]
-    context.log.info(f"  cited_by_clin: {n_cbc:,} rows")
-
-    conn.execute("DROP TABLE IF EXISTS _icite_tmp")
+        conn.execute("DROP TABLE IF EXISTS _icite_tmp")
     return total_updated
 
 

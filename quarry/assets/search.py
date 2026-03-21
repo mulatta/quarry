@@ -11,15 +11,15 @@ from dagster import (
     asset,
 )
 
-from quarry.assets.load import pubmed_pg_load
+from quarry.assets.load import enrich_pg
 from quarry.config import settings
 from quarry.etl.embeddings import run as run_embeddings
 
 
 @asset(
     group_name="search",
-    deps=[pubmed_pg_load],
-    description="Encode papers (blake3 change detection) → LanceDB vectors + FTS index.",
+    deps=[enrich_pg],
+    description="Encode works (blake3 change detection) → LanceDB vectors + FTS index.",
     kinds={"lancedb", "python", "gpu"},
 )
 def paper_embeddings(

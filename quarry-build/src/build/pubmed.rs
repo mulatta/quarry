@@ -27,11 +27,9 @@ pub struct PubmedBuildStats {
     pub num_mesh: usize,
     pub num_grants: usize,
     pub num_chemicals: usize,
-    pub num_delete_pmids: usize,
     pub num_files_processed: usize,
     pub num_failed_files: usize,
     pub elapsed_secs: f64,
-    pub skipped: bool,
 }
 
 /// Parsed output from a single XML file, ready for PG writes.
@@ -69,7 +67,6 @@ pub fn build_pubmed(
     let mut total_mesh = 0usize;
     let mut total_grants = 0usize;
     let mut total_chemicals = 0usize;
-    let mut total_deletes = 0usize;
     let mut failed_files = 0usize;
 
     // Phase 1: Parse update XMLs → collect PMIDs + write to PG.
@@ -101,22 +98,36 @@ pub fn build_pubmed(
                     pmids.extend(&file_pmids);
 
                     let n_papers = pr.papers.len();
-                    total_papers += n_papers;
-                    total_authors += pr.authors.len();
-                    total_mesh += pr.mesh_headings.len();
-                    total_grants += pr.grants.len();
-                    total_chemicals += pr.chemicals.len();
-                    total_deletes += pr.delete_pmids.len();
 
-                    sink.copy_papers(&pr.papers)?;
-                    sink.copy_authors(&pr.authors)?;
-                    sink.copy_mesh_headings(&pr.mesh_headings)?;
-                    sink.copy_grants(&pr.grants)?;
-                    sink.copy_chemicals(&pr.chemicals)?;
-                    if !pr.delete_pmids.is_empty() {
-                        sink.soft_delete_pmids(&pr.delete_pmids)?;
+                    sink.begin()?;
+                    let write_result = (|| -> Result<(), Box<dyn std::error::Error>> {
+                        sink.copy_papers(&pr.papers)?;
+                        sink.copy_authors(&pr.authors)?;
+                        sink.copy_mesh_headings(&pr.mesh_headings)?;
+                        sink.copy_grants(&pr.grants)?;
+                        sink.copy_chemicals(&pr.chemicals)?;
+                        if !pr.delete_pmids.is_empty() {
+                            sink.soft_delete_pmids(&pr.delete_pmids)?;
+                        }
+                        sink.mark_progress("updates", &filename, n_papers as i64)?;
+                        Ok(())
+                    })();
+                    match write_result {
+                        Ok(()) => {
+                            sink.commit()?;
+                            total_papers += n_papers;
+                            total_authors += pr.authors.len();
+                            total_mesh += pr.mesh_headings.len();
+                            total_grants += pr.grants.len();
+                            total_chemicals += pr.chemicals.len();
+                        }
+                        Err(e) => {
+                            eprintln!("pubmed: WARN: update write failed for {}: {}", filename, crate::err_chain(&*e));
+                            sink.rollback()?;
+                            failed_files += 1;
+                            continue;
+                        }
                     }
-                    sink.mark_progress("updates", &filename, n_papers as i64)?;
                 }
                 Err(e) => {
                     eprintln!("pubmed: WARN: update {}: {e}", path.display());
@@ -204,10 +215,9 @@ pub fn build_pubmed(
                         total_mesh += pr.mesh_headings.len();
                         total_grants += pr.grants.len();
                         total_chemicals += pr.chemicals.len();
-                        total_deletes += pr.delete_pmids.len();
                     }
                     Err(e) => {
-                        eprintln!("pubmed: WARN: write failed for {}: {e}", data.filename);
+                        eprintln!("pubmed: WARN: write failed for {}: {}", data.filename, crate::err_chain(&*e));
                         sink.rollback()?;
                         failed_files += 1;
                     }
@@ -247,11 +257,9 @@ pub fn build_pubmed(
         num_mesh: total_mesh,
         num_grants: total_grants,
         num_chemicals: total_chemicals,
-        num_delete_pmids: total_deletes,
         num_files_processed: num_files,
         num_failed_files: failed_files,
         elapsed_secs: elapsed,
-        skipped: false,
     })
 }
 

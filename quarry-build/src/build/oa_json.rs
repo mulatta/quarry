@@ -482,4 +482,62 @@ mod tests {
         assert_eq!(result.work.tier, Tier::T2);
     }
 
+    #[test]
+    fn test_empty_id_returns_error() {
+        let json = r#"{"id": "", "title": "Bad"}"#;
+        assert!(parse_line(json, &t2_set()).is_err());
+    }
+
+    #[test]
+    fn test_invalid_work_id_int() {
+        // Valid OA prefix but non-numeric suffix
+        let json = r#"{"id": "https://openalex.org/Wabc"}"#;
+        assert!(parse_line(json, &t2_set()).is_err());
+    }
+
+    #[test]
+    fn test_malformed_pmid_url() {
+        // PMID URL without expected prefix → pmid=None (not an error)
+        let json = r#"{
+            "id": "https://openalex.org/W77777",
+            "ids": {"pmid": "urn:pmid:12345"},
+            "title": "No PMID"
+        }"#;
+        let result = parse_line(json, &t2_set()).unwrap();
+        assert!(result.work.pmid.is_none());
+        assert!(result.crosswalk.is_none());
+    }
+
+    #[test]
+    fn test_topic_without_id_filtered() {
+        let json = r#"{
+            "id": "https://openalex.org/W88888",
+            "ids": {"pmid": "https://pubmed.ncbi.nlm.nih.gov/11111"},
+            "title": "Topic test",
+            "topics": [
+                {"display_name": "No ID topic", "score": 0.5},
+                {"id": "https://openalex.org/T999", "display_name": "Has ID", "score": 0.8}
+            ]
+        }"#;
+        let result = parse_line(json, &t2_set()).unwrap();
+        // Topic without id is filtered out by filter_map
+        assert_eq!(result.topics.len(), 1);
+        assert_eq!(result.topics[0].topic_id, "T999");
+    }
+
+    #[test]
+    fn test_invalid_referenced_work_filtered() {
+        let json = r#"{
+            "id": "https://openalex.org/W44444",
+            "title": "Citation test",
+            "referenced_works": [
+                "https://openalex.org/W111",
+                "https://example.com/not-oa",
+                "https://openalex.org/W222"
+            ]
+        }"#;
+        let result = parse_line(json, &t2_set()).unwrap();
+        // Only valid OA W-prefixed refs are parsed
+        assert_eq!(result.citations.len(), 2);
+    }
 }

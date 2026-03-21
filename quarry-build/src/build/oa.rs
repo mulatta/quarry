@@ -8,7 +8,7 @@
 //!   tokio async tasks (download) → spawn_blocking (decompress+parse)
 //!   → mpsc channel → main thread (sequential PG COPY writes)
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -29,80 +29,7 @@ pub struct OaBuildStats {
     pub num_crosswalk: usize,
     pub num_files_processed: usize,
     pub num_failed_lines: usize,
-    pub num_cache_hits: usize,
     pub elapsed_secs: f64,
-    pub skipped: bool,
-}
-
-/// PubMed fields for inline enrichment during OA build.
-struct PmFields {
-    journal_abbr: Option<String>,
-    country: Option<String>,
-    medline_status: Option<String>,
-    pub_type: Vec<String>,
-    created_date: Option<String>,
-    revised_date: Option<String>,
-    indexed_date: Option<String>,
-}
-
-/// Load papers from PG into a HashMap<pmid, PmFields> for enrichment.
-fn load_pm_lookup(
-    pg_conninfo: &str,
-) -> Result<HashMap<i32, PmFields>, Box<dyn std::error::Error>> {
-    use postgres::{Client, NoTls};
-
-    let mut client = Client::connect(pg_conninfo, NoTls)?;
-    let mut map = HashMap::new();
-
-    // Check if papers table has data
-    let count: i64 = client
-        .query_one("SELECT count(*) FROM papers", &[])?
-        .get(0);
-    if count == 0 {
-        eprintln!("oa: papers table empty, skipping pm enrichment");
-        return Ok(map);
-    }
-
-    eprintln!("oa: loading {count} papers from PG for pm enrichment");
-
-    for row in client.query(
-        "SELECT pmid, journal_abbr, country, medline_status, pub_type, \
-         created_date::text, revised_date::text, indexed_date::text FROM papers",
-        &[],
-    )? {
-        let pmid: i32 = row.get(0);
-        let pub_type: Option<Vec<String>> = row.get(4);
-        map.insert(
-            pmid,
-            PmFields {
-                journal_abbr: row.get(1),
-                country: row.get(2),
-                medline_status: row.get(3),
-                pub_type: pub_type.unwrap_or_default(),
-                created_date: row.get(5),
-                revised_date: row.get(6),
-                indexed_date: row.get(7),
-            },
-        );
-    }
-
-    eprintln!("oa: loaded {} papers for pm enrichment", map.len());
-    Ok(map)
-}
-
-/// Enrich an OaWork with PubMed fields from the lookup HashMap.
-fn enrich_work(work: &mut oa_json::OaWork, pm_lookup: &HashMap<i32, PmFields>) {
-    if let Some(pmid) = work.pmid
-        && let Some(pm) = pm_lookup.get(&pmid)
-    {
-        work.pm_journal_abbr = pm.journal_abbr.clone();
-        work.pm_country = pm.country.clone();
-        work.pm_medline_status = pm.medline_status.clone();
-        work.pm_pub_type = pm.pub_type.clone();
-        work.pm_created_date = pm.created_date.clone();
-        work.pm_revised_date = pm.revised_date.clone();
-        work.pm_indexed_date = pm.indexed_date.clone();
-    }
 }
 
 /// Parsed output from a single file, ready for PG writes.
@@ -134,7 +61,6 @@ impl FileOutput {
 fn parse_gz_to_structs(
     bytes: &[u8],
     t2_domains: &HashSet<String>,
-    pm_lookup: &HashMap<i32, PmFields>,
     filename: String,
 ) -> FileOutput {
     let reader = BufReader::with_capacity(256 * 1024, GzDecoder::new(bytes));
@@ -157,8 +83,7 @@ fn parse_gz_to_structs(
             continue;
         }
         match oa_json::parse_line(&line, t2_domains) {
-            Ok(mut parsed) => {
-                enrich_work(&mut parsed.work, pm_lookup);
+            Ok(parsed) => {
                 works.push(parsed.work);
                 authors.extend(parsed.authors);
                 topics.extend(parsed.topics);
@@ -230,7 +155,7 @@ fn write_file_output(
             Ok(())
         }
         Err(e) => {
-            eprintln!("oa: WARN: write failed for {}: {e}", output.filename);
+            eprintln!("oa: WARN: write failed for {}: {}", output.filename, crate::err_chain(&*e));
             sink.rollback()?;
             counters.failed_lines += output.failed_lines;
             Err(e)
@@ -264,7 +189,6 @@ pub fn build_oa_local(
     let num_files = gz_files.len();
     eprintln!("oa: found {num_files} .gz files in {}", local_dir.display());
 
-    let pm_lookup = load_pm_lookup(pg_conninfo)?;
     let mut sink = PgSink::connect(pg_conninfo)?;
     let mut counters = OaCounters::default();
 
@@ -283,7 +207,7 @@ pub fn build_oa_local(
         }
 
         let bytes = std::fs::read(gz_path)?;
-        let output = parse_gz_to_structs(&bytes, &t2_domains, &pm_lookup, filename);
+        let output = parse_gz_to_structs(&bytes, &t2_domains, filename);
         write_file_output(&mut sink, &output, &mut counters)?;
 
         if (file_idx + 1).is_multiple_of(10) || file_idx + 1 == num_files {
@@ -311,9 +235,7 @@ pub fn build_oa_local(
         num_crosswalk: counters.crosswalk,
         num_files_processed: num_files,
         num_failed_lines: counters.failed_lines,
-        num_cache_hits: 0,
         elapsed_secs: elapsed,
-        skipped: false,
     })
 }
 
@@ -359,51 +281,43 @@ pub fn build_oa_s3(
         "oa: found {num_files} .gz objects in s3://{bucket}/{prefix} (concurrency={concurrency})"
     );
 
-    let pm_lookup: Arc<HashMap<i32, PmFields>> = Arc::new(load_pm_lookup(pg_conninfo)?);
     let mut sink = PgSink::connect(pg_conninfo)?;
     let mut counters = OaCounters::default();
 
     // Channel: download+parse tasks → main thread
     let (tx, mut rx) = tokio::sync::mpsc::channel::<FileOutput>(concurrency);
 
+    let max_retries = config.fetch_max_retries;
+    let initial_backoff_ms = config.fetch_initial_backoff_ms;
+    let max_backoff_ms = config.fetch_max_backoff_ms;
+
     let store_clone = Arc::clone(&store);
     let t2_clone = Arc::clone(&t2_domains);
-    let pm_clone = Arc::clone(&pm_lookup);
     let pg_conninfo_owned = pg_conninfo.to_string();
-    let producer_handle = rt.spawn(async move {
+    let producer_handle: tokio::task::JoinHandle<Result<(), String>> = rt.spawn(async move {
         use futures::StreamExt;
 
         // Check progress upfront to skip already-done files.
-        // Uses spawn_blocking to avoid blocking the tokio runtime.
+        // Fail-closed: if we can't read progress, abort rather than risk PK conflicts.
         let pg_conn = pg_conninfo_owned.clone();
         let done_files: Arc<HashSet<String>> = Arc::new(
-            tokio::task::spawn_blocking(move || {
+            tokio::task::spawn_blocking(move || -> Result<HashSet<String>, String> {
                 use postgres::{Client, NoTls};
-                match Client::connect(&pg_conn, NoTls) {
-                    Ok(mut client) => match client.query(
-                        "SELECT filename FROM _build_progress WHERE source = 'oa'",
-                        &[],
-                    ) {
-                        Ok(rows) => rows.iter().map(|r| r.get::<_, String>(0)).collect(),
-                        Err(e) => {
-                            eprintln!("oa: WARN: failed to query _build_progress: {e}");
-                            HashSet::new()
-                        }
-                    },
-                    Err(e) => {
-                        eprintln!("oa: WARN: failed to connect for progress check: {e}");
-                        HashSet::new()
-                    }
-                }
+                let mut client = Client::connect(&pg_conn, NoTls)
+                    .map_err(|e| format!("progress check connect failed: {e}"))?;
+                let rows = client.query(
+                    "SELECT filename FROM _build_progress WHERE source = 'oa'",
+                    &[],
+                ).map_err(|e| format!("progress check query failed: {e}"))?;
+                Ok(rows.iter().map(|r| r.get::<_, String>(0)).collect())
             })
             .await
-            .unwrap_or_default(),
+            .map_err(|e| format!("progress check task panicked: {e}"))??,
         );
 
         let download_futures = gz_objects.into_iter().map(|obj| {
             let store = Arc::clone(&store_clone);
             let t2 = Arc::clone(&t2_clone);
-            let pm = Arc::clone(&pm_clone);
             let done = Arc::clone(&done_files);
             async move {
                 let obj_path = obj.location.as_ref().to_string();
@@ -417,30 +331,46 @@ pub fn build_oa_s3(
                     return FileOutput::empty(filename);
                 }
 
-                let dl_result = async {
-                    let result = store.get(&obj.location).await?;
-                    result.bytes().await
-                }
-                .await;
+                let total_attempts = max_retries + 1;
+                let mut last_err = String::new();
+                for attempt in 0..total_attempts {
+                    if attempt > 0 {
+                        let shift = (attempt - 1).min(63);
+                        let delay_ms = initial_backoff_ms
+                            .saturating_mul(1u64 << shift)
+                            .min(max_backoff_ms);
+                        let delay = std::time::Duration::from_millis(delay_ms);
+                        eprintln!("oa: retry {attempt}/{max_retries} for {obj_path} in {delay:?}");
+                        tokio::time::sleep(delay).await;
+                    }
 
-                match dl_result {
-                    Ok(bytes) => {
-                        let t2 = Arc::clone(&t2);
-                        let pm = Arc::clone(&pm);
-                        tokio::task::spawn_blocking(move || {
-                            parse_gz_to_structs(&bytes, &t2, &pm, filename)
-                        })
-                        .await
-                        .unwrap_or_else(|e| {
-                            eprintln!("oa: WARN: parse task panicked for {obj_path}: {e}");
-                            FileOutput::empty(obj_path.rsplit('/').next().unwrap_or(&obj_path).to_string())
-                        })
+                    let dl_result = async {
+                        let result = store.get(&obj.location).await?;
+                        result.bytes().await
                     }
-                    Err(e) => {
-                        eprintln!("oa: WARN: failed to download {obj_path}: {e}");
-                        FileOutput::empty(filename)
+                    .await;
+
+                    match dl_result {
+                        Ok(bytes) => {
+                            let t2 = Arc::clone(&t2);
+                            let fname = filename.clone();
+                            let parsed = tokio::task::spawn_blocking(move || {
+                                parse_gz_to_structs(&bytes, &t2, fname)
+                            })
+                            .await
+                            .unwrap_or_else(|e| {
+                                eprintln!("oa: WARN: parse task panicked for {obj_path}: {e}");
+                                FileOutput::empty(obj_path.rsplit('/').next().unwrap_or(&obj_path).to_string())
+                            });
+                            return parsed;
+                        }
+                        Err(e) => {
+                            last_err = format!("{e}");
+                        }
                     }
                 }
+                eprintln!("oa: WARN: failed to download {obj_path} after {total_attempts} attempts: {last_err}");
+                FileOutput::empty(filename)
             }
         });
 
@@ -452,6 +382,7 @@ pub fn build_oa_s3(
                 break;
             }
         }
+        Ok(())
     });
 
     // Main thread: receive structs, write to PG
@@ -473,9 +404,10 @@ pub fn build_oa_s3(
         }
     }
 
-    // Ensure the producer task completed without panicking
+    // Ensure the producer task completed successfully
     rt.block_on(producer_handle)
-        .map_err(|e| format!("oa: S3 producer task failed: {e}"))?;
+        .map_err(|e| format!("oa: S3 producer task panicked: {e}"))?
+        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
     let elapsed = t0.elapsed().as_secs_f64();
     eprintln!(
@@ -491,9 +423,7 @@ pub fn build_oa_s3(
         num_crosswalk: counters.crosswalk,
         num_files_processed: num_files,
         num_failed_lines: counters.failed_lines,
-        num_cache_hits: 0,
         elapsed_secs: elapsed,
-        skipped: false,
     })
 }
 

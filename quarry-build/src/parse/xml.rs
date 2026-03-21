@@ -226,7 +226,7 @@ fn normalize_orcid(raw: &str) -> Option<String> {
 /// Parse a `<PubmedArticle>` element from an already-positioned reader.
 /// The reader should be positioned right after the `<PubmedArticle>` Start event.
 /// Consumes events until `</PubmedArticle>` End event.
-pub fn parse_pubmed_article_from_reader<R: BufRead>(
+fn parse_pubmed_article_from_reader<R: BufRead>(
     reader: &mut Reader<R>,
     buf: &mut Vec<u8>,
 ) -> ParseResult {

@@ -473,6 +473,18 @@ impl PgSink {
         Ok(self.client.execute(sql, &[])?)
     }
 
+    /// TRUNCATE all data tables + reset build progress.
+    /// Use before full re-load after schema or pipeline changes.
+    pub fn reset_all(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.client.batch_execute(
+            "TRUNCATE papers, authors, mesh_headings, grants, chemicals, \
+                      cited_by_clin, works, work_authors, work_topics, \
+                      work_mesh, work_citations, id_crosswalk, mesh_tree, \
+                      _build_progress CASCADE"
+        )?;
+        Ok(())
+    }
+
     /// Enrich works with PubMed fields via SQL UPDATE.
     pub fn enrich_works_from_papers(&mut self) -> Result<u64, Box<dyn std::error::Error>> {
         let n = self.client.execute(
@@ -506,25 +518,38 @@ impl PgSink {
     }
 
     /// Write MeSH descriptor tree entries via COPY.
-    /// Replaces all rows (DELETE + COPY).
+    /// Replaces all rows atomically (BEGIN → DELETE → COPY → COMMIT).
     pub fn write_mesh_tree(&mut self, entries: &[MeshEntry]) -> Result<u64, Box<dyn std::error::Error>> {
-        self.client.execute("DELETE FROM mesh_tree", &[])?;
-        let mut writer = self.client.copy_in(
-            "COPY mesh_tree (descriptor_ui, descriptor_name, tree_number) FROM STDIN"
-        )?;
-        let mut buf = String::with_capacity(256);
-        for entry in entries {
-            buf.clear();
-            write_text(&mut buf, &entry.descriptor_ui);
-            tab(&mut buf);
-            write_text(&mut buf, &entry.descriptor_name);
-            tab(&mut buf);
-            write_text(&mut buf, &entry.tree_number);
-            buf.push('\n');
-            writer.write_all(buf.as_bytes())?;
+        self.begin()?;
+        let result = (|| -> Result<u64, Box<dyn std::error::Error>> {
+            self.client.execute("DELETE FROM mesh_tree", &[])?;
+            let mut writer = self.client.copy_in(
+                "COPY mesh_tree (descriptor_ui, descriptor_name, tree_number) FROM STDIN"
+            )?;
+            let mut buf = String::with_capacity(256);
+            for entry in entries {
+                buf.clear();
+                write_text(&mut buf, &entry.descriptor_ui);
+                tab(&mut buf);
+                write_text(&mut buf, &entry.descriptor_name);
+                tab(&mut buf);
+                write_text(&mut buf, &entry.tree_number);
+                buf.push('\n');
+                writer.write_all(buf.as_bytes())?;
+            }
+            writer.finish()?;
+            Ok(entries.len() as u64)
+        })();
+        match result {
+            Ok(n) => {
+                self.commit()?;
+                Ok(n)
+            }
+            Err(e) => {
+                let _ = self.rollback();
+                Err(e)
+            }
         }
-        writer.finish()?;
-        Ok(entries.len() as u64)
     }
 }
 
@@ -900,5 +925,65 @@ mod tests {
         tab(&mut buf);
         write_opt_i32(&mut buf, None);
         assert_eq!(buf, "123\t\\N");
+    }
+
+    #[test]
+    fn test_write_i64() {
+        let mut buf = String::new();
+        write_i64(&mut buf, 0);
+        tab(&mut buf);
+        write_i64(&mut buf, i64::MAX);
+        tab(&mut buf);
+        write_i64(&mut buf, i64::MIN);
+        assert_eq!(buf, format!("0\t{}\t{}", i64::MAX, i64::MIN));
+    }
+
+    #[test]
+    fn test_write_i16() {
+        let mut buf = String::new();
+        write_i16(&mut buf, 0);
+        tab(&mut buf);
+        write_i16(&mut buf, i16::MAX);
+        tab(&mut buf);
+        write_i16(&mut buf, i16::MIN);
+        assert_eq!(buf, format!("0\t{}\t{}", i16::MAX, i16::MIN));
+    }
+
+    #[test]
+    fn test_write_opt_i16() {
+        let mut buf = String::new();
+        write_opt_i16(&mut buf, Some(2024));
+        tab(&mut buf);
+        write_opt_i16(&mut buf, None);
+        assert_eq!(buf, "2024\t\\N");
+    }
+
+    #[test]
+    fn test_write_opt_f32_some() {
+        let mut buf = String::new();
+        write_opt_f32(&mut buf, Some(0.95));
+        // f32 Display should produce a numeric string
+        assert!(buf.starts_with("0.9"));
+    }
+
+    #[test]
+    fn test_write_opt_f32_none() {
+        let mut buf = String::new();
+        write_opt_f32(&mut buf, None);
+        assert_eq!(buf, "\\N");
+    }
+
+    #[test]
+    fn test_write_opt_f32_nan() {
+        let mut buf = String::new();
+        write_opt_f32(&mut buf, Some(f32::NAN));
+        assert_eq!(buf, "NaN");
+    }
+
+    #[test]
+    fn test_write_opt_f32_infinity() {
+        let mut buf = String::new();
+        write_opt_f32(&mut buf, Some(f32::INFINITY));
+        assert_eq!(buf, "inf");
     }
 }
