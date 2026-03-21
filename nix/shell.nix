@@ -47,13 +47,7 @@ in
         };
 
         shellHook = ''
-          if [ -f pyproject.toml ]; then
-            if [[ ! -f "uv.lock" ]] || [[ "pyproject.toml" -nt "uv.lock" ]]; then
-              uv lock --quiet
-            fi
-            uv sync --all-extras --quiet
-          fi
-
+          uv sync --all-extras --quiet
           export VIRTUAL_ENV="$PWD/.venv"
           export PATH="$VIRTUAL_ENV/bin:$PATH"
         '';

@@ -42,9 +42,8 @@ def csr_graph(
                 "COPY (SELECT citing_id AS src, cited_id AS dst FROM work_citations) TO STDOUT WITH (FORMAT csv)"
             ) as copy:
                 for data in copy:
-                    f.write(
-                        data.decode() if isinstance(data, (bytes, memoryview)) else data
-                    )
+                    text = data if isinstance(data, str) else bytes(data).decode()
+                    f.write(text)
 
     context.log.info(f"Building CSR from {csv_path} → {settings.csr_dir}")
     stats = quarry_graph.build_from_csv(str(csv_path), str(settings.csr_dir))

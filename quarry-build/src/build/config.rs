@@ -22,14 +22,23 @@ pub struct BuildConfig {
     /// Max parallel parse threads (rayon). Bounds memory during PubMed baseline
     /// parsing: each thread holds ~400MB. `None` = auto from available memory.
     pub parse_threads: Option<usize>,
+    /// Max retry attempts for remote fetch operations (0 = no retry).
+    pub fetch_max_retries: u32,
+    /// Initial backoff duration in milliseconds (doubles each retry).
+    pub fetch_initial_backoff_ms: u64,
+    /// Maximum backoff duration in milliseconds (cap for exponential growth).
+    pub fetch_max_backoff_ms: u64,
 }
 
 impl Default for BuildConfig {
     fn default() -> Self {
         Self {
             t2_domains: DEFAULT_T2_DOMAINS.iter().map(|s| s.to_string()).collect(),
-            s3_download_concurrency: 8,
+            s3_download_concurrency: 32,
             parse_threads: None,
+            fetch_max_retries: 3,
+            fetch_initial_backoff_ms: 2_000,
+            fetch_max_backoff_ms: 30_000,
         }
     }
 }
@@ -38,6 +47,17 @@ impl BuildConfig {
     /// Return T2 domains as a HashSet for O(1) lookup.
     pub fn t2_domains_set(&self) -> HashSet<String> {
         self.t2_domains.iter().cloned().collect()
+    }
+
+    /// Compute backoff duration for a given attempt (0-indexed).
+    /// Exponential: initial_ms * 2^attempt, capped at max_ms.
+    pub fn backoff_duration(&self, attempt: u32) -> std::time::Duration {
+        let shift = attempt.min(63);
+        let ms = self
+            .fetch_initial_backoff_ms
+            .saturating_mul(1u64 << shift)
+            .min(self.fetch_max_backoff_ms);
+        std::time::Duration::from_millis(ms)
     }
 
     /// Effective S3 concurrency, clamped to a safe upper bound.
@@ -117,11 +137,8 @@ mod tests {
 
     #[test]
     fn test_s3_concurrency_normal() {
-        let cfg = BuildConfig {
-            s3_download_concurrency: 16,
-            ..Default::default()
-        };
-        assert_eq!(cfg.effective_s3_concurrency(), 16);
+        let cfg = BuildConfig::default();
+        assert_eq!(cfg.effective_s3_concurrency(), 32);
     }
 
     #[test]
@@ -147,5 +164,39 @@ mod tests {
         let cfg = BuildConfig::default();
         let n = cfg.effective_parse_threads();
         assert!(n >= 1);
+    }
+
+    #[test]
+    fn test_backoff_exponential() {
+        let cfg = BuildConfig {
+            fetch_initial_backoff_ms: 1000,
+            fetch_max_backoff_ms: 30_000,
+            ..Default::default()
+        };
+        assert_eq!(cfg.backoff_duration(0), std::time::Duration::from_millis(1000));
+        assert_eq!(cfg.backoff_duration(1), std::time::Duration::from_millis(2000));
+        assert_eq!(cfg.backoff_duration(2), std::time::Duration::from_millis(4000));
+    }
+
+    #[test]
+    fn test_backoff_capped_at_max() {
+        let cfg = BuildConfig {
+            fetch_initial_backoff_ms: 2000,
+            fetch_max_backoff_ms: 5000,
+            ..Default::default()
+        };
+        // 2000 * 2^2 = 8000, but capped at 5000
+        assert_eq!(cfg.backoff_duration(2), std::time::Duration::from_millis(5000));
+    }
+
+    #[test]
+    fn test_backoff_overflow_safe() {
+        let cfg = BuildConfig {
+            fetch_initial_backoff_ms: u64::MAX,
+            fetch_max_backoff_ms: 30_000,
+            ..Default::default()
+        };
+        // saturating_mul overflow → capped at max
+        assert_eq!(cfg.backoff_duration(5), std::time::Duration::from_millis(30_000));
     }
 }

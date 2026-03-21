@@ -152,4 +152,67 @@ mod tests {
         assert_eq!(entries[1].tree_number, "D02.705.400.625.800");
         assert_eq!(entries[2].tree_number, "D02.886.300.692.800");
     }
+
+    #[test]
+    fn test_empty_descriptor_ui_skipped() {
+        let mut f = NamedTempFile::new().unwrap();
+        write!(
+            f,
+            r#"<?xml version="1.0"?>
+<DescriptorRecordSet>
+  <DescriptorRecord>
+    <DescriptorUI></DescriptorUI>
+    <DescriptorName><String>Empty UI</String></DescriptorName>
+    <TreeNumberList><TreeNumber>A01</TreeNumber></TreeNumberList>
+  </DescriptorRecord>
+</DescriptorRecordSet>"#
+        )
+        .unwrap();
+        f.flush().unwrap();
+
+        let entries = parse_mesh_xml(f.path()).unwrap();
+        assert_eq!(entries.len(), 0);
+    }
+
+    #[test]
+    fn test_no_tree_numbers_skipped() {
+        let mut f = NamedTempFile::new().unwrap();
+        write!(
+            f,
+            r#"<?xml version="1.0"?>
+<DescriptorRecordSet>
+  <DescriptorRecord>
+    <DescriptorUI>D999999</DescriptorUI>
+    <DescriptorName><String>No Trees</String></DescriptorName>
+  </DescriptorRecord>
+</DescriptorRecordSet>"#
+        )
+        .unwrap();
+        f.flush().unwrap();
+
+        let entries = parse_mesh_xml(f.path()).unwrap();
+        assert_eq!(entries.len(), 0);
+    }
+
+    #[test]
+    fn test_xml_entity_unescape() {
+        let mut f = NamedTempFile::new().unwrap();
+        write!(
+            f,
+            r#"<?xml version="1.0"?>
+<DescriptorRecordSet>
+  <DescriptorRecord>
+    <DescriptorUI>D000003</DescriptorUI>
+    <DescriptorName><String>Anatomy &amp; Histology</String></DescriptorName>
+    <TreeNumberList><TreeNumber>A01.001</TreeNumber></TreeNumberList>
+  </DescriptorRecord>
+</DescriptorRecordSet>"#
+        )
+        .unwrap();
+        f.flush().unwrap();
+
+        let entries = parse_mesh_xml(f.path()).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].descriptor_name, "Anatomy & Histology");
+    }
 }
