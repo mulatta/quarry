@@ -7,8 +7,11 @@ new/modified papers with jina-v5 nano, upserts to LanceDB.
 import logging
 import time
 
-import blake3
-import quarry_rs
+try:
+    import blake3
+    import quarry_core
+except ImportError:
+    raise ImportError("pip install quarry[elt]") from None
 
 from quarry.config import settings
 from quarry.embed.jina import JinaEncoder
@@ -59,8 +62,8 @@ def run(batch_size: int = 5000, limit: int | None = None, start_work_id: str = "
         works = [{"work_id": r[0], "title": r[1], "abstract": r[2]} for r in rows]
 
         # Batch normalize via Rust (regex + rayon parallel)
-        titles = quarry_rs.normalize_texts([w["title"] for w in works])
-        abstracts = quarry_rs.normalize_texts([w["abstract"] for w in works])
+        titles = quarry_core.normalize_texts([w["title"] for w in works])
+        abstracts = quarry_core.normalize_texts([w["abstract"] for w in works])
         for w, t, a in zip(works, titles, abstracts):
             w["title"] = t
             w["abstract"] = a

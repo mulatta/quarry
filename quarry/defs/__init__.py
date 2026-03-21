@@ -1,6 +1,9 @@
 """Dagster Definitions: combine all assets, resources, and schedules."""
 
-from dagster import Definitions, load_assets_from_modules, multiprocess_executor
+try:
+    from dagster import Definitions, load_assets_from_modules, multiprocess_executor
+except ImportError:
+    raise ImportError("pip install quarry[elt]") from None
 
 from quarry.assets import citations, download, load, search, stage
 from quarry.resources import PGResource

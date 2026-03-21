@@ -4,7 +4,10 @@ Combines JinaEncoder (query encoding) with LanceStore (hybrid search).
 Enriches results with PG metadata and supports MeSH expansion.
 """
 
-import numpy as np
+try:
+    import numpy as np
+except ImportError:
+    raise ImportError("pip install quarry[server]") from None
 
 from quarry.config import settings
 from quarry.embed.jina import JinaEncoder

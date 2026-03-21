@@ -3,7 +3,7 @@
 DO NOT use `from __future__ import annotations` here — Dagster inspects types at runtime.
 """
 
-import quarry_rs
+import quarry_build
 from dagster import (
     AssetExecutionContext,
     AutomationCondition,
@@ -32,7 +32,7 @@ def mesh_stage(context: AssetExecutionContext) -> MaterializeResult:
     xml_path = xml_files[-1]
     context.log.info(f"Parsing MeSH from {xml_path}")
 
-    rows = quarry_rs.mesh_stage_pg(
+    rows = quarry_build.mesh_stage_pg(
         pg_conninfo=settings.pg_conninfo,
         xml_path=str(xml_path),
     )

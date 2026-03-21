@@ -9,8 +9,9 @@ resolution-markers = [
 [manifest]
 members = [
     "quarry",
+    "quarry-build",
+    "quarry-core",
     "quarry-graph",
-    "quarry-rs",
 ]
 
 [[package]]
@@ -1953,8 +1954,23 @@ wheels = [
 [[package]]
 name = "quarry"
 version = "0.2.0"
-source = { virtual = "." }
+source = { editable = "." }
 dependencies = [
+    { name = "psycopg", extra = ["binary"] },
+    { name = "pydantic-settings" },
+]
+
+[package.optional-dependencies]
+cli = [
+    { name = "lancedb" },
+    { name = "mcp", extra = ["cli"] },
+    { name = "numpy" },
+    { name = "pyarrow" },
+    { name = "quarry-core" },
+    { name = "quarry-graph" },
+    { name = "typer" },
+]
+elt = [
     { name = "blake3" },
     { name = "dagster" },
     { name = "dagster-dg-cli" },
@@ -1966,46 +1982,63 @@ dependencies = [
     { name = "numpy" },
     { name = "orjson" },
     { name = "peft" },
-    { name = "psycopg", extra = ["binary"] },
     { name = "pyarrow" },
-    { name = "pydantic-settings" },
+    { name = "quarry-build" },
+    { name = "quarry-core" },
     { name = "quarry-graph" },
-    { name = "quarry-rs" },
     { name = "sentence-transformers" },
     { name = "torch" },
+]
+server = [
+    { name = "lancedb" },
+    { name = "mcp", extra = ["cli"] },
+    { name = "numpy" },
+    { name = "pyarrow" },
+    { name = "quarry-core" },
+    { name = "quarry-graph" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "blake3" },
-    { name = "dagster" },
-    { name = "dagster-dg-cli", specifier = ">=1.12.19" },
-    { name = "dagster-webserver" },
-    { name = "httpx" },
-    { name = "lancedb" },
-    { name = "lxml" },
-    { name = "mcp", extras = ["cli"] },
-    { name = "numpy" },
-    { name = "orjson" },
-    { name = "peft" },
+    { name = "blake3", marker = "extra == 'elt'" },
+    { name = "dagster", marker = "extra == 'elt'" },
+    { name = "dagster-dg-cli", marker = "extra == 'elt'", specifier = ">=1.12.19" },
+    { name = "dagster-webserver", marker = "extra == 'elt'" },
+    { name = "httpx", marker = "extra == 'elt'" },
+    { name = "lancedb", marker = "extra == 'server'" },
+    { name = "lxml", marker = "extra == 'elt'" },
+    { name = "mcp", extras = ["cli"], marker = "extra == 'server'" },
+    { name = "numpy", marker = "extra == 'server'" },
+    { name = "orjson", marker = "extra == 'elt'" },
+    { name = "peft", marker = "extra == 'elt'" },
     { name = "psycopg", extras = ["binary"] },
-    { name = "pyarrow" },
+    { name = "pyarrow", marker = "extra == 'server'" },
     { name = "pydantic-settings" },
-    { name = "quarry-graph", editable = "quarry-graph" },
-    { name = "quarry-rs", editable = "quarry-rs" },
-    { name = "sentence-transformers" },
-    { name = "torch" },
+    { name = "quarry", extras = ["server"], marker = "extra == 'cli'" },
+    { name = "quarry", extras = ["server"], marker = "extra == 'elt'" },
+    { name = "quarry-build", marker = "extra == 'elt'", editable = "quarry-build" },
+    { name = "quarry-core", marker = "extra == 'server'", editable = "quarry-core" },
+    { name = "quarry-graph", marker = "extra == 'server'", editable = "quarry-graph" },
+    { name = "sentence-transformers", marker = "extra == 'elt'" },
+    { name = "torch", marker = "extra == 'elt'" },
+    { name = "typer", marker = "extra == 'cli'" },
 ]
+provides-extras = ["server", "cli", "elt"]
+
+[[package]]
+name = "quarry-build"
+version = "0.1.0"
+source = { editable = "quarry-build" }
+
+[[package]]
+name = "quarry-core"
+version = "0.2.0"
+source = { editable = "quarry-core" }
 
 [[package]]
 name = "quarry-graph"
 version = "0.1.0"
 source = { editable = "quarry-graph" }
-
-[[package]]
-name = "quarry-rs"
-version = "0.2.0"
-source = { editable = "quarry-rs" }
 
 [[package]]
 name = "questionary"

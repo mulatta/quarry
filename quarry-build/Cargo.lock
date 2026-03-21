@@ -1228,21 +1228,30 @@ dependencies = [
 ]
 
 [[package]]
-name = "quarry-rs"
-version = "0.2.0"
+name = "quarry-build"
+version = "0.1.0"
 dependencies = [
  "flate2",
  "futures",
  "object_store",
  "postgres",
  "pyo3",
+ "quarry-core",
  "quick-xml 0.37.5",
  "rayon",
- "regex",
  "serde",
  "sonic-rs",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "quarry-core"
+version = "0.2.0"
+dependencies = [
+ "rayon",
+ "regex",
+ "sonic-rs",
 ]
 
 [[package]]

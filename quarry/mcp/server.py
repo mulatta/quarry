@@ -11,9 +11,16 @@ Tools:
   mesh_explore    — MeSH hierarchy navigation
 """
 
-from mcp.server.fastmcp import FastMCP
+try:
+    from mcp.server.fastmcp import FastMCP
+except ImportError:
+    raise ImportError("pip install quarry[server]") from None
 
-import quarry_graph
+try:
+    import quarry_graph
+except ImportError:
+    raise ImportError("pip install quarry[server]") from None
+
 from quarry.config import settings
 from quarry.store.pg import PGStore
 

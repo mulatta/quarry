@@ -11,10 +11,13 @@ Key API patterns (lancedb>=0.29):
 
 import re
 
-import lancedb
-import numpy as np
-import pyarrow as pa
-from lancedb.rerankers import RRFReranker
+try:
+    import lancedb
+    import numpy as np
+    import pyarrow as pa
+    from lancedb.rerankers import RRFReranker
+except ImportError:
+    raise ImportError("pip install quarry[server]") from None
 
 _WORK_ID_RE = re.compile(r"^W\d+$")
 
