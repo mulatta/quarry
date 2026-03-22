@@ -13,6 +13,9 @@ pub const DEFAULT_T2_DOMAINS: &[&str] = &[
 /// Maximum concurrent S3 downloads to prevent resource exhaustion.
 const MAX_S3_CONCURRENCY: usize = 64;
 
+/// Maximum PG writer threads — beyond this PG I/O contention dominates.
+const MAX_PG_WRITERS: usize = 16;
+
 /// Top-level build configuration.
 pub struct BuildConfig {
     /// T2 tier domain names.
@@ -28,6 +31,11 @@ pub struct BuildConfig {
     pub fetch_initial_backoff_ms: u64,
     /// Maximum backoff duration in milliseconds (cap for exponential growth).
     pub fetch_max_backoff_ms: u64,
+    /// Number of parallel PG COPY writer threads (clamped to MAX_PG_WRITERS).
+    pub pg_writer_threads: usize,
+    /// Bounded channel buffer between download/parse and PG writers.
+    /// 0 = auto (s3_download_concurrency * 2).
+    pub channel_buffer: usize,
 }
 
 impl Default for BuildConfig {
@@ -39,6 +47,8 @@ impl Default for BuildConfig {
             fetch_max_retries: 3,
             fetch_initial_backoff_ms: 2_000,
             fetch_max_backoff_ms: 30_000,
+            pg_writer_threads: 4,
+            channel_buffer: 0, // auto
         }
     }
 }
@@ -63,6 +73,20 @@ impl BuildConfig {
     /// Effective S3 concurrency, clamped to a safe upper bound.
     pub fn effective_s3_concurrency(&self) -> usize {
         self.s3_download_concurrency.clamp(1, MAX_S3_CONCURRENCY)
+    }
+
+    /// Effective PG writer thread count.
+    pub fn effective_pg_writer_threads(&self) -> usize {
+        self.pg_writer_threads.clamp(1, MAX_PG_WRITERS)
+    }
+
+    /// Effective channel buffer size.
+    pub fn effective_channel_buffer(&self) -> usize {
+        if self.channel_buffer == 0 {
+            self.effective_s3_concurrency() * 2
+        } else {
+            self.channel_buffer.max(1)
+        }
     }
 
     /// Effective parse thread count: explicit value, or auto-detect from
@@ -164,6 +188,42 @@ mod tests {
         let cfg = BuildConfig::default();
         let n = cfg.effective_parse_threads();
         assert!(n >= 1);
+    }
+
+    #[test]
+    fn test_pg_writers_default() {
+        let cfg = BuildConfig::default();
+        assert_eq!(cfg.effective_pg_writer_threads(), 4);
+    }
+
+    #[test]
+    fn test_pg_writers_clamp() {
+        let cfg = BuildConfig {
+            pg_writer_threads: 100,
+            ..Default::default()
+        };
+        assert_eq!(cfg.effective_pg_writer_threads(), 16);
+
+        let cfg = BuildConfig {
+            pg_writer_threads: 0,
+            ..Default::default()
+        };
+        assert_eq!(cfg.effective_pg_writer_threads(), 1);
+    }
+
+    #[test]
+    fn test_channel_buffer_auto() {
+        let cfg = BuildConfig::default();
+        assert_eq!(cfg.effective_channel_buffer(), 64); // 32 * 2
+    }
+
+    #[test]
+    fn test_channel_buffer_explicit() {
+        let cfg = BuildConfig {
+            channel_buffer: 128,
+            ..Default::default()
+        };
+        assert_eq!(cfg.effective_channel_buffer(), 128);
     }
 
     #[test]

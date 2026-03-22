@@ -47,6 +47,9 @@ def pubmed_pg_load(context: AssetExecutionContext) -> MaterializeResult:
         pg_conninfo=settings.pg_conninfo,
         xml_dir=str(settings.pubmed_baseline_dir),
         updates_dir=updates,
+        threads=settings.pubmed_parse_threads or None,
+        pg_writers=settings.pubmed_pg_writers,
+        channel_buffer=settings.pubmed_channel_buffer,
     )
     return MaterializeResult(
         metadata={
@@ -65,6 +68,12 @@ def oa_pg_load(context: AssetExecutionContext) -> MaterializeResult:
     stats = quarry_build.build_oa_s3_pg(
         pg_conninfo=settings.pg_conninfo,
         s3_prefix=settings.oa_s3_prefix,
+        s3_concurrency=settings.oa_s3_concurrency,
+        pg_writers=settings.oa_pg_writers,
+        channel_buffer=settings.oa_channel_buffer,
+        fetch_max_retries=settings.oa_fetch_max_retries,
+        fetch_initial_backoff_ms=settings.oa_fetch_initial_backoff_ms,
+        fetch_max_backoff_ms=settings.oa_fetch_max_backoff_ms,
     )
     return MaterializeResult(
         metadata={

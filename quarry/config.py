@@ -45,6 +45,17 @@ class Settings(BaseSettings):
 
     # OpenAlex
     oa_s3_prefix: str = "s3://openalex/data/works"
+    oa_s3_concurrency: int = 32
+    oa_pg_writers: int = 4
+    oa_channel_buffer: int = 0  # 0 = auto (s3_concurrency * 2)
+    oa_fetch_max_retries: int = 3
+    oa_fetch_initial_backoff_ms: int = 2000
+    oa_fetch_max_backoff_ms: int = 30000
+
+    # PubMed build tuning
+    pubmed_parse_threads: int = 0  # 0 = auto (mem / 0.4GB, capped by CPUs)
+    pubmed_pg_writers: int = 4
+    pubmed_channel_buffer: int = 0  # 0 = auto (parse_threads * 2)
 
     # Download
     ftp_parallel: int = 4

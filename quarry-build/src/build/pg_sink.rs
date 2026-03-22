@@ -56,6 +56,18 @@ impl PgSink {
         Ok(row.is_some())
     }
 
+    /// Bulk-fetch all completed filenames for a source.
+    pub fn done_filenames(
+        &mut self,
+        source: &str,
+    ) -> Result<std::collections::HashSet<String>, Box<dyn std::error::Error>> {
+        let rows = self.client.query(
+            "SELECT filename FROM _build_progress WHERE source = $1",
+            &[&source],
+        )?;
+        Ok(rows.iter().map(|r| r.get::<_, String>(0)).collect())
+    }
+
     /// Create all tables and indexes (idempotent — uses IF NOT EXISTS).
     pub fn init_schema(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         self.client.batch_execute(SCHEMA_DDL)?;
@@ -266,6 +278,29 @@ impl PgSink {
     }
 
     /// Soft-delete PMIDs in the papers table.
+    /// Batch-delete PMIDs from papers + all child tables (authors, mesh, grants, chemicals).
+    /// Used before re-inserting updated versions from PubMed update files.
+    pub fn batch_delete_pmids(
+        &mut self,
+        pmids: &[i32],
+    ) -> Result<u64, Box<dyn std::error::Error>> {
+        if pmids.is_empty() {
+            return Ok(0);
+        }
+        // Child tables first, then parent.
+        for table in &["authors", "mesh_headings", "grants", "chemicals"] {
+            self.client.execute(
+                &format!("DELETE FROM {table} WHERE pmid = ANY($1)"),
+                &[&pmids],
+            )?;
+        }
+        let n = self.client.execute(
+            "DELETE FROM papers WHERE pmid = ANY($1)",
+            &[&pmids],
+        )?;
+        Ok(n)
+    }
+
     pub fn soft_delete_pmids(
         &mut self,
         pmids: &[i32],
