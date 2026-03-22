@@ -281,11 +281,12 @@ pub fn build_oa_s3(
         "oa: found {num_files} .gz objects in s3://{bucket}/{prefix} (concurrency={concurrency})"
     );
 
-    let mut sink = PgSink::connect(pg_conninfo)?;
-    let mut counters = OaCounters::default();
+    let n_writers = config.effective_pg_writer_threads();
+    let chan_buf = config.effective_channel_buffer();
 
-    // Channel: download+parse tasks → main thread
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<FileOutput>(concurrency);
+    // Channel: download+parse tasks → bridge → writer threads
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<FileOutput>(chan_buf);
+    let (write_tx, write_rx) = crossbeam_channel::bounded::<FileOutput>(chan_buf);
 
     let max_retries = config.fetch_max_retries;
     let initial_backoff_ms = config.fetch_initial_backoff_ms;
@@ -302,14 +303,10 @@ pub fn build_oa_s3(
         let pg_conn = pg_conninfo_owned.clone();
         let done_files: Arc<HashSet<String>> = Arc::new(
             tokio::task::spawn_blocking(move || -> Result<HashSet<String>, String> {
-                use postgres::{Client, NoTls};
-                let mut client = Client::connect(&pg_conn, NoTls)
+                let mut sink = PgSink::connect(&pg_conn)
                     .map_err(|e| format!("progress check connect failed: {e}"))?;
-                let rows = client.query(
-                    "SELECT filename FROM _build_progress WHERE source = 'oa'",
-                    &[],
-                ).map_err(|e| format!("progress check query failed: {e}"))?;
-                Ok(rows.iter().map(|r| r.get::<_, String>(0)).collect())
+                sink.done_filenames("oa")
+                    .map_err(|e| format!("progress check query failed: {e}"))
             })
             .await
             .map_err(|e| format!("progress check task panicked: {e}"))??,
@@ -385,33 +382,86 @@ pub fn build_oa_s3(
         Ok(())
     });
 
-    // Main thread: receive structs, write to PG
+    // Spawn N PG writer threads, each with own connection + counters.
+    let files_written = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    eprintln!("oa: {n_writers} writer threads, channel buffer {chan_buf}");
+    let writer_handles: Vec<_> = (0..n_writers)
+        .map(|i| {
+            let rx = write_rx.clone();
+            let conninfo = pg_conninfo.to_string();
+            let written = Arc::clone(&files_written);
+            std::thread::Builder::new()
+                .name(format!("oa-writer-{i}"))
+                .spawn(move || -> Result<OaCounters, Box<dyn std::error::Error + Send + Sync>> {
+                    let mut sink = PgSink::connect(&conninfo)
+                        .map_err(|e| format!("writer-{i} connect: {e}"))?;
+                    let mut counters = OaCounters::default();
+                    while let Ok(output) = rx.recv() {
+                        if output.works.is_empty() && output.failed_lines == 0 {
+                            continue;
+                        }
+                        let n_works = output.works.len();
+                        let fname = output.filename.clone();
+                        if let Err(e) = write_file_output(&mut sink, &output, &mut counters) {
+                            eprintln!("oa: writer-{i} error: {e}");
+                        }
+                        let done = written.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                        if done.is_multiple_of(100) || n_works > 100_000 {
+                            let elapsed = t0.elapsed().as_secs_f64();
+                            eprintln!(
+                                "oa: writer-{i} wrote {fname} ({n_works} works), {done} files total ({elapsed:.1}s)",
+                            );
+                        }
+                    }
+                    Ok(counters)
+                })
+                .expect("failed to spawn writer thread")
+        })
+        .collect();
+    // Drop our copy so writers see disconnect when bridge stops sending.
+    drop(write_rx);
+
+    // Bridge: tokio mpsc → crossbeam channel (non-blocking bridge).
     let mut files_done = 0usize;
     while let Some(output) = rt.block_on(rx.recv()) {
-        if output.works.is_empty() && output.failed_lines == 0 {
-            files_done += 1;
-            continue;
-        }
-        write_file_output(&mut sink, &output, &mut counters)?;
         files_done += 1;
-
+        if write_tx.send(output).is_err() {
+            eprintln!("oa: all writer threads died, aborting");
+            break;
+        }
         if files_done.is_multiple_of(10) || files_done == num_files {
             let elapsed = t0.elapsed().as_secs_f64();
-            eprintln!(
-                "oa: {files_done}/{num_files} s3 objects, {} works ({elapsed:.1}s)",
-                counters.works,
-            );
+            eprintln!("oa: {files_done}/{num_files} s3 objects dispatched ({elapsed:.1}s)");
         }
     }
+    // Signal writers to finish.
+    drop(write_tx);
 
-    // Ensure the producer task completed successfully
+    // Ensure the producer task completed successfully.
     rt.block_on(producer_handle)
         .map_err(|e| format!("oa: S3 producer task panicked: {e}"))?
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
+    // Join writer threads and merge counters.
+    let mut counters = OaCounters::default();
+    for (i, handle) in writer_handles.into_iter().enumerate() {
+        match handle.join() {
+            Ok(Ok(c)) => {
+                counters.works += c.works;
+                counters.authors += c.authors;
+                counters.topics += c.topics;
+                counters.citations += c.citations;
+                counters.crosswalk += c.crosswalk;
+                counters.failed_lines += c.failed_lines;
+            }
+            Ok(Err(e)) => eprintln!("oa: writer-{i} error: {e}"),
+            Err(_) => eprintln!("oa: writer-{i} panicked"),
+        }
+    }
+
     let elapsed = t0.elapsed().as_secs_f64();
     eprintln!(
-        "oa: done — {} works, {} citations in {elapsed:.1}s",
+        "oa: done — {} works, {} citations in {elapsed:.1}s ({n_writers} writers)",
         counters.works, counters.citations,
     );
 

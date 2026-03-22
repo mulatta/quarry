@@ -1,7 +1,14 @@
-# Quarry — Rust crate build & test recipes
+# Quarry — Rust crate build, test, and install recipes
 # Dependencies: quarry-build → quarry-core, quarry-graph independent
+#
+# Usage:
+#   just sync         # uv sync (debug) — fast dev iteration
+#   just sync-release # uv sync (release) — production
+#   just dev          # cargo debug build + install .so to venv
+#   just release      # cargo release build + install .so to venv
+#   just check        # clippy + test all
+#   just kill-dagster # stop all dagster processes
 
-crates := "quarry-core quarry-build quarry-graph"
 venv := ".venv/lib/python3.13/site-packages"
 so_suffix := ".cpython-313-x86_64-linux-gnu.so"
 
@@ -9,51 +16,85 @@ so_suffix := ".cpython-313-x86_64-linux-gnu.so"
 default:
     @just --list
 
-# ── Build ──
+# ── Sync (uv + maturin) ──
 
-# Build quarry-core .so (cargo build + direct copy, bypasses maturin wheel cache)
-build-core:
+# Sync Python deps + Rust .so (debug build)
+sync:
+    uv sync --all-extras
+
+# Sync Python deps + Rust .so (release build)
+sync-release:
+    uv sync --all-extras -C build-args='--profile=release'
+
+# ── Internal helpers ──
+
+[private]
+_build crate profile:
     #!/usr/bin/env bash
     set -euo pipefail
-    cargo build --manifest-path quarry-core/Cargo.toml --features extension-module
-    mkdir -p {{ venv }}/quarry_core
-    cp quarry-core/target/debug/libquarry_core.so {{ venv }}/quarry_core/quarry_core{{ so_suffix }}
-    echo "quarry_core .so installed"
+    flags=(--manifest-path "{{crate}}/Cargo.toml" --features extension-module)
+    [[ "{{profile}}" == "release" ]] && flags+=(--release)
+    cargo build "${flags[@]}"
 
-# Build quarry-build .so (depends on core)
-build-build: build-core
+[private]
+_install crate pymod profile:
     #!/usr/bin/env bash
     set -euo pipefail
-    cargo build --manifest-path quarry-build/Cargo.toml --features extension-module
-    mkdir -p {{ venv }}/quarry_build
-    cp quarry-build/target/debug/libquarry_build.so {{ venv }}/quarry_build/quarry_build{{ so_suffix }}
-    echo "quarry_build .so installed"
+    mkdir -p "{{ venv }}/{{pymod}}"
+    cp "{{crate}}/target/{{profile}}/lib{{pymod}}.so" \
+       "{{ venv }}/{{pymod}}/{{pymod}}{{ so_suffix }}"
+    echo "{{pymod}} .so installed ({{profile}})"
 
-# Build quarry-graph .so
-build-graph:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    cargo build --manifest-path quarry-graph/Cargo.toml --features extension-module
-    mkdir -p {{ venv }}/quarry_graph
-    cp quarry-graph/target/debug/libquarry_graph.so {{ venv }}/quarry_graph/quarry_graph{{ so_suffix }}
-    echo "quarry_graph .so installed"
+# ── Dev (debug) ──
 
-# Build all crates (respects dependency order)
-build-all: build-build build-graph
+# Debug build + install quarry-core
+dev-core:
+    just _build quarry-core debug
+    just _install quarry-core quarry_core debug
+
+# Debug build + install quarry-build (depends on core)
+dev-build: dev-core
+    just _build quarry-build debug
+    just _install quarry-build quarry_build debug
+
+# Debug build + install quarry-graph
+dev-graph:
+    just _build quarry-graph debug
+    just _install quarry-graph quarry_graph debug
+
+# Debug build + install all crates
+dev: dev-build dev-graph
+
+# ── Release ──
+
+# Release build + install quarry-core
+release-core:
+    just _build quarry-core release
+    just _install quarry-core quarry_core release
+
+# Release build + install quarry-build (depends on core)
+release-build: release-core
+    just _build quarry-build release
+    just _install quarry-build quarry_build release
+
+# Release build + install quarry-graph
+release-graph:
+    just _build quarry-graph release
+    just _install quarry-graph quarry_graph release
+
+# Release build + install all crates
+release: release-build release-graph
 
 # ── Clean ──
 
 # Clean all Rust crate targets
 clean:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    for d in {{ crates }}; do
-        echo "=== clean $d ==="
-        cargo clean --manifest-path "$d/Cargo.toml"
-    done
+    cargo clean --manifest-path quarry-core/Cargo.toml
+    cargo clean --manifest-path quarry-build/Cargo.toml
+    cargo clean --manifest-path quarry-graph/Cargo.toml
 
-# Clean + rebuild all
-rebuild: clean build-all
+# Clean + release rebuild
+rebuild: clean release
 
 # ── Lint & Test ──
 
@@ -101,14 +142,23 @@ kill-dagster:
         echo "No Dagster processes found"
         exit 0
     fi
-    echo "Killing Dagster processes: $pids"
+    echo "SIGTERM: $pids"
     echo "$pids" | xargs kill 2>/dev/null || true
-    sleep 2
-    # Force kill survivors
+    for i in 1 2 3 4 5; do
+        pids=$(pgrep -f 'dagster|dg dev' -u "$USER" 2>/dev/null || true)
+        [ -z "$pids" ] && break
+        sleep 1
+    done
     pids=$(pgrep -f 'dagster|dg dev' -u "$USER" 2>/dev/null || true)
     if [ -n "$pids" ]; then
-        echo "Force killing: $pids"
+        echo "SIGKILL: $pids"
         echo "$pids" | xargs kill -9 2>/dev/null || true
+        sleep 1
+    fi
+    pids=$(pgrep -f 'dagster|dg dev' -u "$USER" 2>/dev/null || true)
+    if [ -n "$pids" ]; then
+        echo "WARNING: still alive: $pids"
+        exit 1
     fi
     echo "Dagster processes stopped"
 
@@ -120,6 +170,8 @@ verify-so:
     set -euo pipefail
     echo "=== quarry_core ==="
     .venv/bin/python -c "import quarry_core; print(dir(quarry_core))"
+    echo "=== quarry_build.build_pubmed_pg ==="
+    .venv/bin/python -c "import quarry_build, inspect; print(inspect.signature(quarry_build.build_pubmed_pg))"
     echo "=== quarry_build.build_oa_s3_pg ==="
     .venv/bin/python -c "import quarry_build, inspect; print(inspect.signature(quarry_build.build_oa_s3_pg))"
     echo "=== quarry_graph ==="

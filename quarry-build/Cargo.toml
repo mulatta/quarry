@@ -28,6 +28,7 @@ object_store = { version = "0.12", features = ["aws"] }
 tokio = { version = "1", features = ["rt-multi-thread"] }
 futures = "0.3"
 postgres = "0.19"
+crossbeam-channel = "0.5"
 
 # Python bindings (optional)
 pyo3 = { version = "0.24", optional = true }

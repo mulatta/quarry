@@ -37,15 +37,19 @@ pub fn reset_all(pg_conninfo: &str) -> PyResult<()> {
 ///
 /// Returns a dict with build stats.
 #[pyfunction]
-#[pyo3(signature = (pg_conninfo, xml_dir, updates_dir=None, threads=None))]
+#[pyo3(signature = (pg_conninfo, xml_dir, updates_dir=None, threads=None, pg_writers=4, channel_buffer=0))]
 pub fn build_pubmed_pg(
     pg_conninfo: &str,
     xml_dir: &str,
     updates_dir: Option<&str>,
     threads: Option<usize>,
+    pg_writers: usize,
+    channel_buffer: usize,
 ) -> PyResult<PyObject> {
     let config = BuildConfig {
         parse_threads: threads,
+        pg_writer_threads: pg_writers,
+        channel_buffer,
         ..Default::default()
     };
     let stats = pubmed::build_pubmed(
@@ -84,17 +88,31 @@ pub fn build_oa_local_pg(pg_conninfo: &str, local_dir: &str) -> PyResult<PyObjec
 ///
 /// Returns a dict with build stats.
 #[pyfunction]
-#[pyo3(signature = (pg_conninfo, s3_prefix, s3_concurrency=32, fetch_max_retries=3, fetch_initial_backoff_ms=2000, fetch_max_backoff_ms=30000))]
+#[pyo3(signature = (
+    pg_conninfo,
+    s3_prefix,
+    s3_concurrency=32,
+    pg_writers=4,
+    channel_buffer=0,
+    fetch_max_retries=3,
+    fetch_initial_backoff_ms=2000,
+    fetch_max_backoff_ms=30000,
+))]
+#[allow(clippy::too_many_arguments)] // PyO3 kwargs require individual params for Python IDE support
 pub fn build_oa_s3_pg(
     pg_conninfo: &str,
     s3_prefix: &str,
     s3_concurrency: usize,
+    pg_writers: usize,
+    channel_buffer: usize,
     fetch_max_retries: u32,
     fetch_initial_backoff_ms: u64,
     fetch_max_backoff_ms: u64,
 ) -> PyResult<PyObject> {
     let config = BuildConfig {
         s3_download_concurrency: s3_concurrency,
+        pg_writer_threads: pg_writers,
+        channel_buffer,
         fetch_max_retries,
         fetch_initial_backoff_ms,
         fetch_max_backoff_ms,
