@@ -32,17 +32,25 @@ def _run_ingest(args: list[str], context: AssetExecutionContext) -> dict:
     """Run quarry-ingest subprocess, stream stderr to Dagster log, parse stdout JSON."""
     cmd = ["quarry-ingest", "--pg-conninfo", settings.pg_conninfo] + args
     context.log.info(f"Running: {' '.join(cmd)}")
-    result = subprocess.run(cmd, capture_output=True, text=True)
 
-    for line in result.stderr.splitlines():
-        context.log.info(line)
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
+    # Stream stderr lines to Dagster log in real-time.
+    assert proc.stderr is not None
+    for line in proc.stderr:
+        line = line.rstrip("\n")
+        if line:
+            context.log.info(line)
+    proc.wait()
 
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"quarry-ingest failed (exit {result.returncode}): {result.stderr}"
-        )
+    assert proc.stdout is not None
+    stdout = proc.stdout.read()
 
-    return json.loads(result.stdout) if result.stdout.strip() else {}
+    if proc.returncode != 0:
+        raise RuntimeError(f"quarry-ingest failed (exit {proc.returncode})")
+
+    return json.loads(stdout) if stdout.strip() else {}
 
 
 def _metadata_from_stats(stats: dict) -> dict[str, MetadataValue]:

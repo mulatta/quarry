@@ -11,6 +11,7 @@ let
       cargo
       clippy
       maturin
+      cmake
       just
       postgresql_16
     ];

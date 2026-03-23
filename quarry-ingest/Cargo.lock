@@ -232,6 +232,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
+name = "cmake"
+version = "0.1.57"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75443c44cd6b379beb8c5b45d85d0773baf31cce901fe7bb252f4eff3008ef7d"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -417,6 +426,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c"
 dependencies = [
  "crc32fast",
+ "libz-ng-sys",
  "miniz_oxide",
 ]
 
@@ -948,6 +958,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "libz-ng-sys"
+version = "1.1.24"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "52ff028f347c6ed1b98e17cede6f36b5e2706afde598914c87d2da04f86029ba"
+dependencies = [
+ "cmake",
+ "libc",
+]
+
+[[package]]
 name = "linux-raw-sys"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1291,6 +1311,7 @@ dependencies = [
 name = "quarry-ingest"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "clap",
  "crossbeam-channel",
  "csv",

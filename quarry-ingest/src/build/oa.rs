@@ -4,9 +4,13 @@
 //! - Local directory of .gz files (`build_oa_local`)
 //! - S3 prefix (`build_oa_s3`)
 //!
-//! Architecture (S3 path):
-//!   tokio async tasks (download) → spawn_blocking (decompress+parse)
-//!   → mpsc channel → main thread (sequential PG COPY writes)
+//! Architecture (S3 path) — 3-stage pipeline:
+//!   Stage 1: tokio async download (N concurrent) → dl_channel (prefetch buffer)
+//!   Stage 2: tokio spawn_blocking parse pool → write_channel
+//!   Stage 3: N PG writer threads (sync COPY)
+//!
+//! Stages overlap: downloads continue while parsing, parsing continues while
+//! PG writes are in flight. Bounded channels provide backpressure at each boundary.
 
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader};
@@ -41,20 +45,9 @@ struct FileOutput {
     crosswalk: Vec<OaCrosswalk>,
     failed_lines: usize,
     filename: String,
-}
-
-impl FileOutput {
-    fn empty(filename: String) -> Self {
-        Self {
-            works: Vec::new(),
-            authors: Vec::new(),
-            topics: Vec::new(),
-            citations: Vec::new(),
-            crosswalk: Vec::new(),
-            failed_lines: 0,
-            filename,
-        }
-    }
+    /// Pipeline data permit — released when PG write completes, bounding total
+    /// in-flight memory across all pipeline stages (download → parse → write).
+    _data_permit: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
 /// Parse a gz buffer into struct vecs.
@@ -62,6 +55,7 @@ fn parse_gz_to_structs(
     bytes: &[u8],
     t2_domains: &HashSet<String>,
     filename: String,
+    data_permit: Option<tokio::sync::OwnedSemaphorePermit>,
 ) -> FileOutput {
     let reader = BufReader::with_capacity(256 * 1024, GzDecoder::new(bytes));
     let mut works = Vec::new();
@@ -106,6 +100,7 @@ fn parse_gz_to_structs(
         crosswalk,
         failed_lines: failed,
         filename,
+        _data_permit: data_permit,
     }
 }
 
@@ -210,7 +205,7 @@ pub fn build_oa_local(
         }
 
         let bytes = std::fs::read(gz_path)?;
-        let output = parse_gz_to_structs(&bytes, &t2_domains, filename);
+        let output = parse_gz_to_structs(&bytes, &t2_domains, filename, None);
         write_file_output(&mut sink, &output, &mut counters)?;
 
         if (file_idx + 1).is_multiple_of(10) || file_idx + 1 == num_files {
@@ -296,116 +291,162 @@ pub fn build_oa_s3(
 
     let n_writers = config.effective_pg_writer_threads();
     let chan_buf = config.effective_channel_buffer();
-
-    // Channel: download+parse tasks → bridge → writer threads
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<FileOutput>(chan_buf);
-    let (write_tx, write_rx) = crossbeam_channel::bounded::<FileOutput>(chan_buf);
+    // Prefetch buffer: downloaded-but-not-yet-parsed files held in memory.
+    // Decouples download from parse so both can progress in parallel.
+    let prefetch = concurrency.min(4);
 
     let max_retries = config.fetch_max_retries;
     let initial_backoff_ms = config.fetch_initial_backoff_ms;
     let max_backoff_ms = config.fetch_max_backoff_ms;
 
-    let store_clone = Arc::clone(&store);
-    let t2_clone = Arc::clone(&t2_domains);
-    let pg_conninfo_owned = pg_conninfo.to_string();
     // Strip "data/works/" prefix so filenames become "updated_date=.../part_XXXX.gz"
     let prefix_with_slash = if prefix.ends_with('/') {
         prefix.clone()
     } else {
         format!("{prefix}/")
     };
-    let producer_handle: tokio::task::JoinHandle<Result<(), String>> = rt.spawn(async move {
-        use futures::StreamExt;
 
-        // Check progress upfront to skip already-done files.
-        // Fail-closed: if we can't read progress, abort rather than risk PK conflicts.
-        let pg_conn = pg_conninfo_owned.clone();
-        let done_files: Arc<HashSet<String>> = Arc::new(
-            tokio::task::spawn_blocking(move || -> Result<HashSet<String>, String> {
-                let mut sink = PgSink::connect(&pg_conn)
-                    .map_err(|e| format!("progress check connect failed: {e}"))?;
-                sink.done_filenames("oa")
-                    .map_err(|e| format!("progress check query failed: {e}"))
-            })
-            .await
-            .map_err(|e| format!("progress check task panicked: {e}"))??,
-        );
+    // Check progress upfront to skip already-done files.
+    let done_files: Arc<HashSet<String>> = {
+        let mut sink = PgSink::connect(pg_conninfo)?;
+        Arc::new(sink.done_filenames("oa")?)
+    };
+    let num_done = done_files.len();
+    let num_todo = num_files.saturating_sub(num_done);
+    eprintln!("oa: {num_done} files already done, {num_todo} to process");
 
-        let download_futures = gz_objects.into_iter().map(|obj| {
-            let store = Arc::clone(&store_clone);
-            let t2 = Arc::clone(&t2_clone);
-            let done = Arc::clone(&done_files);
-            let pfx = prefix_with_slash.clone();
-            async move {
-                // Use partition-qualified path as filename to distinguish partitions.
-                // e.g. "updated_date=2024-01-15/part_0000.gz"
-                let obj_path = obj.location.as_ref().to_string();
-                let filename = obj_path
-                    .strip_prefix(&pfx)
-                    .unwrap_or(&obj_path)
-                    .to_string();
+    // ── Stage 1: S3 download (independent tasks) → dl_channel ─────────
+    // Two semaphores decouple network concurrency from memory pressure:
+    //   dl_sem:   bounds concurrent network connections (= concurrency)
+    //   data_sem: bounds total in-flight data items (downloading + waiting-to-send
+    //             + in channel). Caps memory at ~max_in_flight * file_size.
+    //
+    // dl_permit released immediately after download → network always at full speed.
+    // data_permit released after channel send → memory stays bounded.
+    let max_in_flight = concurrency + prefetch;
+    let (dl_tx, dl_rx) = tokio::sync::mpsc::channel::<(String, bytes::Bytes, tokio::sync::OwnedSemaphorePermit)>(prefetch);
 
-                if done.contains(&filename) {
-                    return FileOutput::empty(filename);
-                }
+    let store_dl = Arc::clone(&store);
+    let done_dl = Arc::clone(&done_files);
+    let pfx_dl = prefix_with_slash.clone();
+    let dl_t0 = t0;
+    let dl_handle: tokio::task::JoinHandle<Result<(), String>> = rt.spawn(async move {
+        let dl_sem = Arc::new(tokio::sync::Semaphore::new(concurrency));
+        let data_sem = Arc::new(tokio::sync::Semaphore::new(max_in_flight));
+        let dl_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut join_set = tokio::task::JoinSet::new();
 
+        for obj in gz_objects {
+            let obj_path = obj.location.as_ref().to_string();
+            let filename = obj_path
+                .strip_prefix(&pfx_dl)
+                .unwrap_or(&obj_path)
+                .to_string();
+
+            // Skip done files before acquiring semaphore — no slot wasted.
+            if done_dl.contains(&filename) {
+                continue;
+            }
+
+            // Acquire data budget first (memory bound), then download slot (network bound).
+            // Order matters: don't hold a download slot while waiting for memory budget.
+            let data_permit = Arc::clone(&data_sem).acquire_owned().await.unwrap();
+            let dl_permit = Arc::clone(&dl_sem).acquire_owned().await.unwrap();
+            let store = Arc::clone(&store_dl);
+            let tx = dl_tx.clone();
+            let count = Arc::clone(&dl_count);
+
+            join_set.spawn(async move {
                 let total_attempts = max_retries + 1;
                 let mut last_err = String::new();
+
                 for attempt in 0..total_attempts {
                     if attempt > 0 {
                         let shift = (attempt - 1).min(63);
                         let delay_ms = initial_backoff_ms
                             .saturating_mul(1u64 << shift)
                             .min(max_backoff_ms);
-                        let delay = std::time::Duration::from_millis(delay_ms);
-                        eprintln!("oa: retry {attempt}/{max_retries} for {obj_path} in {delay:?}");
-                        tokio::time::sleep(delay).await;
+                        eprintln!(
+                            "oa: retry {attempt}/{max_retries} for {obj_path} in {delay_ms}ms"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                     }
 
-                    let dl_result = async {
+                    match async {
                         let result = store.get(&obj.location).await?;
                         result.bytes().await
                     }
-                    .await;
-
-                    match dl_result {
+                    .await
+                    {
                         Ok(bytes) => {
-                            let t2 = Arc::clone(&t2);
-                            let fname = filename.clone();
-                            let parsed = tokio::task::spawn_blocking(move || {
-                                parse_gz_to_structs(&bytes, &t2, fname)
-                            })
-                            .await
-                            .unwrap_or_else(|e| {
-                                eprintln!("oa: WARN: parse task panicked for {obj_path}: {e}");
-                                FileOutput::empty(obj_path.rsplit('/').next().unwrap_or(&obj_path).to_string())
-                            });
-                            return parsed;
+                            let n =
+                                count.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                            if n.is_multiple_of(10) {
+                                let elapsed = dl_t0.elapsed().as_secs_f64();
+                                eprintln!("oa: {n}/{num_todo} downloaded ({elapsed:.1}s)");
+                            }
+                            // Release network slot immediately — next download starts.
+                            drop(dl_permit);
+                            // Send data + permit to parse stage. Permit flows through
+                            // the entire pipeline and is released when PG write completes.
+                            let _ = tx.send((filename, bytes, data_permit)).await;
+                            return;
                         }
-                        Err(e) => {
-                            last_err = format!("{e}");
-                        }
+                        Err(e) => last_err = format!("{e}"),
                     }
                 }
-                eprintln!("oa: WARN: failed to download {obj_path} after {total_attempts} attempts: {last_err}");
-                FileOutput::empty(filename)
-            }
-        });
 
-        let mut stream =
-            futures::stream::iter(download_futures).buffer_unordered(concurrency);
+                eprintln!(
+                    "oa: WARN: failed {obj_path} after {total_attempts} attempts: {last_err}"
+                );
+                drop(dl_permit);
+                drop(data_permit);
+            });
+        }
 
-        while let Some(output) = stream.next().await {
-            if tx.send(output).await.is_err() {
-                break;
+        // Wait for all download tasks.
+        while let Some(result) = join_set.join_next().await {
+            if let Err(e) = result {
+                eprintln!("oa: download task panicked: {e}");
             }
         }
         Ok(())
     });
 
-    // Spawn N PG writer threads, each with own connection + counters.
+    // ── Stage 2: Parse (spawn_blocking) → write_channel ────────────────
+    // Consumes downloaded bytes, decompresses+parses on blocking threads,
+    // sends parsed FileOutput to PG writers via crossbeam.
+    let (write_tx, write_rx) = crossbeam_channel::bounded::<FileOutput>(chan_buf);
+
+    let t2_parse = Arc::clone(&t2_domains);
+    let (parse_tx, mut parse_rx) = tokio::sync::mpsc::channel::<FileOutput>(chan_buf);
+    let mut dl_rx = dl_rx;
+    // Limit concurrent parse tasks to avoid unbounded spawn_blocking growth.
+    // Permit released immediately after parse (before send) so parsing never
+    // stalls waiting for PG writers. The bounded parse_tx channel provides
+    // backpressure between parse and PG write stages.
+    let parse_concurrency = concurrency;
+    let parse_sem = Arc::new(tokio::sync::Semaphore::new(parse_concurrency));
+    let parse_handle: tokio::task::JoinHandle<Result<(), String>> = rt.spawn(async move {
+        while let Some((filename, bytes, data_permit)) = dl_rx.recv().await {
+            let t2 = Arc::clone(&t2_parse);
+            let tx = parse_tx.clone();
+            let permit = Arc::clone(&parse_sem).acquire_owned().await.unwrap();
+            tokio::task::spawn_blocking(move || {
+                let output = parse_gz_to_structs(&bytes, &t2, filename, Some(data_permit));
+                drop(permit); // release parse slot immediately — don't hold during send
+                let _ = tx.blocking_send(output); // backpressure from PG writers via channel
+            });
+        }
+        Ok(())
+    });
+
+    // ── Stage 3: PG writer threads ─────────────────────────────────────
     let files_written = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    eprintln!("oa: {n_writers} writer threads, channel buffer {chan_buf}");
+    eprintln!(
+        "oa: 3-stage pipeline — {concurrency} downloaders, prefetch {prefetch}, \
+         max_in_flight {max_in_flight}, {n_writers} writers, channel buffer {chan_buf}"
+    );
     let writer_handles: Vec<_> = (0..n_writers)
         .map(|i| {
             let rx = write_rx.clone();
@@ -439,28 +480,31 @@ pub fn build_oa_s3(
                 .expect("failed to spawn writer thread")
         })
         .collect();
-    // Drop our copy so writers see disconnect when bridge stops sending.
+    // Drop our copy so writers see disconnect when parse stage stops sending.
     drop(write_rx);
 
-    // Bridge: tokio mpsc → crossbeam channel (non-blocking bridge).
+    // Bridge: tokio mpsc (parse output) → crossbeam channel (PG writers).
     let mut files_done = 0usize;
-    while let Some(output) = rt.block_on(rx.recv()) {
+    while let Some(output) = rt.block_on(parse_rx.recv()) {
         files_done += 1;
         if write_tx.send(output).is_err() {
             eprintln!("oa: all writer threads died, aborting");
             break;
         }
-        if files_done.is_multiple_of(10) || files_done == num_files {
+        if files_done.is_multiple_of(10) || files_done == num_todo {
             let elapsed = t0.elapsed().as_secs_f64();
-            eprintln!("oa: {files_done}/{num_files} s3 objects dispatched ({elapsed:.1}s)");
+            eprintln!("oa: {files_done}/{num_todo} files parsed+dispatched ({elapsed:.1}s)");
         }
     }
     // Signal writers to finish.
     drop(write_tx);
 
-    // Ensure the producer task completed successfully.
-    rt.block_on(producer_handle)
-        .map_err(|e| format!("oa: S3 producer task panicked: {e}"))?
+    // Ensure async stages completed successfully.
+    rt.block_on(dl_handle)
+        .map_err(|e| format!("oa: download task panicked: {e}"))?
+        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    rt.block_on(parse_handle)
+        .map_err(|e| format!("oa: parse task panicked: {e}"))?
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
     // Join writer threads and merge counters.
