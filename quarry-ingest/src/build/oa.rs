@@ -291,9 +291,7 @@ pub fn build_oa_s3(
 
     let n_writers = config.effective_pg_writer_threads();
     let chan_buf = config.effective_channel_buffer();
-    // Prefetch buffer: downloaded-but-not-yet-parsed files held in memory.
-    // Decouples download from parse so both can progress in parallel.
-    let prefetch = concurrency.min(4);
+    let prefetch = config.effective_prefetch_buffer();
 
     let max_retries = config.fetch_max_retries;
     let initial_backoff_ms = config.fetch_initial_backoff_ms;

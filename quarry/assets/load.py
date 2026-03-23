@@ -108,6 +108,8 @@ def oa_pg_load(context: AssetExecutionContext) -> MaterializeResult:
             settings.oa_s3_prefix,
             "--s3-concurrency",
             str(settings.oa_s3_concurrency),
+            "--prefetch-buffer",
+            str(settings.oa_prefetch_buffer),
             "--pg-writers",
             str(settings.oa_pg_writers),
             "--channel-buffer",
