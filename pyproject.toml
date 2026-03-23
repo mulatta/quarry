@@ -28,7 +28,6 @@ cli = [
 ]
 elt = [
     "quarry[server]",
-    "quarry-build",
     "dagster",
     "dagster-webserver",
     "dagster-dg-cli>=1.12.19",
@@ -45,11 +44,10 @@ elt = [
 quarry = "quarry.cli:app"
 
 [tool.uv.workspace]
-members = ["quarry-core", "quarry-build", "quarry-graph"]
+members = ["quarry-core", "quarry-graph"]
 
 [tool.uv.sources]
 quarry-core = { workspace = true }
-quarry-build = { workspace = true }
 quarry-graph = { workspace = true }
 
 [tool.setuptools.packages.find]

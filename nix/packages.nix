@@ -1,3 +1,4 @@
+{ inputs, ... }:
 {
   perSystem =
     { pkgs, ... }:
@@ -27,16 +28,21 @@
           doCheck = false;
         };
 
-      # Root of the quarry repo — needed so quarry-build can resolve
-      # its `path = "../quarry-core"` dependency during Nix build.
-      repoRoot = pkgs.lib.cleanSourceWith {
+      # crane — standalone Rust binary build (no nixpkgs input of its own)
+      craneLib = inputs.crane.mkLib pkgs;
+
+      # Source: repo root filtered to quarry-ingest + quarry-core (path dep) + sql/
+      ingestSrc = pkgs.lib.cleanSourceWith {
         src = ../.;
         filter =
-          path: _type:
+          path: type:
           let
             rel = pkgs.lib.removePrefix (toString ../.) path;
           in
-          pkgs.lib.hasPrefix "/quarry-core" rel || pkgs.lib.hasPrefix "/quarry-build" rel;
+          pkgs.lib.hasPrefix "/quarry-ingest" rel
+          || pkgs.lib.hasPrefix "/quarry-core" rel
+          || pkgs.lib.hasPrefix "/sql" rel
+          || (craneLib.filterCargoSources path type);
       };
     in
     {
@@ -48,32 +54,28 @@
           lockFile = ../quarry-core/Cargo.lock;
         };
 
-        # Python extension module (cdylib) — build pipeline (PG, S3, XML)
-        quarry-build = python.pkgs.buildPythonPackage {
-          pname = "quarry-build";
-          version = "0.1.0";
-          pyproject = true;
-
-          # Use repo root so Cargo can resolve quarry-core path dependency
-          src = repoRoot;
-          sourceRoot = "source/quarry-build";
-
-          cargoDeps = rustPlatform.importCargoLock {
-            lockFile = ../quarry-build/Cargo.lock;
-          };
-
-          nativeBuildInputs = with rustPlatform; [
-            cargoSetupHook
-            maturinBuildHook
-          ];
-
-          doCheck = false;
-        };
-
         quarry-graph = mkMaturinPackage {
           pname = "quarry-graph";
           src = ../quarry-graph;
           lockFile = ../quarry-graph/Cargo.lock;
+        };
+
+        # Standalone Rust binary — data ingestion CLI
+        quarry-ingest = craneLib.buildPackage {
+          pname = "quarry-ingest";
+          version = "0.1.0";
+          src = ingestSrc;
+
+          cargoLock = ../quarry-ingest/Cargo.lock;
+          cargoExtraArgs = "--bin quarry-ingest";
+
+          # Build from quarry-ingest subdirectory
+          postUnpack = ''
+            cd $sourceRoot/quarry-ingest
+            export sourceRoot=$(pwd)
+          '';
+
+          doCheck = false;
         };
       };
     };

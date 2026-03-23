@@ -1,4 +1,4 @@
-//! Integration tests for quarry-build pipeline.
+//! Integration tests for quarry-ingest pipeline.
 //!
 //! These tests require a running PostgreSQL instance.
 //! Set QUARRY_TEST_PG_CONNINFO to enable (e.g., "postgresql:///quarry_test").
@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use quarry_build::build::config::BuildConfig;
+use quarry_ingest::build::config::BuildConfig;
 
 fn fixtures_dir() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
@@ -43,7 +43,7 @@ fn test_pubmed_build() {
     let config = BuildConfig::default();
     let pubmed_fixtures = fixtures_dir().join("pubmed");
 
-    let stats = quarry_build::build::pubmed::build_pubmed(
+    let stats = quarry_ingest::build::pubmed::build_pubmed(
         &config,
         &pubmed_fixtures,
         None,
@@ -68,7 +68,7 @@ fn test_pubmed_progress_skip() {
     let pubmed_fixtures = fixtures_dir().join("pubmed");
 
     // First build
-    let stats1 = quarry_build::build::pubmed::build_pubmed(
+    let stats1 = quarry_ingest::build::pubmed::build_pubmed(
         &config,
         &pubmed_fixtures,
         None,
@@ -78,7 +78,7 @@ fn test_pubmed_progress_skip() {
     assert_eq!(stats1.num_papers, 2);
 
     // Second build — files marked done in _build_progress → skip
-    let stats2 = quarry_build::build::pubmed::build_pubmed(
+    let stats2 = quarry_ingest::build::pubmed::build_pubmed(
         &config,
         &pubmed_fixtures,
         None,
@@ -102,7 +102,7 @@ fn test_oa_local_build() {
     let config = BuildConfig::default();
     let oa_fixtures = fixtures_dir().join("oa");
 
-    let stats = quarry_build::build::oa::build_oa_local(&config, &oa_fixtures, &conninfo).unwrap();
+    let stats = quarry_ingest::build::oa::build_oa_local(&config, &oa_fixtures, &conninfo).unwrap();
     assert_eq!(stats.num_works, 3, "expected 3 works (T1, T2, T3)");
     assert!(stats.num_citations > 0, "T1 has 2 referenced_works");
     assert!(stats.num_crosswalk > 0, "T1 has PMID → crosswalk");

@@ -1,5 +1,5 @@
 -- Quarry schema DDL — single source of truth.
--- Loaded by: process-compose (PG init), quarry_build.init_schema(), PGStore.init_schema()
+-- Loaded by: process-compose (PG init), quarry-ingest db init, PGStore.init_schema()
 -- All statements are idempotent (IF NOT EXISTS).
 
 -- ── PubMed tables ──

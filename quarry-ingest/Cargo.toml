@@ -1,16 +1,10 @@
 [package]
-name = "quarry-build"
+name = "quarry-ingest"
 version = "0.1.0"
 edition = "2024"
 
 [lib]
-name = "quarry_build"
-crate-type = ["lib", "cdylib"]
-
-[features]
-default = []
-python = ["pyo3"]
-extension-module = ["python", "pyo3/extension-module"]
+name = "quarry_ingest"
 
 [dependencies]
 # Core crate (normalize, abstract_recon)
@@ -30,8 +24,14 @@ futures = "0.3"
 postgres = "0.19"
 crossbeam-channel = "0.5"
 
-# Python bindings (optional)
-pyo3 = { version = "0.24", optional = true }
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+serde_json = "1"
+csv = "1"
+
+[[bin]]
+name = "quarry-ingest"
+path = "src/main.rs"
 
 [dev-dependencies]
 tempfile = "3"

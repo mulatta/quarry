@@ -535,6 +535,26 @@ impl PgSink {
         Ok(self.client.execute(sql, &[])?)
     }
 
+    /// Execute a batch SQL statement (multiple statements separated by `;`).
+    pub fn batch_execute(&mut self, sql: &str) -> Result<(), Box<dyn std::error::Error>> {
+        self.client.batch_execute(sql)?;
+        Ok(())
+    }
+
+    /// Start a raw COPY FROM STDIN (for streaming binary/CSV data).
+    pub fn copy_in_raw(
+        &mut self,
+        query: &str,
+    ) -> Result<postgres::CopyInWriter<'_>, Box<dyn std::error::Error>> {
+        Ok(self.client.copy_in(query)?)
+    }
+
+    /// Query a single i64 value (e.g. COUNT(*)).
+    pub fn query_one_i64(&mut self, sql: &str) -> Result<i64, Box<dyn std::error::Error>> {
+        let row = self.client.query_one(sql, &[])?;
+        Ok(row.get::<_, i64>(0))
+    }
+
     /// TRUNCATE all data tables + reset build progress.
     /// Use before full re-load after schema or pipeline changes.
     pub fn reset_all(&mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -577,6 +597,38 @@ impl PgSink {
             &[],
         )?;
         Ok(n)
+    }
+
+    /// Drop non-PK indexes for faster bulk load.
+    pub fn drop_indexes(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.client.batch_execute(DROP_INDEXES_SQL)?;
+        Ok(())
+    }
+
+    /// Create indexes after bulk load.
+    /// Extracts CREATE INDEX statements from schema.sql and executes them.
+    pub fn create_indexes(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        for line in SCHEMA_DDL.lines() {
+            let trimmed = line.trim();
+            if trimmed.to_uppercase().starts_with("CREATE INDEX") {
+                self.client.batch_execute(trimmed)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// VACUUM ANALYZE all tables.
+    /// Each statement runs individually — VACUUM cannot run inside a transaction.
+    pub fn vacuum(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        for table in &[
+            "papers", "authors", "mesh_headings", "grants", "chemicals",
+            "cited_by_clin", "works", "work_authors", "work_topics",
+            "work_mesh", "work_citations", "id_crosswalk", "mesh_tree",
+            "_build_progress",
+        ] {
+            self.client.execute(&format!("VACUUM ANALYZE {table}"), &[])?;
+        }
+        Ok(())
     }
 
     /// Write MeSH descriptor tree entries via COPY.
@@ -727,6 +779,9 @@ fn write_text_array(buf: &mut String, arr: &[String]) {
 
 /// Schema DDL — single source of truth: sql/schema.sql
 const SCHEMA_DDL: &str = include_str!("../../../sql/schema.sql");
+
+/// Drop non-PK indexes before bulk load.
+const DROP_INDEXES_SQL: &str = include_str!("../../../sql/drop_indexes.sql");
 
 #[cfg(test)]
 mod tests {

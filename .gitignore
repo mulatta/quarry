@@ -5,7 +5,7 @@ result-*
 __pycache__/
 *.egg-info/
 *.pyc
-quarry-build/target/
+quarry-ingest/target/
 quarry-graph/target/
 .tmp_dagster_home_*/
 .dagster_home/

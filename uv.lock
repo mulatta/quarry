@@ -9,7 +9,6 @@ resolution-markers = [
 [manifest]
 members = [
     "quarry",
-    "quarry-build",
     "quarry-core",
     "quarry-graph",
 ]
@@ -1983,7 +1982,6 @@ elt = [
     { name = "orjson" },
     { name = "peft" },
     { name = "pyarrow" },
-    { name = "quarry-build" },
     { name = "quarry-core" },
     { name = "quarry-graph" },
     { name = "sentence-transformers" },
@@ -2016,7 +2014,6 @@ requires-dist = [
     { name = "pydantic-settings" },
     { name = "quarry", extras = ["server"], marker = "extra == 'cli'" },
     { name = "quarry", extras = ["server"], marker = "extra == 'elt'" },
-    { name = "quarry-build", marker = "extra == 'elt'", editable = "quarry-build" },
     { name = "quarry-core", marker = "extra == 'server'", editable = "quarry-core" },
     { name = "quarry-graph", marker = "extra == 'server'", editable = "quarry-graph" },
     { name = "sentence-transformers", marker = "extra == 'elt'" },
@@ -2024,11 +2021,6 @@ requires-dist = [
     { name = "typer", marker = "extra == 'cli'" },
 ]
 provides-extras = ["server", "cli", "elt"]
-
-[[package]]
-name = "quarry-build"
-version = "0.1.0"
-source = { editable = "quarry-build" }
 
 [[package]]
 name = "quarry-core"
