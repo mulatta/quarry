@@ -14,10 +14,11 @@ quarry-core = { path = "../quarry-core" }
 quick-xml = "0.37"
 sonic-rs = "0.5"
 serde = { version = "1", features = ["derive"] }
-flate2 = "1"
+flate2 = { version = "1", features = ["zlib-ng"], default-features = false }
 rayon = "1.10"
 
 # Build: PG + S3
+bytes = "1"
 object_store = { version = "0.12", features = ["aws"] }
 tokio = { version = "1", features = ["rt-multi-thread"] }
 futures = "0.3"

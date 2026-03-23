@@ -68,6 +68,7 @@
 
           cargoLock = ../quarry-ingest/Cargo.lock;
           cargoExtraArgs = "--bin quarry-ingest";
+          nativeBuildInputs = [ pkgs.cmake ];
 
           # Build from quarry-ingest subdirectory
           postUnpack = ''
