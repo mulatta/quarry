@@ -42,10 +42,23 @@ in
           package = pkgs.postgresql_16;
           dataDir = "./.pg-data";
           socketDir = pgSocketDir;
-          settings.listen_addresses = "";
+          settings = {
+            listen_addresses = "";
+            # Bulk-load tuning: reduce WAL contention for parallel COPY writers
+            synchronous_commit = "off"; # safe: data is re-loadable from S3/XML
+            wal_buffers = "64MB"; # reduce WALInsert lock contention (default ~4MB)
+            max_wal_size = "4GB"; # fewer checkpoints during bulk load
+            shared_buffers = "2GB"; # more buffer pool for BufferContent locks
+            work_mem = "256MB";
+            maintenance_work_mem = "1GB"; # faster CREATE INDEX / VACUUM
+            autovacuum = "off"; # bulk load only; VACUUM ANALYZE runs after load
+          };
           superuser = null;
           initialDatabases = [
-            { name = "quarry"; }
+            {
+              name = "quarry";
+              schemas = [ ../sql ];
+            }
           ];
         };
       };

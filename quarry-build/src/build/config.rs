@@ -42,7 +42,7 @@ impl Default for BuildConfig {
     fn default() -> Self {
         Self {
             t2_domains: DEFAULT_T2_DOMAINS.iter().map(|s| s.to_string()).collect(),
-            s3_download_concurrency: 32,
+            s3_download_concurrency: 8,
             parse_threads: None,
             fetch_max_retries: 3,
             fetch_initial_backoff_ms: 2_000,
@@ -162,7 +162,7 @@ mod tests {
     #[test]
     fn test_s3_concurrency_normal() {
         let cfg = BuildConfig::default();
-        assert_eq!(cfg.effective_s3_concurrency(), 32);
+        assert_eq!(cfg.effective_s3_concurrency(), 8);
     }
 
     #[test]
@@ -214,7 +214,7 @@ mod tests {
     #[test]
     fn test_channel_buffer_auto() {
         let cfg = BuildConfig::default();
-        assert_eq!(cfg.effective_channel_buffer(), 64); // 32 * 2
+        assert_eq!(cfg.effective_channel_buffer(), 16); // 8 * 2
     }
 
     #[test]

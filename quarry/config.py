@@ -45,7 +45,7 @@ class Settings(BaseSettings):
 
     # OpenAlex
     oa_s3_prefix: str = "s3://openalex/data/works"
-    oa_s3_concurrency: int = 32
+    oa_s3_concurrency: int = 8
     oa_pg_writers: int = 4
     oa_channel_buffer: int = 0  # 0 = auto (s3_concurrency * 2)
     oa_fetch_max_retries: int = 3
