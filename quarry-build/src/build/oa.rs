@@ -135,6 +135,9 @@ fn write_file_output(
 ) -> Result<(), Box<dyn std::error::Error>> {
     sink.begin()?;
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+        // Delete existing work_ids to handle cross-partition duplicates.
+        let work_ids: Vec<&str> = output.works.iter().map(|w| w.work_id.as_str()).collect();
+        sink.delete_work_ids(&work_ids)?;
         sink.copy_works(&output.works)?;
         sink.copy_work_authors(&output.authors)?;
         sink.copy_work_topics(&output.topics)?;
@@ -295,6 +298,12 @@ pub fn build_oa_s3(
     let store_clone = Arc::clone(&store);
     let t2_clone = Arc::clone(&t2_domains);
     let pg_conninfo_owned = pg_conninfo.to_string();
+    // Strip "data/works/" prefix so filenames become "updated_date=.../part_XXXX.gz"
+    let prefix_with_slash = if prefix.ends_with('/') {
+        prefix.clone()
+    } else {
+        format!("{prefix}/")
+    };
     let producer_handle: tokio::task::JoinHandle<Result<(), String>> = rt.spawn(async move {
         use futures::StreamExt;
 
@@ -316,11 +325,13 @@ pub fn build_oa_s3(
             let store = Arc::clone(&store_clone);
             let t2 = Arc::clone(&t2_clone);
             let done = Arc::clone(&done_files);
+            let pfx = prefix_with_slash.clone();
             async move {
+                // Use partition-qualified path as filename to distinguish partitions.
+                // e.g. "updated_date=2024-01-15/part_0000.gz"
                 let obj_path = obj.location.as_ref().to_string();
                 let filename = obj_path
-                    .rsplit('/')
-                    .next()
+                    .strip_prefix(&pfx)
                     .unwrap_or(&obj_path)
                     .to_string();
 

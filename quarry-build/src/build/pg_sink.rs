@@ -316,6 +316,33 @@ impl PgSink {
         Ok(n)
     }
 
+    /// Delete existing OA works + child rows by work_id, for re-insert.
+    pub fn delete_work_ids(
+        &mut self,
+        work_ids: &[&str],
+    ) -> Result<u64, Box<dyn std::error::Error>> {
+        if work_ids.is_empty() {
+            return Ok(0);
+        }
+        for table in &["work_authors", "work_topics", "id_crosswalk"] {
+            self.client.execute(
+                &format!("DELETE FROM {table} WHERE work_id = ANY($1)"),
+                &[&work_ids],
+            )?;
+        }
+        // work_citations uses work_id_int (BIGINT), not work_id (TEXT)
+        self.client.execute(
+            "DELETE FROM work_citations WHERE citing_id IN \
+             (SELECT work_id_int FROM works WHERE work_id = ANY($1))",
+            &[&work_ids],
+        )?;
+        let n = self.client.execute(
+            "DELETE FROM works WHERE work_id = ANY($1)",
+            &[&work_ids],
+        )?;
+        Ok(n)
+    }
+
     // ── OpenAlex tables ──
 
     pub fn copy_works(
