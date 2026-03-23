@@ -118,7 +118,7 @@ fn spawn_writers(
             std::thread::Builder::new()
                 .name(format!("pm-writer-{i}"))
                 .spawn(move || -> Result<PubmedCounters, Box<dyn std::error::Error + Send + Sync>> {
-                    let mut sink = PgSink::connect(&conninfo)
+                    let mut sink = PgSink::connect_bulk(&conninfo)
                         .map_err(|e| format!("pm-writer-{i} connect: {e}"))?;
                     let mut counters = PubmedCounters::default();
                     while let Ok(data) = rx.recv() {

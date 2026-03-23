@@ -63,6 +63,14 @@ impl PgSink {
         Ok(Self { client })
     }
 
+    /// Connect with session-level tuning for bulk load throughput.
+    /// Sets synchronous_commit=off to avoid WAL flush on every COMMIT.
+    pub fn connect_bulk(conninfo: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        let mut client = Client::connect(conninfo, NoTls)?;
+        client.execute("SET synchronous_commit = off", &[])?;
+        Ok(Self { client })
+    }
+
     /// Verify that all expected tables and columns exist in the database.
     /// Fails fast with a clear error listing missing tables/columns.
     pub fn verify_schema(&mut self) -> Result<(), Box<dyn std::error::Error>> {
@@ -154,6 +162,13 @@ impl PgSink {
             &[&source],
         )?;
         Ok(rows.iter().map(|r| r.get::<_, String>(0)).collect())
+    }
+
+    /// Check if a table has zero rows (fast — uses LIMIT 1).
+    pub fn is_table_empty(&mut self, table: &str) -> Result<bool, Box<dyn std::error::Error>> {
+        let query = format!("SELECT NOT EXISTS (SELECT 1 FROM {table} LIMIT 1)");
+        let row = self.client.query_one(&query, &[])?;
+        Ok(row.get(0))
     }
 
     /// Create all tables and indexes (idempotent — uses IF NOT EXISTS).

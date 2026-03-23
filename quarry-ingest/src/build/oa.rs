@@ -123,16 +123,21 @@ fn collect_gz_files(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
 }
 
 /// Write a FileOutput to PG via COPY within a transaction.
+/// When `skip_deletes` is true, skips the DELETE-before-INSERT step
+/// (safe when loading into an empty table).
 fn write_file_output(
     sink: &mut PgSink,
     output: &FileOutput,
     counters: &mut OaCounters,
+    skip_deletes: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     sink.begin()?;
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
-        // Delete existing work_ids to handle cross-partition duplicates.
-        let work_ids: Vec<&str> = output.works.iter().map(|w| w.work_id.as_str()).collect();
-        sink.delete_work_ids(&work_ids)?;
+        if !skip_deletes {
+            // Delete existing work_ids to handle cross-partition duplicates.
+            let work_ids: Vec<&str> = output.works.iter().map(|w| w.work_id.as_str()).collect();
+            sink.delete_work_ids(&work_ids)?;
+        }
         sink.copy_works(&output.works)?;
         sink.copy_work_authors(&output.authors)?;
         sink.copy_work_topics(&output.topics)?;
@@ -206,7 +211,7 @@ pub fn build_oa_local(
 
         let bytes = std::fs::read(gz_path)?;
         let output = parse_gz_to_structs(&bytes, &t2_domains, filename, None);
-        write_file_output(&mut sink, &output, &mut counters)?;
+        write_file_output(&mut sink, &output, &mut counters, false)?;
 
         if (file_idx + 1).is_multiple_of(10) || file_idx + 1 == num_files {
             let elapsed = t0.elapsed().as_secs_f64();
@@ -305,9 +310,15 @@ pub fn build_oa_s3(
     };
 
     // Check progress upfront to skip already-done files.
-    let done_files: Arc<HashSet<String>> = {
+    let (done_files, skip_deletes) = {
         let mut sink = PgSink::connect(pg_conninfo)?;
-        Arc::new(sink.done_filenames("oa")?)
+        let done = sink.done_filenames("oa")?;
+        // If works table is empty, skip DELETE-before-INSERT for faster COPY.
+        let empty: bool = sink.is_table_empty("works")?;
+        if empty {
+            eprintln!("oa: works table empty — skipping delete-before-insert");
+        }
+        (Arc::new(done), empty)
     };
     let num_done = done_files.len();
     let num_todo = num_files.saturating_sub(num_done);
@@ -450,10 +461,11 @@ pub fn build_oa_s3(
             let rx = write_rx.clone();
             let conninfo = pg_conninfo.to_string();
             let written = Arc::clone(&files_written);
+            let skip_del = skip_deletes;
             std::thread::Builder::new()
                 .name(format!("oa-writer-{i}"))
                 .spawn(move || -> Result<OaCounters, Box<dyn std::error::Error + Send + Sync>> {
-                    let mut sink = PgSink::connect(&conninfo)
+                    let mut sink = PgSink::connect_bulk(&conninfo)
                         .map_err(|e| format!("writer-{i} connect: {e}"))?;
                     let mut counters = OaCounters::default();
                     while let Ok(output) = rx.recv() {
@@ -462,7 +474,7 @@ pub fn build_oa_s3(
                         }
                         let n_works = output.works.len();
                         let fname = output.filename.clone();
-                        if let Err(e) = write_file_output(&mut sink, &output, &mut counters) {
+                        if let Err(e) = write_file_output(&mut sink, &output, &mut counters, skip_del) {
                             eprintln!("oa: writer-{i} error: {e}");
                         }
                         let done = written.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
