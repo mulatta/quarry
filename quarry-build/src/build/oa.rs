@@ -261,6 +261,16 @@ pub fn build_oa_s3(
             .with_bucket_name(&bucket)
             .with_region("us-east-1")
             .with_skip_signature(true)
+            .with_client_options(
+                object_store::ClientOptions::new()
+                    .with_connect_timeout(std::time::Duration::from_secs(30))
+                    .with_timeout(std::time::Duration::from_secs(600)),
+            )
+            .with_retry(object_store::RetryConfig {
+                max_retries: 10,
+                retry_timeout: std::time::Duration::from_secs(600),
+                ..Default::default()
+            })
             .build()?,
     );
 

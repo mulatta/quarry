@@ -11,6 +11,7 @@ DO NOT use `from __future__ import annotations` here — Dagster inspects types 
 
 from pathlib import Path
 
+import psycopg
 import quarry_build
 from dagster import (
     AssetExecutionContext,
@@ -28,6 +29,30 @@ from quarry.assets.download import (
 from quarry.config import settings
 from quarry.resources import PGResource
 
+_SQL_DIR = Path(__file__).resolve().parent.parent.parent / "sql"
+
+
+def _bulk_load_begin(conn: psycopg.Connection, context: AssetExecutionContext):
+    """Drop indexes before bulk COPY load to eliminate WAL overhead."""
+    drop_sql = (_SQL_DIR / "drop_indexes.sql").read_text()
+    for stmt in drop_sql.split(";"):
+        stmt = stmt.strip()
+        if stmt and not stmt.startswith("--"):
+            conn.execute(stmt)
+    context.log.info("bulk_load_begin: indexes dropped")
+
+
+def _bulk_load_end(conn: psycopg.Connection, context: AssetExecutionContext):
+    """Recreate indexes and vacuum after bulk load."""
+    schema_sql = (_SQL_DIR / "schema.sql").read_text()
+    for stmt in schema_sql.split(";"):
+        stmt = stmt.strip()
+        if stmt and not stmt.startswith("--"):
+            conn.execute(stmt)
+    context.log.info("bulk_load_end: indexes created, starting vacuum")
+    conn.execute("VACUUM ANALYZE")
+    context.log.info("bulk_load_end: vacuum complete")
+
 
 @asset(
     group_name="build",
@@ -35,7 +60,9 @@ from quarry.resources import PGResource
     description="Rust PubMed XML parser → PG direct load via PyO3.",
     kinds={"rust", "postgres"},
 )
-def pubmed_pg_load(context: AssetExecutionContext) -> MaterializeResult:
+def pubmed_pg_load(context: AssetExecutionContext, pg: PGResource) -> MaterializeResult:
+    _bulk_load_begin(pg.store.conn, context)
+
     update_dir = settings.pubmed_update_dir
     updates = (
         str(update_dir)
@@ -61,10 +88,13 @@ def pubmed_pg_load(context: AssetExecutionContext) -> MaterializeResult:
 
 @asset(
     group_name="build",
+    deps=[pubmed_pg_load],  # sequential: run after pubmed to avoid WAL contention
     description="Rust OpenAlex JSONL parser → PG direct load via PyO3.",
     kinds={"rust", "postgres"},
 )
-def oa_pg_load(context: AssetExecutionContext) -> MaterializeResult:
+def oa_pg_load(context: AssetExecutionContext, pg: PGResource) -> MaterializeResult:
+    _bulk_load_begin(pg.store.conn, context)
+
     stats = quarry_build.build_oa_s3_pg(
         pg_conninfo=settings.pg_conninfo,
         s3_prefix=settings.oa_s3_prefix,
@@ -75,6 +105,9 @@ def oa_pg_load(context: AssetExecutionContext) -> MaterializeResult:
         fetch_initial_backoff_ms=settings.oa_fetch_initial_backoff_ms,
         fetch_max_backoff_ms=settings.oa_fetch_max_backoff_ms,
     )
+
+    _bulk_load_end(pg.store.conn, context)
+
     return MaterializeResult(
         metadata={
             k: MetadataValue.int(v) if isinstance(v, int) else MetadataValue.float(v)
