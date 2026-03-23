@@ -31,7 +31,7 @@ in
   imports = [ inputs.process-compose-flake.flakeModule ];
 
   perSystem =
-    { pkgs, ... }:
+    { pkgs, self', ... }:
     {
       # Dev PostgreSQL via process-compose (user-local, no system PG interaction)
       process-compose.services = {
@@ -72,12 +72,18 @@ in
         shellHook = ''
           uv sync --all-extras --quiet
           ${activateVenv}
+          # quarry-ingest: prefer local debug build, fall back to cargo build
+          if [ -x "$PWD/quarry-ingest/target/debug/quarry-ingest" ]; then
+            export PATH="$PWD/quarry-ingest/target/debug:$PATH"
+          elif [ -x "$PWD/quarry-ingest/target/release/quarry-ingest" ]; then
+            export PATH="$PWD/quarry-ingest/target/release:$PATH"
+          fi
         '';
       };
 
       # nix develop .#release — release Rust build (production)
       devShells.release = pkgs.mkShell {
-        packages = shellPackages pkgs;
+        packages = (shellPackages pkgs) ++ [ self'.packages.quarry-ingest ];
         env = shellEnv // {
           LD_LIBRARY_PATH = "${pkgs.stdenv.cc.cc.lib}/lib";
         };

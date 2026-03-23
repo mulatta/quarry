@@ -1,96 +1,69 @@
 # Quarry — Rust crate build, test, and install recipes
-# Dependencies: quarry-build → quarry-core, quarry-graph independent
+# Dependencies: quarry-ingest → quarry-core, quarry-graph independent
 #
 # Usage:
-#   just sync         # uv sync (debug) — fast dev iteration
-#   just sync-release # uv sync (release) — production
-#   just dev          # cargo debug build + install .so to venv
-#   just release      # cargo release build + install .so to venv
+#   just sync         # uv sync — fast dev iteration
+#   just dev          # cargo debug build quarry-ingest binary
+#   just release      # cargo release build quarry-ingest binary
 #   just check        # clippy + test all
 #   just kill-dagster # stop all dagster processes
-
-venv := ".venv/lib/python3.13/site-packages"
-so_suffix := ".cpython-313-x86_64-linux-gnu.so"
 
 # List available recipes
 default:
     @just --list
 
-# ── Sync (uv + maturin) ──
+# ── Sync (uv) ──
 
-# Sync Python deps + Rust .so (debug build)
+# Sync Python deps
 sync:
     uv sync --all-extras
 
-# Sync Python deps + Rust .so (release build)
-sync-release:
-    uv sync --all-extras -C build-args='--profile=release'
-
-# ── Internal helpers ──
-
-[private]
-_build crate profile:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    flags=(--manifest-path "{{crate}}/Cargo.toml" --features extension-module)
-    [[ "{{profile}}" == "release" ]] && flags+=(--release)
-    cargo build "${flags[@]}"
-
-[private]
-_install crate pymod profile:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    mkdir -p "{{ venv }}/{{pymod}}"
-    cp "{{crate}}/target/{{profile}}/lib{{pymod}}.so" \
-       "{{ venv }}/{{pymod}}/{{pymod}}{{ so_suffix }}"
-    echo "{{pymod}} .so installed ({{profile}})"
-
 # ── Dev (debug) ──
 
-# Debug build + install quarry-core
+# Debug build quarry-core (.so for Python)
 dev-core:
-    just _build quarry-core debug
-    just _install quarry-core quarry_core debug
+    cargo build --manifest-path quarry-core/Cargo.toml --features extension-module
+    @echo "quarry-core built (debug)"
 
-# Debug build + install quarry-build (depends on core)
-dev-build: dev-core
-    just _build quarry-build debug
-    just _install quarry-build quarry_build debug
+# Debug build quarry-ingest binary
+dev-ingest:
+    cargo build --manifest-path quarry-ingest/Cargo.toml --bin quarry-ingest
+    @echo "quarry-ingest built (debug): quarry-ingest/target/debug/quarry-ingest"
 
-# Debug build + install quarry-graph
+# Debug build quarry-graph (.so for Python)
 dev-graph:
-    just _build quarry-graph debug
-    just _install quarry-graph quarry_graph debug
+    cargo build --manifest-path quarry-graph/Cargo.toml --features extension-module
+    @echo "quarry-graph built (debug)"
 
-# Debug build + install all crates
-dev: dev-build dev-graph
+# Debug build all crates
+dev: dev-core dev-ingest dev-graph
 
 # ── Release ──
 
-# Release build + install quarry-core
+# Release build quarry-core
 release-core:
-    just _build quarry-core release
-    just _install quarry-core quarry_core release
+    cargo build --manifest-path quarry-core/Cargo.toml --features extension-module --release
+    @echo "quarry-core built (release)"
 
-# Release build + install quarry-build (depends on core)
-release-build: release-core
-    just _build quarry-build release
-    just _install quarry-build quarry_build release
+# Release build quarry-ingest binary
+release-ingest:
+    cargo build --manifest-path quarry-ingest/Cargo.toml --bin quarry-ingest --release
+    @echo "quarry-ingest built (release): quarry-ingest/target/release/quarry-ingest"
 
-# Release build + install quarry-graph
+# Release build quarry-graph
 release-graph:
-    just _build quarry-graph release
-    just _install quarry-graph quarry_graph release
+    cargo build --manifest-path quarry-graph/Cargo.toml --features extension-module --release
+    @echo "quarry-graph built (release)"
 
-# Release build + install all crates
-release: release-build release-graph
+# Release build all crates
+release: release-core release-ingest release-graph
 
 # ── Clean ──
 
 # Clean all Rust crate targets
 clean:
     cargo clean --manifest-path quarry-core/Cargo.toml
-    cargo clean --manifest-path quarry-build/Cargo.toml
+    cargo clean --manifest-path quarry-ingest/Cargo.toml
     cargo clean --manifest-path quarry-graph/Cargo.toml
 
 # Clean + release rebuild
@@ -102,31 +75,31 @@ rebuild: clean release
 clippy-core:
     cargo clippy --manifest-path quarry-core/Cargo.toml --all-features -- -D warnings
 
-# Clippy quarry-build (depends on core)
-clippy-build: clippy-core
-    cargo clippy --manifest-path quarry-build/Cargo.toml --all-features -- -D warnings
+# Clippy quarry-ingest
+clippy-ingest: clippy-core
+    cargo clippy --manifest-path quarry-ingest/Cargo.toml -- -D warnings
 
 # Clippy quarry-graph
 clippy-graph:
     cargo clippy --manifest-path quarry-graph/Cargo.toml --all-features -- -D warnings
 
 # Clippy all crates
-clippy: clippy-build clippy-graph
+clippy: clippy-ingest clippy-graph
 
 # Test quarry-core
 test-core:
     cargo test --manifest-path quarry-core/Cargo.toml
 
-# Test quarry-build (depends on core)
-test-build: test-core
-    cargo test --manifest-path quarry-build/Cargo.toml
+# Test quarry-ingest
+test-ingest: test-core
+    cargo test --manifest-path quarry-ingest/Cargo.toml
 
 # Test quarry-graph
 test-graph:
     cargo test --manifest-path quarry-graph/Cargo.toml
 
 # Test all crates
-test: test-build test-graph
+test: test-ingest test-graph
 
 # Clippy + test all
 check: clippy test
@@ -161,18 +134,3 @@ kill-dagster:
         exit 1
     fi
     echo "Dagster processes stopped"
-
-# ── Verify ──
-
-# Verify installed .so signatures match source
-verify-so:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    echo "=== quarry_core ==="
-    .venv/bin/python -c "import quarry_core; print(dir(quarry_core))"
-    echo "=== quarry_build.build_pubmed_pg ==="
-    .venv/bin/python -c "import quarry_build, inspect; print(inspect.signature(quarry_build.build_pubmed_pg))"
-    echo "=== quarry_build.build_oa_s3_pg ==="
-    .venv/bin/python -c "import quarry_build, inspect; print(inspect.signature(quarry_build.build_oa_s3_pg))"
-    echo "=== quarry_graph ==="
-    .venv/bin/python -c "import quarry_graph; print(dir(quarry_graph))"
