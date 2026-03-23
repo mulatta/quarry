@@ -6,6 +6,9 @@ Each data source loads via quarry-ingest CLI subprocess:
 - iCite: quarry-ingest load icite
 - Enrichment: quarry-ingest enrich
 
+Pipeline tuning (concurrency, buffers, retries) comes from config.toml,
+NOT from Python config. Dagster passes --config path; quarry-ingest reads it.
+
 DO NOT use `from __future__ import annotations` here — Dagster inspects types at runtime.
 """
 
@@ -30,7 +33,13 @@ from quarry.config import settings
 
 def _run_ingest(args: list[str], context: AssetExecutionContext) -> dict:
     """Run quarry-ingest subprocess, stream stderr to Dagster log, parse stdout JSON."""
-    cmd = ["quarry-ingest", "--pg-conninfo", settings.pg_conninfo] + args
+    cmd = [
+        "quarry-ingest",
+        "--pg-conninfo",
+        settings.pg_conninfo,
+        "--config",
+        str(settings.ingest_config),
+    ] + args
     context.log.info(f"Running: {' '.join(cmd)}")
 
     proc = subprocess.Popen(
@@ -75,12 +84,6 @@ def pubmed_pg_load(context: AssetExecutionContext) -> MaterializeResult:
         "pubmed",
         "--xml-dir",
         str(settings.pubmed_baseline_dir),
-        "--threads",
-        str(settings.pubmed_parse_threads),
-        "--pg-writers",
-        str(settings.pubmed_pg_writers),
-        "--channel-buffer",
-        str(settings.pubmed_channel_buffer),
     ]
 
     update_dir = settings.pubmed_update_dir
@@ -106,20 +109,6 @@ def oa_pg_load(context: AssetExecutionContext) -> MaterializeResult:
             "oa",
             "--s3-prefix",
             settings.oa_s3_prefix,
-            "--s3-concurrency",
-            str(settings.oa_s3_concurrency),
-            "--prefetch-buffer",
-            str(settings.oa_prefetch_buffer),
-            "--pg-writers",
-            str(settings.oa_pg_writers),
-            "--channel-buffer",
-            str(settings.oa_channel_buffer),
-            "--fetch-max-retries",
-            str(settings.oa_fetch_max_retries),
-            "--fetch-initial-backoff-ms",
-            str(settings.oa_fetch_initial_backoff_ms),
-            "--fetch-max-backoff-ms",
-            str(settings.oa_fetch_max_backoff_ms),
         ],
         context,
     )
