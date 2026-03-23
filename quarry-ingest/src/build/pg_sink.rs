@@ -13,6 +13,45 @@ use crate::build::oa_json::{OaAuthor, OaCitation, OaCrosswalk, OaTopic, OaWork};
 use crate::parse::mesh::MeshEntry;
 use crate::parse::xml::{Author, Chemical, Grant, MeshHeading, Paper};
 
+/// Expected COPY columns per table — single source of truth for both
+/// COPY statements and startup schema verification.
+const EXPECTED_COLUMNS: &[(&str, &[&str])] = &[
+    ("papers", &[
+        "pmid", "doi", "pmc_id", "title", "abstract", "pub_year", "pub_date",
+        "journal_title", "journal_issn", "journal_abbr", "volume", "issue", "pages",
+        "language", "pub_type", "country", "medline_status", "created_date",
+        "revised_date", "indexed_date",
+    ]),
+    ("authors", &[
+        "pmid", "author_position", "last_name", "fore_name", "initials",
+        "orcid", "affiliation", "is_collective",
+    ]),
+    ("mesh_headings", &[
+        "pmid", "descriptor_ui", "descriptor_name", "qualifier_ui",
+        "qualifier_name", "is_major_topic",
+    ]),
+    ("grants", &["pmid", "grant_id", "acronym", "agency", "country"]),
+    ("chemicals", &["pmid", "registry_number", "substance_ui", "substance_name"]),
+    ("works", &[
+        "work_id", "work_id_int", "tier", "pmid", "doi", "title", "abstract",
+        "pub_year", "pub_date", "type", "cited_by_count", "host_venue", "oa_status",
+        "oa_url", "is_retracted", "updated_date", "pm_journal_abbr", "pm_country",
+        "pm_medline_status", "pm_pub_type", "pm_created_date", "pm_revised_date",
+        "pm_indexed_date",
+    ]),
+    ("work_authors", &[
+        "work_id", "author_position", "display_name", "orcid",
+        "institution_name", "institution_ror", "raw_affiliation",
+    ]),
+    ("work_topics", &[
+        "work_id", "topic_id", "topic_name", "subfield", "field", "domain", "score",
+    ]),
+    ("work_citations", &["citing_id", "cited_id"]),
+    ("id_crosswalk", &["work_id", "pmid"]),
+    ("mesh_tree", &["descriptor_ui", "descriptor_name", "tree_number"]),
+    ("_build_progress", &["source", "filename", "rows_inserted", "completed_at"]),
+];
+
 /// PostgreSQL COPY sink — wraps a single connection.
 pub struct PgSink {
     client: Client,
@@ -22,6 +61,55 @@ impl PgSink {
     pub fn connect(conninfo: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let client = Client::connect(conninfo, NoTls)?;
         Ok(Self { client })
+    }
+
+    /// Verify that all expected tables and columns exist in the database.
+    /// Fails fast with a clear error listing missing tables/columns.
+    pub fn verify_schema(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        // Fetch all columns for our tables in one query
+        let table_names: Vec<&str> = EXPECTED_COLUMNS.iter().map(|(t, _)| *t).collect();
+        let rows = self.client.query(
+            "SELECT table_name, column_name \
+             FROM information_schema.columns \
+             WHERE table_schema = 'public' AND table_name = ANY($1)",
+            &[&table_names],
+        )?;
+
+        // Build actual columns map: table → {columns}
+        let mut actual: std::collections::HashMap<String, std::collections::HashSet<String>> =
+            std::collections::HashMap::new();
+        for row in &rows {
+            let table: String = row.get(0);
+            let column: String = row.get(1);
+            actual.entry(table).or_default().insert(column);
+        }
+
+        let mut errors: Vec<String> = Vec::new();
+
+        for (table, expected_cols) in EXPECTED_COLUMNS {
+            match actual.get(*table) {
+                None => errors.push(format!("table '{}' not found", table)),
+                Some(actual_cols) => {
+                    let missing: Vec<&&str> = expected_cols
+                        .iter()
+                        .filter(|c| !actual_cols.contains(**c))
+                        .collect();
+                    if !missing.is_empty() {
+                        errors.push(format!(
+                            "table '{}': missing columns: {}",
+                            table,
+                            missing.iter().map(|c| format!("'{c}'")).collect::<Vec<_>>().join(", ")
+                        ));
+                    }
+                }
+            }
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(format!("schema verification failed:\n  {}", errors.join("\n  ")).into())
+        }
     }
 
     /// Record a completed file in the _build_progress table.
@@ -926,5 +1014,73 @@ mod tests {
         let mut buf = String::new();
         write_opt_f32(&mut buf, Some(f32::INFINITY));
         assert_eq!(buf, "inf");
+    }
+
+    /// Verify that EXPECTED_COLUMNS entries match the columns in schema.sql DDL.
+    /// Catches drift between COPY column lists and the actual schema definition.
+    #[test]
+    fn test_expected_columns_match_schema_ddl() {
+        // Parse CREATE TABLE blocks from schema DDL to extract column names
+        let mut ddl_tables: std::collections::HashMap<String, Vec<String>> =
+            std::collections::HashMap::new();
+        let mut current_table: Option<String> = None;
+
+        for line in SCHEMA_DDL.lines() {
+            let trimmed = line.trim();
+            // Match: CREATE TABLE IF NOT EXISTS table_name (
+            if let Some(rest) = trimmed
+                .strip_prefix("CREATE TABLE IF NOT EXISTS ")
+                .or_else(|| trimmed.strip_prefix("CREATE TABLE "))
+            {
+                let table = rest
+                    .split_whitespace()
+                    .next()
+                    .unwrap()
+                    .trim_end_matches('(');
+                current_table = Some(table.to_string());
+                ddl_tables.entry(table.to_string()).or_default();
+                continue;
+            }
+
+            if let Some(ref table) = current_table {
+                // End of CREATE TABLE block
+                if trimmed.starts_with(");") || trimmed == ")" {
+                    current_table = None;
+                    continue;
+                }
+                // Skip PRIMARY KEY constraints, empty lines, comments
+                if trimmed.is_empty()
+                    || trimmed.starts_with("--")
+                    || trimmed.to_uppercase().starts_with("PRIMARY KEY")
+                {
+                    continue;
+                }
+                // Extract column name (first word)
+                if let Some(col) = trimmed.split_whitespace().next() {
+                    // Skip SQL keywords that appear as constraint lines
+                    let upper = col.to_uppercase();
+                    if upper == "CONSTRAINT" || upper == "UNIQUE" || upper == "CHECK" {
+                        continue;
+                    }
+                    ddl_tables
+                        .get_mut(table)
+                        .unwrap()
+                        .push(col.to_string());
+                }
+            }
+        }
+
+        for (table, expected_cols) in EXPECTED_COLUMNS {
+            let ddl_cols = ddl_tables.get(*table).unwrap_or_else(|| {
+                panic!("EXPECTED_COLUMNS references table '{}' not found in schema.sql", table)
+            });
+            for col in *expected_cols {
+                assert!(
+                    ddl_cols.contains(&col.to_string()),
+                    "EXPECTED_COLUMNS: table '{}' column '{}' not found in schema.sql (available: {:?})",
+                    table, col, ddl_cols
+                );
+            }
+        }
     }
 }

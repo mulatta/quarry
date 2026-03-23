@@ -1,6 +1,11 @@
 //! Build configuration: thread counts, S3 settings, tier domains.
+//!
+//! Priority: CLI args > env vars > config.toml > defaults.
 
 use std::collections::HashSet;
+use std::path::Path;
+
+use serde::Deserialize;
 
 /// Default T2 domains — mirrors quarry/config.py:oa_t2_domains.
 pub const DEFAULT_T2_DOMAINS: &[&str] = &[
@@ -16,12 +21,25 @@ const MAX_S3_CONCURRENCY: usize = 64;
 /// Maximum PG writer threads — beyond this PG I/O contention dominates.
 const MAX_PG_WRITERS: usize = 16;
 
+/// Maximum prefetch buffer to bound memory usage (~100MB per slot).
+const MAX_PREFETCH: usize = 64;
+
 /// Top-level build configuration.
+///
+/// Deserializable from TOML. All fields have serde defaults matching
+/// `Default::default()`, so partial TOML files work.
+#[derive(Deserialize)]
+#[serde(default)]
 pub struct BuildConfig {
     /// T2 tier domain names.
     pub t2_domains: Vec<String>,
     /// Number of concurrent S3 downloads (clamped to MAX_S3_CONCURRENCY).
     pub s3_download_concurrency: usize,
+    /// Downloaded-but-not-yet-parsed file buffer slots.
+    /// Decouples download from parse — larger values keep downloads flowing
+    /// while parse is CPU-bound. Each slot holds ~50-100MB.
+    /// 0 = auto (s3_download_concurrency).
+    pub prefetch_buffer: usize,
     /// Max parallel parse threads (rayon). Bounds memory during PubMed baseline
     /// parsing: each thread holds ~400MB. `None` = auto from available memory.
     pub parse_threads: Option<usize>,
@@ -43,6 +61,7 @@ impl Default for BuildConfig {
         Self {
             t2_domains: DEFAULT_T2_DOMAINS.iter().map(|s| s.to_string()).collect(),
             s3_download_concurrency: 8,
+            prefetch_buffer: 0, // auto
             parse_threads: None,
             fetch_max_retries: 3,
             fetch_initial_backoff_ms: 2_000,
@@ -54,6 +73,15 @@ impl Default for BuildConfig {
 }
 
 impl BuildConfig {
+    /// Load config from a TOML file. Missing fields use defaults.
+    pub fn from_toml(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| format!("cannot read config {}: {e}", path.display()))?;
+        let config: Self = toml::from_str(&content)
+            .map_err(|e| format!("invalid config {}: {e}", path.display()))?;
+        Ok(config)
+    }
+
     /// Return T2 domains as a HashSet for O(1) lookup.
     pub fn t2_domains_set(&self) -> HashSet<String> {
         self.t2_domains.iter().cloned().collect()
@@ -73,6 +101,16 @@ impl BuildConfig {
     /// Effective S3 concurrency, clamped to a safe upper bound.
     pub fn effective_s3_concurrency(&self) -> usize {
         self.s3_download_concurrency.clamp(1, MAX_S3_CONCURRENCY)
+    }
+
+    /// Effective prefetch buffer: downloaded-but-not-yet-parsed files in memory.
+    /// Auto = s3_concurrency (allows full download parallelism while parsing).
+    pub fn effective_prefetch_buffer(&self) -> usize {
+        if self.prefetch_buffer == 0 {
+            self.effective_s3_concurrency()
+        } else {
+            self.prefetch_buffer.clamp(1, MAX_PREFETCH)
+        }
     }
 
     /// Effective PG writer thread count.
@@ -166,6 +204,30 @@ mod tests {
     }
 
     #[test]
+    fn test_prefetch_buffer_auto() {
+        let cfg = BuildConfig::default();
+        assert_eq!(cfg.effective_prefetch_buffer(), 8); // = s3_concurrency
+    }
+
+    #[test]
+    fn test_prefetch_buffer_explicit() {
+        let cfg = BuildConfig {
+            prefetch_buffer: 16,
+            ..Default::default()
+        };
+        assert_eq!(cfg.effective_prefetch_buffer(), 16);
+    }
+
+    #[test]
+    fn test_prefetch_buffer_clamp() {
+        let cfg = BuildConfig {
+            prefetch_buffer: 200,
+            ..Default::default()
+        };
+        assert_eq!(cfg.effective_prefetch_buffer(), 64);
+    }
+
+    #[test]
     fn test_parse_threads_explicit() {
         let cfg = BuildConfig {
             parse_threads: Some(4),
@@ -245,7 +307,6 @@ mod tests {
             fetch_max_backoff_ms: 5000,
             ..Default::default()
         };
-        // 2000 * 2^2 = 8000, but capped at 5000
         assert_eq!(cfg.backoff_duration(2), std::time::Duration::from_millis(5000));
     }
 
@@ -256,7 +317,35 @@ mod tests {
             fetch_max_backoff_ms: 30_000,
             ..Default::default()
         };
-        // saturating_mul overflow → capped at max
         assert_eq!(cfg.backoff_duration(5), std::time::Duration::from_millis(30_000));
+    }
+
+    #[test]
+    fn test_from_toml_partial() {
+        let toml_str = r#"
+            s3_download_concurrency = 16
+            prefetch_buffer = 32
+        "#;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.toml");
+        std::fs::write(&path, toml_str).unwrap();
+
+        let cfg = BuildConfig::from_toml(&path).unwrap();
+        assert_eq!(cfg.s3_download_concurrency, 16);
+        assert_eq!(cfg.prefetch_buffer, 32);
+        // defaults preserved for unspecified fields
+        assert_eq!(cfg.pg_writer_threads, 4);
+        assert_eq!(cfg.fetch_max_retries, 3);
+    }
+
+    #[test]
+    fn test_from_toml_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty.toml");
+        std::fs::write(&path, "").unwrap();
+
+        let cfg = BuildConfig::from_toml(&path).unwrap();
+        assert_eq!(cfg.s3_download_concurrency, 8);
+        assert_eq!(cfg.prefetch_buffer, 0);
     }
 }

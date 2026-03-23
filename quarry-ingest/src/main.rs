@@ -4,6 +4,8 @@
 //! - stdout: JSON stats on success (one line)
 //! - stderr: progress logs
 //! - exit code: 0 = success, 1 = error
+//!
+//! Config priority: CLI args > env vars > config.toml > defaults.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -25,6 +27,10 @@ struct Cli {
     /// PG connection string
     #[arg(long, env = "QUARRY_PG_CONNINFO", default_value = "host=/tmp/quarry-pg dbname=quarry")]
     pg_conninfo: String,
+
+    /// Path to TOML config file (CLI args override config values)
+    #[arg(long, env = "QUARRY_CONFIG")]
+    config: Option<PathBuf>,
 
     #[command(subcommand)]
     cmd: Cmd,
@@ -59,16 +65,16 @@ enum LoadSource {
         updates_dir: Option<PathBuf>,
 
         /// Parse thread count (0 = auto from available memory)
-        #[arg(long, default_value = "0", env = "QUARRY_PUBMED_PARSE_THREADS")]
-        threads: usize,
+        #[arg(long, env = "QUARRY_PUBMED_PARSE_THREADS")]
+        threads: Option<usize>,
 
         /// Parallel PG writer threads
-        #[arg(long, default_value = "4", env = "QUARRY_PUBMED_PG_WRITERS")]
-        pg_writers: usize,
+        #[arg(long, env = "QUARRY_PUBMED_PG_WRITERS")]
+        pg_writers: Option<usize>,
 
         /// Bounded channel buffer between parse and PG writers (0 = auto)
-        #[arg(long, default_value = "0", env = "QUARRY_PUBMED_CHANNEL_BUFFER")]
-        channel_buffer: usize,
+        #[arg(long, env = "QUARRY_PUBMED_CHANNEL_BUFFER")]
+        channel_buffer: Option<usize>,
     },
     /// Load OpenAlex from S3
     Oa {
@@ -77,28 +83,32 @@ enum LoadSource {
         s3_prefix: String,
 
         /// S3 download concurrency
-        #[arg(long, default_value = "8", env = "QUARRY_OA_S3_CONCURRENCY")]
-        s3_concurrency: usize,
+        #[arg(long, env = "QUARRY_OA_S3_CONCURRENCY")]
+        s3_concurrency: Option<usize>,
+
+        /// Prefetch buffer: downloaded-but-not-yet-parsed file slots (0 = auto)
+        #[arg(long, env = "QUARRY_OA_PREFETCH_BUFFER")]
+        prefetch_buffer: Option<usize>,
 
         /// Parallel PG writer threads
-        #[arg(long, default_value = "4", env = "QUARRY_OA_PG_WRITERS")]
-        pg_writers: usize,
+        #[arg(long, env = "QUARRY_OA_PG_WRITERS")]
+        pg_writers: Option<usize>,
 
         /// Bounded channel buffer between download and PG writers (0 = auto)
-        #[arg(long, default_value = "0", env = "QUARRY_OA_CHANNEL_BUFFER")]
-        channel_buffer: usize,
+        #[arg(long, env = "QUARRY_OA_CHANNEL_BUFFER")]
+        channel_buffer: Option<usize>,
 
         /// Max retry attempts for S3 fetch (0 = no retry)
-        #[arg(long, default_value = "3", env = "QUARRY_OA_FETCH_MAX_RETRIES")]
-        fetch_max_retries: u32,
+        #[arg(long, env = "QUARRY_OA_FETCH_MAX_RETRIES")]
+        fetch_max_retries: Option<u32>,
 
         /// Initial backoff in ms (doubles each retry)
-        #[arg(long, default_value = "2000", env = "QUARRY_OA_FETCH_INITIAL_BACKOFF_MS")]
-        fetch_initial_backoff_ms: u64,
+        #[arg(long, env = "QUARRY_OA_FETCH_INITIAL_BACKOFF_MS")]
+        fetch_initial_backoff_ms: Option<u64>,
 
         /// Max backoff in ms (cap for exponential growth)
-        #[arg(long, default_value = "30000", env = "QUARRY_OA_FETCH_MAX_BACKOFF_MS")]
-        fetch_max_backoff_ms: u64,
+        #[arg(long, env = "QUARRY_OA_FETCH_MAX_BACKOFF_MS")]
+        fetch_max_backoff_ms: Option<u64>,
     },
     /// Load iCite CSV metrics
     Icite {
@@ -144,6 +154,17 @@ fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// Load base config: TOML file if --config provided, otherwise defaults.
+fn base_config(cli: &Cli) -> Result<BuildConfig, Box<dyn std::error::Error>> {
+    match &cli.config {
+        Some(path) => {
+            eprintln!("config: loading {}", path.display());
+            BuildConfig::from_toml(path)
+        }
+        None => Ok(BuildConfig::default()),
+    }
+}
+
 fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     match &cli.cmd {
         Cmd::Load(load) => run_load(cli, load),
@@ -153,6 +174,11 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run_load(cli: &Cli, load: &LoadCmd) -> Result<(), Box<dyn std::error::Error>> {
+    // Fast-fail: verify DB schema matches expected COPY columns
+    let mut checker = PgSink::connect(&cli.pg_conninfo)?;
+    checker.verify_schema()?;
+    drop(checker);
+
     match &load.source {
         LoadSource::Pubmed {
             xml_dir,
@@ -161,12 +187,13 @@ fn run_load(cli: &Cli, load: &LoadCmd) -> Result<(), Box<dyn std::error::Error>>
             pg_writers,
             channel_buffer,
         } => {
-            let config = BuildConfig {
-                parse_threads: if *threads == 0 { None } else { Some(*threads) },
-                pg_writer_threads: *pg_writers,
-                channel_buffer: *channel_buffer,
-                ..Default::default()
-            };
+            let mut config = base_config(cli)?;
+            if let Some(v) = threads {
+                config.parse_threads = if *v == 0 { None } else { Some(*v) };
+            }
+            if let Some(v) = pg_writers { config.pg_writer_threads = *v; }
+            if let Some(v) = channel_buffer { config.channel_buffer = *v; }
+
             let stats = pubmed::build_pubmed(
                 &config,
                 xml_dir,
@@ -189,21 +216,22 @@ fn run_load(cli: &Cli, load: &LoadCmd) -> Result<(), Box<dyn std::error::Error>>
         LoadSource::Oa {
             s3_prefix,
             s3_concurrency,
+            prefetch_buffer,
             pg_writers,
             channel_buffer,
             fetch_max_retries,
             fetch_initial_backoff_ms,
             fetch_max_backoff_ms,
         } => {
-            let config = BuildConfig {
-                s3_download_concurrency: *s3_concurrency,
-                pg_writer_threads: *pg_writers,
-                channel_buffer: *channel_buffer,
-                fetch_max_retries: *fetch_max_retries,
-                fetch_initial_backoff_ms: *fetch_initial_backoff_ms,
-                fetch_max_backoff_ms: *fetch_max_backoff_ms,
-                ..Default::default()
-            };
+            let mut config = base_config(cli)?;
+            if let Some(v) = s3_concurrency { config.s3_download_concurrency = *v; }
+            if let Some(v) = prefetch_buffer { config.prefetch_buffer = *v; }
+            if let Some(v) = pg_writers { config.pg_writer_threads = *v; }
+            if let Some(v) = channel_buffer { config.channel_buffer = *v; }
+            if let Some(v) = fetch_max_retries { config.fetch_max_retries = *v; }
+            if let Some(v) = fetch_initial_backoff_ms { config.fetch_initial_backoff_ms = *v; }
+            if let Some(v) = fetch_max_backoff_ms { config.fetch_max_backoff_ms = *v; }
+
             let stats = oa::build_oa_s3(&config, s3_prefix, &cli.pg_conninfo)?;
             let json = serde_json::json!({
                 "num_works": stats.num_works,
@@ -274,6 +302,7 @@ fn run_db(cli: &Cli, db: &DbCmd) -> Result<(), Box<dyn std::error::Error>> {
 
 fn run_enrich(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let mut sink = PgSink::connect(&cli.pg_conninfo)?;
+    sink.verify_schema()?;
 
     let n_enriched = sink.enrich_works_from_papers()?;
     eprintln!("enrich: {n_enriched} works updated from papers");
