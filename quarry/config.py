@@ -1,6 +1,7 @@
 """Quarry configuration via environment variables / .env file.
 
 Defaults use ~/quarry-data/. Override with QUARRY_* env vars for server deployment.
+Pipeline tuning lives in config.toml (single source of truth for quarry-ingest).
 """
 
 from pathlib import Path
@@ -16,6 +17,9 @@ class Settings(BaseSettings):
     # PostgreSQL
     # Default for dev (overridden by QUARRY_PG_CONNINFO env var from nix shell)
     pg_conninfo: str = "host=/tmp/quarry-pg dbname=quarry"
+
+    # quarry-ingest config.toml path (pipeline tuning: concurrency, buffers, retries)
+    ingest_config: Path = Path("quarry-ingest/config.example.toml")
 
     # PubMed FTP paths (baseline + updates downloaded here)
     pubmed_baseline_dir: Path = _DATA_DIR / "pubmed" / "baseline"
@@ -43,20 +47,8 @@ class Settings(BaseSettings):
     # iCite figshare collection ID (stable, auto-discovers latest monthly snapshot)
     icite_figshare_collection: int = 4586573
 
-    # OpenAlex
+    # OpenAlex S3 prefix (which partition to load)
     oa_s3_prefix: str = "s3://openalex/data/works"
-    oa_s3_concurrency: int = 8
-    oa_prefetch_buffer: int = 24
-    oa_pg_writers: int = 4
-    oa_channel_buffer: int = 0  # 0 = auto (s3_concurrency * 2)
-    oa_fetch_max_retries: int = 3
-    oa_fetch_initial_backoff_ms: int = 2000
-    oa_fetch_max_backoff_ms: int = 30000
-
-    # PubMed build tuning
-    pubmed_parse_threads: int = 0  # 0 = auto (mem / 0.4GB, capped by CPUs)
-    pubmed_pg_writers: int = 4
-    pubmed_channel_buffer: int = 0  # 0 = auto (parse_threads * 2)
 
     # Download
     ftp_parallel: int = 4
