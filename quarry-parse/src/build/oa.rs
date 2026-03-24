@@ -9,7 +9,6 @@
 //!
 //! 1 input file = 1 set of Parquet files (file-level reprocessing).
 
-use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -75,7 +74,6 @@ fn extract_part_name(filename: &str) -> String {
 /// Parse a gz file into struct vecs (streaming from disk, no full-file load).
 fn parse_gz_to_structs(
     path: &Path,
-    t2_domains: &HashSet<String>,
     filename: &str,
 ) -> Result<FileOutput, std::io::Error> {
     let file = File::open(path)?;
@@ -98,7 +96,7 @@ fn parse_gz_to_structs(
         if line.is_empty() {
             continue;
         }
-        match oa_json::parse_line(&line, t2_domains) {
+        match oa_json::parse_line(&line) {
             Ok(parsed) => {
                 works.push(parsed.work);
                 authors.extend(parsed.authors);
@@ -209,7 +207,6 @@ pub fn parse_oa(
     output_dir: &Path,
 ) -> Result<OaParseStats, Box<dyn std::error::Error>> {
     let t0 = Instant::now();
-    let t2_domains = Arc::new(config.t2_domains_set());
 
     let gz_files = collect_gz_files(input_dir)?;
     let num_files = gz_files.len();
@@ -247,7 +244,7 @@ pub fn parse_oa(
 
     pool.install(|| {
         todo.par_iter().for_each(|(abs_path, rel_path)| {
-            let output = match parse_gz_to_structs(abs_path, &t2_domains, rel_path) {
+            let output = match parse_gz_to_structs(abs_path, rel_path) {
                 Ok(o) => o,
                 Err(e) => {
                     eprintln!("oa: WARN: cannot read {}: {e}", abs_path.display());

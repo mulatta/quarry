@@ -1,39 +1,14 @@
-//! Parse configuration: thread counts, tier domains.
+//! Parse configuration: thread counts.
 
-use std::collections::HashSet;
-
-/// Default T2 domains — mirrors quarry/config.py:oa_t2_domains.
-pub const DEFAULT_T2_DOMAINS: &[&str] = &[
-    "Health Sciences",
-    "Life Sciences",
-    "Physical Sciences",
-    "Engineering",
-];
-
-/// Parse configuration — thread count and tier classification.
+/// Parse configuration — thread count.
+#[derive(Default)]
 pub struct ParseConfig {
-    /// T2 tier domain names.
-    pub t2_domains: Vec<String>,
     /// Max parallel parse threads (rayon). Each thread holds ~400MB.
     /// `None` = auto from available memory.
     pub parse_threads: Option<usize>,
 }
 
-impl Default for ParseConfig {
-    fn default() -> Self {
-        Self {
-            t2_domains: DEFAULT_T2_DOMAINS.iter().map(|s| s.to_string()).collect(),
-            parse_threads: None,
-        }
-    }
-}
-
 impl ParseConfig {
-    /// Return T2 domains as a HashSet for O(1) lookup.
-    pub fn t2_domains_set(&self) -> HashSet<String> {
-        self.t2_domains.iter().cloned().collect()
-    }
-
     /// Effective parse thread count: explicit value, or auto-detect from
     /// available system memory. Each parse thread holds ~2GB peak
     /// (decompressed data + parsed structs + Arrow batch).
@@ -79,19 +54,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_default_t2_domains() {
-        let cfg = ParseConfig::default();
-        let set = cfg.t2_domains_set();
-        assert!(set.contains("Health Sciences"));
-        assert!(set.contains("Engineering"));
-        assert_eq!(set.len(), 4);
-    }
-
-    #[test]
     fn test_parse_threads_explicit() {
         let cfg = ParseConfig {
             parse_threads: Some(4),
-            ..Default::default()
         };
         assert_eq!(cfg.effective_parse_threads(), 4);
     }
@@ -100,7 +65,6 @@ mod tests {
     fn test_parse_threads_explicit_zero_becomes_one() {
         let cfg = ParseConfig {
             parse_threads: Some(0),
-            ..Default::default()
         };
         assert_eq!(cfg.effective_parse_threads(), 1);
     }
