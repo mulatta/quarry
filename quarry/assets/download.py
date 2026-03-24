@@ -22,25 +22,58 @@ from dagster import (
 )
 
 from quarry.config import settings
+from pathlib import Path
+
 from quarry.etl.fetch import (
     download_and_extract_zip,
     find_latest_ftp_file,
     resolve_figshare_files,
     sync_ftp_dir,
 )
+import subprocess
 
 
 def _version_from_file_listing(
-    files: dict[str, int],
+    files: dict,
     mtimes: dict[str, str] | None = None,
 ) -> DataVersion:
-    """Stable DataVersion from {filename: size} + optional {filename: mtime}."""
+    """Stable DataVersion from {filename: value} + optional {filename: mtime}."""
     parts = sorted(files.items())
     if mtimes:
         parts = [(k, v, mtimes.get(k, "")) for k, v in parts]
     fingerprint = str(parts)
     digest = hashlib.sha256(fingerprint.encode()).hexdigest()[:16]
     return DataVersion(digest)
+
+
+def _ftp_sync_asset(
+    label: str,
+    host: str,
+    remote_dir: str,
+    local_dir: Path,
+    pattern: str,
+    context: AssetExecutionContext,
+) -> dict:
+    """Run sync_ftp_dir with unified logging."""
+    stats = sync_ftp_dir(
+        host=host,
+        remote_dir=remote_dir,
+        local_dir=local_dir,
+        pattern=pattern,
+        parallel=settings.ftp_parallel,
+        on_listing=lambda total, new: context.log.info(
+            f"[{label}] sync: {total} remote, {new} new, {total - new} cached"
+        ),
+        on_progress=lambda done, total, _name: context.log.info(
+            f"[{label}] sync: downloading [{done}/{total}]"
+        ),
+    )
+    byt = stats["bytes"]
+    if byt > 0:
+        context.log.info(f"[{label}] sync: done — {byt:,} bytes downloaded")
+    else:
+        context.log.info(f"[{label}] sync: done — all cached")
+    return stats
 
 
 @asset(
@@ -51,18 +84,13 @@ def _version_from_file_listing(
 def pubmed_baseline_sync(
     context: AssetExecutionContext,
 ) -> MaterializeResult:
-    context.log.info(
-        f"Syncing baseline from {settings.pubmed_ftp_host}{settings.pubmed_ftp_baseline}"
-    )
-    stats = sync_ftp_dir(
-        host=settings.pubmed_ftp_host,
-        remote_dir=settings.pubmed_ftp_baseline,
-        local_dir=settings.pubmed_baseline_dir,
-        pattern="pubmed*.xml.gz",
-        parallel=settings.ftp_parallel,
-        on_progress=lambda done, total, name: context.log.info(
-            f"  [{done}/{total}] {name}"
-        ),
+    stats = _ftp_sync_asset(
+        "PubMed",
+        settings.pubmed_ftp_host,
+        settings.pubmed_ftp_baseline,
+        settings.pubmed_baseline_dir,
+        "pubmed*.xml.gz",
+        context,
     )
     return MaterializeResult(
         data_version=_version_from_file_listing(
@@ -86,18 +114,13 @@ def pubmed_baseline_sync(
 def pubmed_updates_sync(
     context: AssetExecutionContext,
 ) -> MaterializeResult:
-    context.log.info(
-        f"Syncing updates from {settings.pubmed_ftp_host}{settings.pubmed_ftp_updates}"
-    )
-    stats = sync_ftp_dir(
-        host=settings.pubmed_ftp_host,
-        remote_dir=settings.pubmed_ftp_updates,
-        local_dir=settings.pubmed_update_dir,
-        pattern="pubmed*.xml.gz",
-        parallel=settings.ftp_parallel,
-        on_progress=lambda done, total, name: context.log.info(
-            f"  [{done}/{total}] {name}"
-        ),
+    stats = _ftp_sync_asset(
+        "PubMed",
+        settings.pubmed_ftp_host,
+        settings.pubmed_ftp_updates,
+        settings.pubmed_update_dir,
+        "pubmed*.xml.gz",
+        context,
     )
     return MaterializeResult(
         data_version=_version_from_file_listing(
@@ -126,13 +149,14 @@ def mesh_descriptor_sync(
         remote_dir=settings.mesh_ftp_dir,
         pattern="desc*.xml",
     )
-    context.log.info(f"Latest MeSH descriptor: {filename} ({remote_size:,} bytes)")
-
-    stats = sync_ftp_dir(
-        host=settings.mesh_ftp_host,
-        remote_dir=settings.mesh_ftp_dir,
-        local_dir=settings.pubmed_mesh_dir,
-        pattern=filename,
+    context.log.info(f"[MeSH] sync: found {filename} ({remote_size:,} bytes)")
+    stats = _ftp_sync_asset(
+        "MeSH",
+        settings.mesh_ftp_host,
+        settings.mesh_ftp_dir,
+        settings.pubmed_mesh_dir,
+        filename,
+        context,
     )
     return MaterializeResult(
         data_version=_version_from_file_listing(
@@ -157,23 +181,90 @@ def icite_metadata_sync(
     files = resolve_figshare_files(settings.icite_figshare_collection)
     url = files.get("icite_metadata.zip")
     if not url:
-        context.log.warning("icite_metadata.zip not found in figshare collection")
+        context.log.warning("[iCite] sync: icite_metadata.zip not found")
         return MaterializeResult(metadata={"status": MetadataValue.text("skipped")})
 
-    context.log.info(f"Downloading iCite metadata: {url}")
+    context.log.info("[iCite] sync: downloading icite_metadata.zip")
     info = download_and_extract_zip(
         url=url,
         local_dir=settings.icite_dir,
         expected_file="icite_metadata.csv",
         max_age_days=35,
     )
-    version_str = str(sorted(files.items()))
-    digest = hashlib.sha256(version_str.encode()).hexdigest()[:16]
+    sz = int(info["bytes"])
+    context.log.info(f"[iCite] sync: done — {info['status']}, {sz:,} bytes")
     return MaterializeResult(
-        data_version=DataVersion(digest),
+        data_version=_version_from_file_listing(files),
         metadata={
             "status": MetadataValue.text(str(info["status"])),
             "path": MetadataValue.path(str(info["path"])),
-            "bytes": MetadataValue.int(int(info["bytes"])),
+            "bytes": MetadataValue.int(sz),
+        },
+    )
+
+
+@asset(
+    group_name="sync",
+    description="aws s3 sync for OpenAlex works.",
+    kinds={"s3"},
+)
+def oa_sync(
+    context: AssetExecutionContext,
+) -> MaterializeResult:
+    local_dir = settings.oa_local_dir
+    local_dir.mkdir(parents=True, exist_ok=True)
+    s3_prefix = settings.oa_s3_prefix
+    base_cmd = [
+        "aws",
+        "s3",
+        "sync",
+        s3_prefix,
+        str(local_dir),
+        "--delete",
+        "--no-sign-request",
+        "--no-progress",
+    ]
+
+    # Dry-run to count pending operations
+    dry = subprocess.run(
+        base_cmd + ["--dryrun"],
+        capture_output=True,
+        text=True,
+    )
+    pending = dry.stdout.count("\n") if dry.returncode == 0 else 0
+    if pending == 0:
+        gz_count = sum(1 for _ in local_dir.rglob("*.gz"))
+        context.log.info(f"[OpenAlex] sync: all cached ({gz_count} .gz)")
+        return MaterializeResult(
+            metadata={
+                "gz_files": MetadataValue.int(gz_count),
+                "dir": MetadataValue.path(str(local_dir)),
+            },
+        )
+
+    context.log.info(f"[OpenAlex] sync: {pending} files to process")
+    proc = subprocess.Popen(
+        base_cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+    assert proc.stdout is not None
+    done = 0
+    for _line in proc.stdout:
+        done += 1
+        if done % max(pending // 20, 1) == 0 or done == pending:
+            context.log.info(f"[OpenAlex] sync: [{done}/{pending}]")
+    proc.wait()
+
+    if proc.returncode != 0:
+        raise RuntimeError(f"aws s3 sync failed (exit {proc.returncode})")
+
+    gz_count = sum(1 for _ in local_dir.rglob("*.gz"))
+    context.log.info(f"[OpenAlex] sync: done — {done} processed, {gz_count} .gz")
+    return MaterializeResult(
+        metadata={
+            "gz_files": MetadataValue.int(gz_count),
+            "dir": MetadataValue.path(str(local_dir)),
         },
     )

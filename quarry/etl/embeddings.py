@@ -1,14 +1,18 @@
-"""Batch-encode papers from PostgreSQL → LanceDB with blake3 content caching.
+"""Batch-encode papers from CH → LanceDB with blake3 content caching.
 
-Reads papers in batches from PG, skips unchanged (blake3 match), encodes
-new/modified papers with jina-v5 nano, upserts to LanceDB.
+Reads works from CH via ArrowStream pipe (T1+T2 filter in SQL),
+skips unchanged (blake3 match), encodes new/modified papers with jina-v5 nano,
+upserts to LanceDB.
 """
 
 import logging
+import subprocess
 import time
 
 try:
     import blake3
+    import pyarrow.ipc
+
     import quarry_core
 except ImportError:
     raise ImportError("pip install quarry[elt]") from None
@@ -16,9 +20,14 @@ except ImportError:
 from quarry.config import settings
 from quarry.embed.jina import JinaEncoder
 from quarry.store.lance import LanceStore
-from quarry.store.pg import PGStore
 
 log = logging.getLogger(__name__)
+
+_WORKS_QUERY = (
+    "SELECT work_id, title, abstract FROM works_export "
+    "WHERE tier IN ('t1', 't2') "
+    "AND abstract IS NOT NULL AND abstract != '' AND title != ''"
+)
 
 
 def content_hash(title: str, abstract: str) -> bytes:
@@ -26,8 +35,32 @@ def content_hash(title: str, abstract: str) -> bytes:
     return blake3.blake3(f"{title}\n{abstract}".encode()).digest()
 
 
-def run(batch_size: int = 5000, limit: int | None = None, start_work_id: str = ""):
-    db = PGStore(settings.pg_conninfo)
+def _ch_arrow_reader() -> tuple[subprocess.Popen, pyarrow.ipc.RecordBatchStreamReader]:
+    """Open CH ArrowStream pipe for works (T1+T2 with abstract)."""
+    cmd = [
+        "clickhouse-client",
+        "--host",
+        settings.ch_host,
+        "--port",
+        str(settings.ch_port),
+        "--database",
+        settings.ch_database,
+        "--receive_timeout",
+        "7200",
+        "--send_timeout",
+        "7200",
+        "--query",
+        _WORKS_QUERY,
+        "--format",
+        "ArrowStream",
+    ]
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    assert proc.stdout is not None
+    reader = pyarrow.ipc.open_stream(proc.stdout)
+    return proc, reader
+
+
+def run(batch_size: int = 5000, limit: int | None = None):
     lance = LanceStore(settings.lancedb_uri)
 
     # Ensure table exists
@@ -38,28 +71,25 @@ def run(batch_size: int = 5000, limit: int | None = None, start_work_id: str = "
 
     encoder = JinaEncoder(dim=256)
 
+    # Stream from CH via ArrowStream (memory-bounded, batch at a time)
+    proc, reader = _ch_arrow_reader()
+
     total_encoded = 0
     total_skipped = 0
     batch_num = 0
-    cursor = start_work_id
 
-    while True:
-        # Keyset pagination on work_id (T1+T2 only, with abstract)
-        with db.conn.cursor() as cur:
-            cur.execute(
-                "SELECT work_id, title, abstract FROM works "
-                "WHERE work_id > %s AND tier IN ('t1', 't2') "
-                "AND abstract IS NOT NULL AND abstract != '' AND title != '' "
-                "ORDER BY work_id LIMIT %s",
-                (cursor, batch_size),
-            )
-            rows = cur.fetchall()
+    for batch in reader:
+        if len(batch) == 0:
+            continue
 
-        if not rows:
-            break
-
-        cursor = rows[-1][0]
-        works = [{"work_id": r[0], "title": r[1], "abstract": r[2]} for r in rows]
+        works = [
+            {
+                "work_id": batch.column("work_id")[i].as_py(),
+                "title": batch.column("title")[i].as_py(),
+                "abstract": batch.column("abstract")[i].as_py(),
+            }
+            for i in range(len(batch))
+        ]
 
         # Batch normalize via Rust (regex + rayon parallel)
         titles = quarry_core.normalize_texts([w["title"] for w in works])
@@ -131,7 +161,13 @@ def run(batch_size: int = 5000, limit: int | None = None, start_work_id: str = "
             break
 
     encoder.unload()
-    db.close()
+
+    # Check CH process exit
+    proc.wait()
+    if proc.returncode != 0:
+        assert proc.stderr is not None
+        err = proc.stderr.read().decode().strip()
+        log.error("CH query failed: %s", err)
 
     log.info("Done: encoded=%d, skipped=%d", total_encoded, total_skipped)
 

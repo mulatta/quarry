@@ -1,4 +1,4 @@
-"""Staging assets: MeSH parse → PG direct load via quarry-ingest.
+"""Staging assets: MeSH parse → Parquet via quarry-parse.
 
 DO NOT use `from __future__ import annotations` here — Dagster inspects types at runtime.
 """
@@ -12,15 +12,15 @@ from dagster import (
 )
 
 from quarry.assets.download import mesh_descriptor_sync
-from quarry.assets.load import _run_ingest
+from quarry.assets.helpers import run_parse
 from quarry.config import settings
 
 
 @asset(
     group_name="supplementary",
     deps=[mesh_descriptor_sync],
-    description="Parse MeSH descriptor XML → PG mesh_tree table via quarry-ingest.",
-    kinds={"rust", "postgres"},
+    description="Parse MeSH descriptor XML → Parquet via quarry-parse.",
+    kinds={"rust", "parquet"},
     automation_condition=AutomationCondition.eager(),
 )
 def mesh_stage(context: AssetExecutionContext) -> MaterializeResult:
@@ -30,12 +30,18 @@ def mesh_stage(context: AssetExecutionContext) -> MaterializeResult:
         return MaterializeResult(metadata={"status": MetadataValue.text("skipped")})
 
     xml_path = xml_files[-1]
-    context.log.info(f"Parsing MeSH from {xml_path}")
+    context.log.info(f"[MeSH] parse: {xml_path.name}")
 
-    stats = _run_ingest(["load", "mesh", "--xml-path", str(xml_path)], context)
+    run_parse(
+        [
+            "mesh",
+            "--xml-path",
+            str(xml_path),
+            "--output-dir",
+            str(settings.mesh_parquet_dir),
+        ],
+        context,
+    )
     return MaterializeResult(
-        metadata={
-            k: MetadataValue.int(v) if isinstance(v, int) else MetadataValue.float(v)
-            for k, v in stats.items()
-        },
+        metadata={"status": MetadataValue.text("ok")},
     )

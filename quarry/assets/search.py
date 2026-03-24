@@ -11,21 +11,21 @@ from dagster import (
     asset,
 )
 
-from quarry.assets.load import enrich_pg
+from quarry.assets.load import ch_transform
 from quarry.config import settings
 from quarry.etl.embeddings import run as run_embeddings
 
 
 @asset(
     group_name="search",
-    deps=[enrich_pg],
+    deps=[ch_transform],
     description="Encode works (blake3 change detection) → LanceDB vectors + FTS index.",
     kinds={"lancedb", "python", "gpu"},
 )
 def paper_embeddings(
     context: AssetExecutionContext,
 ) -> MaterializeResult:
-    context.log.info("Running embedding pipeline (blake3 cache + jina-v5)")
+    context.log.info("[Embed] running pipeline (blake3 cache + jina-v5)")
     run_embeddings()
     return MaterializeResult(
         metadata={
