@@ -1,10 +1,10 @@
 [package]
-name = "quarry-ingest"
+name = "quarry-parse"
 version = "0.1.0"
 edition = "2024"
 
 [lib]
-name = "quarry_ingest"
+name = "quarry_parse"
 
 [dependencies]
 # Core crate (normalize, abstract_recon)
@@ -17,22 +17,19 @@ serde = { version = "1", features = ["derive"] }
 flate2 = { version = "1", features = ["zlib-ng"], default-features = false }
 rayon = "1.10"
 
-# Build: PG + S3
-bytes = "1"
-object_store = { version = "0.12", features = ["aws"] }
-tokio = { version = "1", features = ["rt-multi-thread"] }
-futures = "0.3"
-postgres = "0.19"
-crossbeam-channel = "0.5"
+# Parquet output
+arrow = "55"
+parquet = { version = "55", features = ["zstd"] }
 
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
 serde_json = "1"
-toml = "0.8"
-csv = "1"
+
+# Allocator — mimalloc avoids glibc arena fragmentation in threaded workloads
+mimalloc = { version = "0.1", default-features = false }
 
 [[bin]]
-name = "quarry-ingest"
+name = "quarry-parse"
 path = "src/main.rs"
 
 [dev-dependencies]

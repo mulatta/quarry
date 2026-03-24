@@ -8,7 +8,9 @@ __pycache__/
 quarry-ingest/target/
 quarry-graph/target/
 .tmp_dagster_home_*/
-.dagster_home/
+.dg-home/
+data/
 target/
 dump.rdb
 .pg-data/
+tests/data/

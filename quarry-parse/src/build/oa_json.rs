@@ -53,13 +53,6 @@ pub struct OaWork {
     pub oa_url: Option<String>,
     pub is_retracted: bool,
     pub updated_date: Option<String>,
-    pub pm_journal_abbr: Option<String>,
-    pub pm_country: Option<String>,
-    pub pm_medline_status: Option<String>,
-    pub pm_pub_type: Vec<String>,
-    pub pm_created_date: Option<String>,
-    pub pm_revised_date: Option<String>,
-    pub pm_indexed_date: Option<String>,
 }
 
 pub struct OaAuthor {
@@ -282,13 +275,6 @@ pub fn parse_line(
         oa_url,
         is_retracted: raw.is_retracted.unwrap_or(false),
         updated_date: raw.updated_date,
-        pm_journal_abbr: None,
-        pm_country: None,
-        pm_medline_status: None,
-        pm_pub_type: Vec::new(),
-        pm_created_date: None,
-        pm_revised_date: None,
-        pm_indexed_date: None,
     };
 
     // Authors — T1/T2 only (mirrors load.py:537-551)
