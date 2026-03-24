@@ -14,6 +14,8 @@ let
       cmake
       just
       postgresql_16
+      clickhouse
+      awscli2
     ];
 
   shellEnv = {
@@ -34,7 +36,7 @@ in
   perSystem =
     { pkgs, self', ... }:
     {
-      # Dev PostgreSQL via process-compose (user-local, no system PG interaction)
+      # Dev PostgreSQL + ClickHouse via process-compose (user-local)
       process-compose.services = {
         imports = [ inputs.services-flake.processComposeModules.default ];
 
@@ -45,51 +47,45 @@ in
           socketDir = pgSocketDir;
           settings = {
             listen_addresses = "";
-            # Bulk-load tuning: reduce WAL contention for parallel COPY writers
-            synchronous_commit = "off"; # safe: data is re-loadable from S3/XML
-            wal_buffers = "64MB"; # reduce WALInsert lock contention (default ~4MB)
-            max_wal_size = "4GB"; # fewer checkpoints during bulk load
-            shared_buffers = "2GB"; # more buffer pool for BufferContent locks
+            synchronous_commit = "off";
+            wal_buffers = "64MB";
+            max_wal_size = "4GB";
+            shared_buffers = "2GB";
             work_mem = "256MB";
-            maintenance_work_mem = "1GB"; # faster CREATE INDEX / VACUUM
-            autovacuum = "off"; # bulk load only; VACUUM ANALYZE runs after load
+            maintenance_work_mem = "1GB";
+            autovacuum = "off";
           };
           superuser = null;
           initialDatabases = [
             {
               name = "quarry";
-              schemas = [ ../sql ];
+              schemas = [ ../sql/schema.sql ];
+            }
+          ];
+        };
+
+        services.clickhouse."quarry-ch" = {
+          enable = true;
+          port = 9001;
+          extraConfig = {
+            http_port = 8124;
+          };
+          initialDatabases = [
+            {
+              name = "quarry";
+              schemas = [ ../sql/ch_schema.sql ];
             }
           ];
         };
       };
 
-      # nix develop        — debug Rust build (fast iteration)
       devShells.default = pkgs.mkShell {
-        packages = shellPackages pkgs;
+        packages = (shellPackages pkgs) ++ [ self'.packages.quarry-parse ];
         env = shellEnv // {
           LD_LIBRARY_PATH = "${pkgs.stdenv.cc.cc.lib}/lib";
         };
         shellHook = ''
           uv sync --all-extras --quiet
-          ${activateVenv}
-          # quarry-ingest: prefer local debug build, fall back to cargo build
-          if [ -x "$PWD/quarry-ingest/target/debug/quarry-ingest" ]; then
-            export PATH="$PWD/quarry-ingest/target/debug:$PATH"
-          elif [ -x "$PWD/quarry-ingest/target/release/quarry-ingest" ]; then
-            export PATH="$PWD/quarry-ingest/target/release:$PATH"
-          fi
-        '';
-      };
-
-      # nix develop .#release — release Rust build (production)
-      devShells.release = pkgs.mkShell {
-        packages = (shellPackages pkgs) ++ [ self'.packages.quarry-ingest ];
-        env = shellEnv // {
-          LD_LIBRARY_PATH = "${pkgs.stdenv.cc.cc.lib}/lib";
-        };
-        shellHook = ''
-          uv sync --all-extras -C build-args='--profile=release' --quiet
           ${activateVenv}
         '';
       };

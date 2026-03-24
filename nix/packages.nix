@@ -31,17 +31,16 @@
       # crane — standalone Rust binary build (no nixpkgs input of its own)
       craneLib = inputs.crane.mkLib pkgs;
 
-      # Source: repo root filtered to quarry-ingest + quarry-core (path dep) + sql/
-      ingestSrc = pkgs.lib.cleanSourceWith {
+      # Source: repo root filtered to quarry-parse (quarry-parse crate) + quarry-core (path dep)
+      parseSrc = pkgs.lib.cleanSourceWith {
         src = ../.;
         filter =
           path: type:
           let
             rel = pkgs.lib.removePrefix (toString ../.) path;
           in
-          pkgs.lib.hasPrefix "/quarry-ingest" rel
+          pkgs.lib.hasPrefix "/quarry-parse" rel
           || pkgs.lib.hasPrefix "/quarry-core" rel
-          || pkgs.lib.hasPrefix "/sql" rel
           || (craneLib.filterCargoSources path type);
       };
     in
@@ -60,19 +59,19 @@
           lockFile = ../quarry-graph/Cargo.lock;
         };
 
-        # Standalone Rust binary — data ingestion CLI
-        quarry-ingest = craneLib.buildPackage {
-          pname = "quarry-ingest";
+        # Standalone Rust binary — parse CLI (local files → Parquet)
+        quarry-parse = craneLib.buildPackage {
+          pname = "quarry-parse";
           version = "0.1.0";
-          src = ingestSrc;
+          src = parseSrc;
 
-          cargoLock = ../quarry-ingest/Cargo.lock;
-          cargoExtraArgs = "--bin quarry-ingest";
+          cargoLock = ../quarry-parse/Cargo.lock;
+          cargoExtraArgs = "--bin quarry-parse";
           nativeBuildInputs = [ pkgs.cmake ];
 
-          # Build from quarry-ingest subdirectory
+          # Build from quarry-parse subdirectory (crate lives here)
           postUnpack = ''
-            cd $sourceRoot/quarry-ingest
+            cd $sourceRoot/quarry-parse
             export sourceRoot=$(pwd)
           '';
 

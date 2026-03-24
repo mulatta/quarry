@@ -1,5 +1,5 @@
 -- Quarry schema DDL — single source of truth.
--- Loaded by: process-compose (PG init), quarry-ingest db init, PGStore.init_schema()
+-- Loaded by: process-compose (PG init), quarry-parse db init, PGStore.init_schema()
 -- All statements are idempotent (IF NOT EXISTS).
 
 -- ── PubMed tables ──
@@ -173,12 +173,3 @@ CREATE INDEX IF NOT EXISTS idx_work_cit_citing ON work_citations(citing_id);
 CREATE INDEX IF NOT EXISTS idx_work_cit_cited ON work_citations(cited_id);
 CREATE INDEX IF NOT EXISTS idx_crosswalk_pmid ON id_crosswalk(pmid);
 
--- ── Build progress ──
-
-CREATE TABLE IF NOT EXISTS _build_progress (
-    source TEXT NOT NULL,
-    filename TEXT NOT NULL,
-    rows_inserted BIGINT,
-    completed_at TIMESTAMPTZ DEFAULT now(),
-    PRIMARY KEY (source, filename)
-);
