@@ -1,16 +1,23 @@
+# Nix
 .direnv/
 result
 result-*
+
+# Python
 .venv/
 __pycache__/
 *.egg-info/
 *.pyc
-quarry-ingest/target/
-quarry-graph/target/
-.tmp_dagster_home_*/
-.dg-home/
-data/
+
+# Rust
 target/
-dump.rdb
+
+# Dagster
+.dg-home/
+
+# Databases
 .pg-data/
+data/
+
+# test
 tests/data/

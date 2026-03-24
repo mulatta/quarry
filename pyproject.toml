@@ -9,6 +9,7 @@ description = "PubMed-primary academic paper exploration + citation graph mining
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "dagster-postgres>=0.28.20",
     "psycopg[binary]",
     "pydantic-settings",
 ]
@@ -33,11 +34,8 @@ elt = [
     "dagster-dg-cli>=1.12.19",
     "torch",
     "sentence-transformers",
-    "peft",
     "blake3",
     "httpx",
-    "lxml",
-    "orjson",
 ]
 
 [project.scripts]
