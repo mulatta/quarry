@@ -1,10 +1,9 @@
-# Quarry — Rust crate build, test, and install recipes
-# Dependencies: quarry-ingest → quarry-core, quarry-graph independent
+# Quarry — build, lint, test recipes (no side effects on external services)
+# Dependencies: quarry-parse → quarry-core, quarry-graph independent
 #
 # Usage:
 #   just sync         # uv sync — fast dev iteration
-#   just dev          # cargo debug build quarry-ingest binary
-#   just release      # cargo release build quarry-ingest binary
+#   just dev          # cargo debug build all crates
 #   just check        # clippy + test all
 #   just kill-dagster # stop all dagster processes
 
@@ -25,10 +24,10 @@ dev-core:
     cargo build --manifest-path quarry-core/Cargo.toml --features extension-module
     @echo "quarry-core built (debug)"
 
-# Debug build quarry-ingest binary
-dev-ingest:
-    cargo build --manifest-path quarry-ingest/Cargo.toml --bin quarry-ingest
-    @echo "quarry-ingest built (debug): quarry-ingest/target/debug/quarry-ingest"
+# Debug build quarry-parse binary
+dev-parse:
+    cargo build --manifest-path quarry-parse/Cargo.toml --bin quarry-parse
+    @echo "quarry-parse built (debug): quarry-parse/target/debug/quarry-parse"
 
 # Debug build quarry-graph (.so for Python)
 dev-graph:
@@ -36,7 +35,7 @@ dev-graph:
     @echo "quarry-graph built (debug)"
 
 # Debug build all crates
-dev: dev-core dev-ingest dev-graph
+dev: dev-core dev-parse dev-graph
 
 # ── Release ──
 
@@ -45,10 +44,10 @@ release-core:
     cargo build --manifest-path quarry-core/Cargo.toml --features extension-module --release
     @echo "quarry-core built (release)"
 
-# Release build quarry-ingest binary
-release-ingest:
-    cargo build --manifest-path quarry-ingest/Cargo.toml --bin quarry-ingest --release
-    @echo "quarry-ingest built (release): quarry-ingest/target/release/quarry-ingest"
+# Release build quarry-parse binary
+release-parse:
+    cargo build --manifest-path quarry-parse/Cargo.toml --bin quarry-parse --release
+    @echo "quarry-parse built (release): quarry-parse/target/release/quarry-parse"
 
 # Release build quarry-graph
 release-graph:
@@ -56,14 +55,14 @@ release-graph:
     @echo "quarry-graph built (release)"
 
 # Release build all crates
-release: release-core release-ingest release-graph
+release: release-core release-parse release-graph
 
 # ── Clean ──
 
 # Clean all Rust crate targets
 clean:
     cargo clean --manifest-path quarry-core/Cargo.toml
-    cargo clean --manifest-path quarry-ingest/Cargo.toml
+    cargo clean --manifest-path quarry-parse/Cargo.toml
     cargo clean --manifest-path quarry-graph/Cargo.toml
 
 # Clean + release rebuild
@@ -75,31 +74,31 @@ rebuild: clean release
 clippy-core:
     cargo clippy --manifest-path quarry-core/Cargo.toml --all-features -- -D warnings
 
-# Clippy quarry-ingest
-clippy-ingest: clippy-core
-    cargo clippy --manifest-path quarry-ingest/Cargo.toml -- -D warnings
+# Clippy quarry-parse
+clippy-parse: clippy-core
+    cargo clippy --manifest-path quarry-parse/Cargo.toml -- -D warnings
 
 # Clippy quarry-graph
 clippy-graph:
     cargo clippy --manifest-path quarry-graph/Cargo.toml --all-features -- -D warnings
 
 # Clippy all crates
-clippy: clippy-ingest clippy-graph
+clippy: clippy-parse clippy-graph
 
 # Test quarry-core
 test-core:
     cargo test --manifest-path quarry-core/Cargo.toml
 
-# Test quarry-ingest
-test-ingest: test-core
-    cargo test --manifest-path quarry-ingest/Cargo.toml
+# Test quarry-parse
+test-parse: test-core
+    cargo test --manifest-path quarry-parse/Cargo.toml
 
 # Test quarry-graph
 test-graph:
     cargo test --manifest-path quarry-graph/Cargo.toml
 
 # Test all crates
-test: test-ingest test-graph
+test: test-parse test-graph
 
 # Clippy + test all
 check: clippy test
