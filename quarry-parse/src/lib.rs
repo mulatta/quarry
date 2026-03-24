@@ -1,7 +1,7 @@
 pub mod parse;
 pub mod build;
 
-/// Format error with full source chain (postgres errors hide details behind `.source()`).
+/// Format error with full source chain.
 pub fn err_chain(e: &dyn std::error::Error) -> String {
     let mut msg = e.to_string();
     let mut source = e.source();
