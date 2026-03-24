@@ -61,6 +61,7 @@ in
               name = "quarry";
               schemas = [ ../sql/schema.sql ];
             }
+            { name = "dagster"; }
           ];
         };
 
@@ -87,6 +88,10 @@ in
         shellHook = ''
           uv sync --all-extras --quiet
           ${activateVenv}
+          local root="$(git rev-parse --show-toplevel)"
+          export DAGSTER_HOME="$root/.dg-home"
+          export DAGSTER_PG_URL="postgresql:///dagster?host=${pgSocketDir}"
+          mkdir -p "$DAGSTER_HOME"
         '';
       };
     };
