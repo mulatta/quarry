@@ -1,7 +1,6 @@
 """Quarry configuration via environment variables / .env file.
 
 Defaults use ~/quarry-data/. Override with QUARRY_* env vars for server deployment.
-Pipeline tuning lives in config.toml (single source of truth for quarry-ingest).
 """
 
 from pathlib import Path
@@ -15,11 +14,12 @@ class Settings(BaseSettings):
     model_config = {"env_prefix": "QUARRY_"}
 
     # PostgreSQL
-    # Default for dev (overridden by QUARRY_PG_CONNINFO env var from nix shell)
     pg_conninfo: str = "host=/tmp/quarry-pg dbname=quarry"
 
-    # quarry-ingest config.toml path (pipeline tuning: concurrency, buffers, retries)
-    ingest_config: Path = Path("quarry-ingest/config.example.toml")
+    # ClickHouse
+    ch_host: str = "localhost"
+    ch_port: int = 9001
+    ch_database: str = "quarry"
 
     # PubMed FTP paths (baseline + updates downloaded here)
     pubmed_baseline_dir: Path = _DATA_DIR / "pubmed" / "baseline"
@@ -28,6 +28,15 @@ class Settings(BaseSettings):
 
     # iCite (figshare monthly release)
     icite_dir: Path = _DATA_DIR / "icite"
+
+    # OpenAlex
+    oa_s3_prefix: str = "s3://openalex/data/works"
+    oa_local_dir: Path = _DATA_DIR / "oa" / "works"
+
+    # Parquet output directories
+    oa_parquet_dir: Path = _DATA_DIR / "parsed" / "oa"
+    pm_parquet_dir: Path = _DATA_DIR / "parsed" / "pubmed"
+    mesh_parquet_dir: Path = _DATA_DIR / "parsed" / "mesh"
 
     # CSR mmap output
     csr_dir: Path = _DATA_DIR / "csr"
@@ -46,9 +55,6 @@ class Settings(BaseSettings):
 
     # iCite figshare collection ID (stable, auto-discovers latest monthly snapshot)
     icite_figshare_collection: int = 4586573
-
-    # OpenAlex S3 prefix (which partition to load)
-    oa_s3_prefix: str = "s3://openalex/data/works"
 
     # Download
     ftp_parallel: int = 4

@@ -25,6 +25,7 @@ def sync_ftp_dir(
     parallel: int = 4,
     max_retries: int = 3,
     on_progress: Callable[[int, int, str], None] | None = None,
+    on_listing: Callable[[int, int], None] | None = None,
 ) -> dict[str, int]:
     """Mirror an FTP directory, downloading only new/changed files.
 
@@ -48,26 +49,30 @@ def sync_ftp_dir(
             remote_files[name] = int(facts.get("size", 0))
             remote_mtimes[name] = facts.get("modify", "")
 
-    # Determine what needs downloading (size or mtime mismatch, or missing)
+    # Determine what needs downloading (mtime-first, size as fallback)
+    # Note: some FTP servers (e.g. NCBI) report stale MLSD sizes, so
+    # mtime is the primary change signal; size-only check is unreliable.
     to_download = []
     for name, remote_size in remote_files.items():
         local_path = local_dir / name
-        if local_path.exists():
-            if local_path.stat().st_size != remote_size:
-                to_download.append(name)
-            elif remote_mtimes.get(name):
-                # Compare remote modify timestamp against local mtime
-                try:
-                    remote_ts = datetime.strptime(
-                        remote_mtimes[name][:14], "%Y%m%d%H%M%S"
-                    )
-                    local_ts = datetime.fromtimestamp(local_path.stat().st_mtime)
-                    if remote_ts > local_ts:
-                        to_download.append(name)
-                except ValueError:
-                    pass  # unparseable modify fact — rely on size check
-        else:
+        if not local_path.exists():
             to_download.append(name)
+            continue
+        modify = remote_mtimes.get(name, "")
+        if modify:
+            try:
+                remote_ts = datetime.strptime(modify[:14], "%Y%m%d%H%M%S")
+                local_ts = datetime.fromtimestamp(local_path.stat().st_mtime)
+                if remote_ts > local_ts:
+                    to_download.append(name)
+            except ValueError:
+                pass
+        elif local_path.stat().st_size != remote_size:
+            # No mtime available — fall back to size comparison
+            to_download.append(name)
+
+    if on_listing:
+        on_listing(len(remote_files), len(to_download))
 
     if not to_download:
         return {
