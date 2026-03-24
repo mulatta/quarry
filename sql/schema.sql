@@ -140,7 +140,8 @@ CREATE TABLE IF NOT EXISTS work_topics (
     subfield   TEXT,
     field      TEXT,
     domain     TEXT,
-    score      REAL
+    score      REAL,
+    is_primary BOOLEAN DEFAULT FALSE
 );
 
 CREATE TABLE IF NOT EXISTS work_mesh (

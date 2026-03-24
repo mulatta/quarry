@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS oa_work_topics (
     field      Nullable(String),
     domain     Nullable(String),
     score      Nullable(Float32),
+    is_primary Bool DEFAULT false,
     updated_date Date
 ) ENGINE = ReplacingMergeTree(updated_date)
 ORDER BY (work_id, topic_id)

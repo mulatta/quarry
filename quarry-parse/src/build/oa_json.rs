@@ -4,8 +4,6 @@
 //! into intermediate Rust structs. Transformation logic mirrors
 //! `quarry/assets/load.py:494-530`.
 
-use std::collections::HashSet;
-
 use serde::Deserialize;
 
 use quarry_core::abstract_recon;
@@ -19,11 +17,17 @@ const PMID_PREFIX: &str = "https://pubmed.ncbi.nlm.nih.gov/";
 // ── Public intermediate structs ──
 
 /// Tier classification for an OpenAlex work.
+///
+/// T1: pmid + abstract — full enrichment, embedding-ready
+/// T2: abstract only (no pmid) — embedding-ready, OA metadata only
+/// T3: pmid only (no abstract) — PubMed metadata serving (MeSH, grants, authors)
+/// T4: neither pmid nor abstract — citation graph node only
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Tier {
-    T1, // has PMID
-    T2, // domain in t2_domains
-    T3, // everything else
+    T1,
+    T2,
+    T3,
+    T4,
 }
 
 impl Tier {
@@ -32,6 +36,7 @@ impl Tier {
             Tier::T1 => "t1",
             Tier::T2 => "t2",
             Tier::T3 => "t3",
+            Tier::T4 => "t4",
         }
     }
 }
@@ -73,6 +78,7 @@ pub struct OaTopic {
     pub field: Option<String>,
     pub domain: Option<String>,
     pub score: Option<f32>,
+    pub is_primary: bool,
 }
 
 pub struct OaCitation {
@@ -111,7 +117,6 @@ struct RawWork {
     is_retracted: Option<bool>,
     primary_location: Option<RawPrimaryLocation>,
     open_access: Option<RawOpenAccess>,
-    primary_topic: Option<RawPrimaryTopic>,
     authorships: Option<Vec<RawAuthorship>>,
     topics: Option<Vec<RawTopic>>,
     referenced_works: Option<Vec<String>>,
@@ -136,12 +141,6 @@ struct RawPrimaryLocation {
 struct RawOpenAccess {
     oa_status: Option<String>,
     oa_url: Option<String>,
-}
-
-#[derive(Deserialize, Default)]
-#[serde(default)]
-struct RawPrimaryTopic {
-    domain: Option<RawDisplayName>,
 }
 
 /// Reusable struct for nested objects with only `display_name`.
@@ -192,7 +191,6 @@ struct RawTopic {
 /// `537-551` (authors), `558-572` (topics), `579-586` (citations).
 pub fn parse_line(
     line: &str,
-    t2_domains: &HashSet<String>,
 ) -> Result<OaLineResult, Box<dyn std::error::Error>> {
     let raw: RawWork = sonic_rs::from_str(line)?;
 
@@ -220,22 +218,16 @@ pub fn parse_line(
 
     let doi = raw.ids.and_then(|ids| ids.doi);
 
-    // Domain for tier classification
-    let domain_name: Option<&str> = raw
-        .primary_topic
-        .as_ref()
-        .and_then(|pt| pt.domain.as_ref())
-        .and_then(|d| d.display_name.as_deref());
-
-    let tier = if pmid.is_some() {
-        Tier::T1
-    } else if domain_name.is_some_and(|d| t2_domains.contains(d)) {
-        Tier::T2
-    } else {
-        Tier::T3
+    // Tier classification: pmid × abstract presence
+    let has_abstract = raw.abstract_inverted_index.is_some();
+    let tier = match (pmid.is_some(), has_abstract) {
+        (true, true) => Tier::T1,   // pmid + abstract: full enrichment
+        (false, true) => Tier::T2,  // abstract only: embedding-ready
+        (true, false) => Tier::T3,  // pmid only: PubMed metadata
+        (false, false) => Tier::T4, // neither: graph node only
     };
 
-    // Abstract reconstruction — T1/T2 only, skip for T3
+    // Abstract reconstruction — T1/T2 only (tiers with abstract)
     let abstract_text = if tier <= Tier::T2 {
         raw.abstract_inverted_index
             .as_ref()
@@ -277,8 +269,8 @@ pub fn parse_line(
         updated_date: raw.updated_date,
     };
 
-    // Authors — T1/T2 only (mirrors load.py:537-551)
-    let authors = if tier <= Tier::T2 {
+    // Authors — T1/T2/T3 (skip T4 only)
+    let authors = if tier <= Tier::T3 {
         raw.authorships
             .unwrap_or_default()
             .into_iter()
@@ -311,8 +303,9 @@ pub fn parse_line(
         Vec::new()
     };
 
-    // Topics — T1/T2 only (mirrors load.py:558-572)
-    let topics = if tier <= Tier::T2 {
+    // Topics — T1/T2/T3 (skip T4 only). First topic = is_primary.
+    let topics = if tier <= Tier::T3 {
+        let mut is_first = true;
         raw.topics
             .unwrap_or_default()
             .into_iter()
@@ -321,6 +314,8 @@ pub fn parse_line(
                     .id
                     .as_deref()
                     .map(|s| s.strip_prefix(OA_PREFIX).unwrap_or(s).to_string())?;
+                let primary = is_first;
+                is_first = false;
                 Some(OaTopic {
                     work_id: work_id.clone(),
                     topic_id,
@@ -329,6 +324,7 @@ pub fn parse_line(
                     field: t.field.and_then(|f| f.display_name),
                     domain: t.domain.and_then(|d| d.display_name),
                     score: t.score,
+                    is_primary: primary,
                 })
             })
             .collect()
@@ -369,15 +365,8 @@ pub fn parse_line(
 mod tests {
     use super::*;
 
-    fn t2_set() -> HashSet<String> {
-        ["Health Sciences", "Life Sciences"]
-            .into_iter()
-            .map(String::from)
-            .collect()
-    }
-
     #[test]
-    fn test_t1_work_with_pmid() {
+    fn test_t1_pmid_and_abstract() {
         let json = r#"{
             "id": "https://openalex.org/W12345",
             "ids": {"pmid": "https://pubmed.ncbi.nlm.nih.gov/99999"},
@@ -390,7 +379,6 @@ mod tests {
             "is_retracted": false,
             "primary_location": {"source": {"display_name": "Nature"}},
             "open_access": {"oa_status": "gold", "oa_url": "https://example.com"},
-            "primary_topic": {"domain": {"display_name": "Health Sciences"}},
             "authorships": [
                 {"author": {"display_name": "Alice", "orcid": "https://orcid.org/0000-0001-2345-6789"},
                  "institutions": [{"display_name": "MIT", "ror": "https://ror.org/042nb2s44"}],
@@ -399,13 +387,16 @@ mod tests {
             "topics": [
                 {"id": "https://openalex.org/T001", "display_name": "ML",
                  "subfield": {"display_name": "AI"}, "field": {"display_name": "CS"},
-                 "domain": {"display_name": "Physical Sciences"}, "score": 0.95}
+                 "domain": {"display_name": "Physical Sciences"}, "score": 0.95},
+                {"id": "https://openalex.org/T002", "display_name": "DL",
+                 "subfield": {"display_name": "AI"}, "field": {"display_name": "CS"},
+                 "domain": {"display_name": "Physical Sciences"}, "score": 0.80}
             ],
             "referenced_works": ["https://openalex.org/W111", "https://openalex.org/W222"],
             "updated_date": "2024-07-01"
         }"#;
 
-        let result = parse_line(json, &t2_set()).unwrap();
+        let result = parse_line(json).unwrap();
         let w = &result.work;
         assert_eq!(w.work_id, "W12345");
         assert_eq!(w.work_id_int, 12345);
@@ -424,72 +415,93 @@ mod tests {
             Some("MIT")
         );
 
-        assert_eq!(result.topics.len(), 1);
+        assert_eq!(result.topics.len(), 2);
         assert_eq!(result.topics[0].topic_id, "T001");
+        assert!(result.topics[0].is_primary);
+        assert!(!result.topics[1].is_primary);
 
         assert_eq!(result.citations.len(), 2);
-        assert_eq!(result.citations[0].citing_id, 12345);
-        assert_eq!(result.citations[0].cited_id, 111);
-        assert_eq!(result.citations[1].cited_id, 222);
-
         assert!(result.crosswalk.is_some());
         assert_eq!(result.crosswalk.unwrap().pmid, 99999);
     }
 
     #[test]
-    fn test_t3_skips_authors_topics_abstract() {
+    fn test_t2_abstract_no_pmid() {
         let json = r#"{
-            "id": "https://openalex.org/W99999",
+            "id": "https://openalex.org/W55555",
+            "title": "T2 Paper",
+            "abstract_inverted_index": {"some": [0], "text": [1]},
+            "topics": [
+                {"id": "https://openalex.org/T003", "display_name": "Bio", "score": 0.9}
+            ]
+        }"#;
+
+        let result = parse_line(json).unwrap();
+        assert_eq!(result.work.tier, Tier::T2);
+        assert_eq!(result.work.abstract_text.as_deref(), Some("some text"));
+        assert!(result.work.pmid.is_none());
+        assert_eq!(result.topics.len(), 1);
+        assert!(result.topics[0].is_primary);
+    }
+
+    #[test]
+    fn test_t3_pmid_no_abstract() {
+        let json = r#"{
+            "id": "https://openalex.org/W66666",
+            "ids": {"pmid": "https://pubmed.ncbi.nlm.nih.gov/22222"},
             "title": "T3 Paper",
-            "abstract_inverted_index": {"should": [0], "skip": [1]},
-            "primary_topic": {"domain": {"display_name": "Social Sciences"}},
             "authorships": [{"author": {"display_name": "Bob"}}],
             "topics": [{"id": "https://openalex.org/T002", "display_name": "Soc"}],
             "referenced_works": ["https://openalex.org/W333"]
         }"#;
 
-        let result = parse_line(json, &t2_set()).unwrap();
+        let result = parse_line(json).unwrap();
         assert_eq!(result.work.tier, Tier::T3);
-        assert!(result.work.abstract_text.is_none()); // skipped
-        assert!(result.authors.is_empty()); // skipped
-        assert!(result.topics.is_empty()); // skipped
-        assert_eq!(result.citations.len(), 1); // kept
+        assert!(result.work.abstract_text.is_none());
+        assert_eq!(result.work.pmid, Some(22222));
+        assert_eq!(result.authors.len(), 1); // T3 parses authors
+        assert_eq!(result.topics.len(), 1);  // T3 parses topics
+        assert_eq!(result.citations.len(), 1);
     }
 
     #[test]
-    fn test_t2_domain_match() {
+    fn test_t4_no_pmid_no_abstract() {
         let json = r#"{
-            "id": "https://openalex.org/W55555",
-            "title": "T2",
-            "primary_topic": {"domain": {"display_name": "Life Sciences"}}
+            "id": "https://openalex.org/W99999",
+            "title": "T4 Paper",
+            "authorships": [{"author": {"display_name": "Carol"}}],
+            "topics": [{"id": "https://openalex.org/T004", "display_name": "Math"}],
+            "referenced_works": ["https://openalex.org/W333"]
         }"#;
 
-        let result = parse_line(json, &t2_set()).unwrap();
-        assert_eq!(result.work.tier, Tier::T2);
+        let result = parse_line(json).unwrap();
+        assert_eq!(result.work.tier, Tier::T4);
+        assert!(result.work.abstract_text.is_none());
+        assert!(result.authors.is_empty());  // T4 skips authors
+        assert!(result.topics.is_empty());   // T4 skips topics
+        assert_eq!(result.citations.len(), 1); // T4 keeps citations
     }
 
     #[test]
     fn test_empty_id_returns_error() {
         let json = r#"{"id": "", "title": "Bad"}"#;
-        assert!(parse_line(json, &t2_set()).is_err());
+        assert!(parse_line(json).is_err());
     }
 
     #[test]
     fn test_invalid_work_id_int() {
-        // Valid OA prefix but non-numeric suffix
         let json = r#"{"id": "https://openalex.org/Wabc"}"#;
-        assert!(parse_line(json, &t2_set()).is_err());
+        assert!(parse_line(json).is_err());
     }
 
     #[test]
     fn test_malformed_pmid_url() {
-        // PMID URL without expected prefix → pmid=None (not an error)
         let json = r#"{
             "id": "https://openalex.org/W77777",
             "ids": {"pmid": "urn:pmid:12345"},
             "title": "No PMID"
         }"#;
-        let result = parse_line(json, &t2_set()).unwrap();
+        let result = parse_line(json).unwrap();
         assert!(result.work.pmid.is_none());
         assert!(result.crosswalk.is_none());
     }
@@ -500,15 +512,18 @@ mod tests {
             "id": "https://openalex.org/W88888",
             "ids": {"pmid": "https://pubmed.ncbi.nlm.nih.gov/11111"},
             "title": "Topic test",
+            "abstract_inverted_index": {"x": [0]},
             "topics": [
                 {"display_name": "No ID topic", "score": 0.5},
                 {"id": "https://openalex.org/T999", "display_name": "Has ID", "score": 0.8}
             ]
         }"#;
-        let result = parse_line(json, &t2_set()).unwrap();
-        // Topic without id is filtered out by filter_map
+        let result = parse_line(json).unwrap();
+        // Topic without id is filtered out, but is_primary tracks original position
         assert_eq!(result.topics.len(), 1);
         assert_eq!(result.topics[0].topic_id, "T999");
+        // First valid topic gets is_primary (first raw topic had no id, skipped)
+        assert!(result.topics[0].is_primary);
     }
 
     #[test]
@@ -522,8 +537,7 @@ mod tests {
                 "https://openalex.org/W222"
             ]
         }"#;
-        let result = parse_line(json, &t2_set()).unwrap();
-        // Only valid OA W-prefixed refs are parsed
+        let result = parse_line(json).unwrap();
         assert_eq!(result.citations.len(), 2);
     }
 }

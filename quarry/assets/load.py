@@ -401,7 +401,7 @@ def pg_load(context: AssetExecutionContext) -> MaterializeResult:
         _ch_to_pg(
             "oa_work_topics",
             "work_topics",
-            "work_id, topic_id, topic_name, subfield, field, domain, score",
+            "work_id, topic_id, topic_name, subfield, field, domain, score, is_primary",
             context,
         )
     )

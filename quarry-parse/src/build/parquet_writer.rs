@@ -176,6 +176,7 @@ pub fn write_oa_work_topics(topics: &[OaTopic], path: &Path) -> Result<usize, Bo
         Field::new("field", DataType::Utf8, true),
         Field::new("domain", DataType::Utf8, true),
         Field::new("score", DataType::Float32, true),
+        Field::new("is_primary", DataType::Boolean, false),
     ]));
 
     let batch = RecordBatch::try_new(schema, vec![
@@ -186,6 +187,7 @@ pub fn write_oa_work_topics(topics: &[OaTopic], path: &Path) -> Result<usize, Bo
         Arc::new(StringArray::from_iter(topics.iter().map(|t| t.field.as_deref()))),
         Arc::new(StringArray::from_iter(topics.iter().map(|t| t.domain.as_deref()))),
         Arc::new(Float32Array::from_iter(topics.iter().map(|t| t.score))),
+        Arc::new(BooleanArray::from(topics.iter().map(|t| t.is_primary).collect::<Vec<_>>())),
     ])?;
 
     write_batch(path, &batch)

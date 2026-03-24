@@ -26,9 +26,12 @@ def run(
     if stdout.strip():
         import json
 
-        stats = json.loads(stdout)
-        for k, v in stats.items():
-            context.log.info(f"  {k}: {v}")
+        try:
+            stats = json.loads(stdout)
+            for k, v in stats.items():
+                context.log.info(f"  {k}: {v}")
+        except json.JSONDecodeError:
+            pass
 
 
 def run_parse(args: list[str], context: AssetExecutionContext) -> None:
