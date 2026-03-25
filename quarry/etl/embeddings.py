@@ -12,8 +12,6 @@ import time
 try:
     import blake3
     import pyarrow.ipc
-
-    import quarry_core
 except ImportError:
     raise ImportError("pip install quarry[elt]") from None
 
@@ -90,13 +88,6 @@ def run(batch_size: int = 5000, limit: int | None = None):
             }
             for i in range(len(batch))
         ]
-
-        # Batch normalize via Rust (regex + rayon parallel)
-        titles = quarry_core.normalize_texts([w["title"] for w in works])
-        abstracts = quarry_core.normalize_texts([w["abstract"] for w in works])
-        for w, t, a in zip(works, titles, abstracts):
-            w["title"] = t
-            w["abstract"] = a
 
         hashes = {w["work_id"]: content_hash(w["title"], w["abstract"]) for w in works}
 

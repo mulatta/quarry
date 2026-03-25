@@ -26,34 +26,34 @@ ENGINE = MergeTree()
 ORDER BY work_id
 AS
 SELECT
-    w.work_id,
-    w.work_id_int,
-    w.tier,
-    w.pmid,
-    w.doi,
-    w.title,
-    w.abstract,
-    w.pub_year,
-    w.pub_date,
-    w.type,
-    w.cited_by_count,
-    w.host_venue,
-    w.oa_status,
-    w.oa_url,
-    w.is_retracted,
-    w.updated_date,
+    w.work_id       AS work_id,
+    w.work_id_int   AS work_id_int,
+    w.tier          AS tier,
+    w.pmid          AS pmid,
+    w.doi           AS doi,
+    w.title         AS title,
+    w.abstract      AS abstract,
+    w.pub_year      AS pub_year,
+    w.pub_date      AS pub_date,
+    w.type          AS type,
+    w.cited_by_count AS cited_by_count,
+    w.host_venue    AS host_venue,
+    w.oa_status     AS oa_status,
+    w.oa_url        AS oa_url,
+    w.is_retracted  AS is_retracted,
+    w.updated_date  AS updated_date,
     /* PubMed enrichment */
     p.journal_abbr  AS pm_journal_abbr,
     p.country       AS pm_country,
     p.medline_status AS pm_medline_status,
-    p.pub_type      AS pm_pub_type,
+    concat('{', arrayStringConcat(p.pub_type, ','), '}') AS pm_pub_type,
     p.created_date  AS pm_created_date,
     p.revised_date  AS pm_revised_date,
     p.indexed_date  AS pm_indexed_date,
     /* iCite enrichment */
     i.relative_citation_ratio AS rcr,
-    i.nih_percentile,
-    i.apt,
+    i.nih_percentile AS nih_percentile,
+    i.apt           AS apt,
     if(i.is_clinical = 'Yes', true, false) AS is_clinical
 FROM oa_works w
 LEFT JOIN pm_papers p ON w.pmid = p.pmid AND w.pmid IS NOT NULL
@@ -66,37 +66,37 @@ ENGINE = MergeTree()
 ORDER BY pmid
 AS
 SELECT
-    p.pmid,
-    p.doi,
-    p.pmc_id,
-    p.title,
-    p.abstract,
-    p.pub_year,
-    p.pub_date,
-    p.journal_title,
-    p.journal_issn,
-    p.journal_abbr,
-    p.volume,
-    p.issue,
-    p.pages,
-    p.language,
-    p.pub_type,
-    p.country,
-    p.medline_status,
-    p.created_date,
-    p.revised_date,
-    p.indexed_date,
-    p.is_deleted,
-    p.deleted_date,
+    p.pmid          AS pmid,
+    p.doi           AS doi,
+    p.pmc_id        AS pmc_id,
+    p.title         AS title,
+    p.abstract      AS abstract,
+    p.pub_year      AS pub_year,
+    p.pub_date      AS pub_date,
+    p.journal_title AS journal_title,
+    p.journal_issn  AS journal_issn,
+    p.journal_abbr  AS journal_abbr,
+    p.volume        AS volume,
+    p.issue         AS issue,
+    p.pages         AS pages,
+    p.language      AS language,
+    concat('{', arrayStringConcat(p.pub_type, ','), '}') AS pub_type,
+    p.country       AS country,
+    p.medline_status AS medline_status,
+    p.created_date  AS created_date,
+    p.revised_date  AS revised_date,
+    p.indexed_date  AS indexed_date,
+    p.is_deleted    AS is_deleted,
+    p.deleted_date  AS deleted_date,
     /* iCite enrichment */
     i.relative_citation_ratio AS rcr,
-    i.nih_percentile,
-    i.apt,
+    i.nih_percentile AS nih_percentile,
+    i.apt           AS apt,
     if(i.is_clinical = 'Yes', true, false) AS is_clinical,
-    i.human,
-    i.animal,
-    i.molecular_cellular,
-    i.field_citation_rate
+    i.human         AS human,
+    i.animal        AS animal,
+    i.molecular_cellular AS molecular_cellular,
+    i.field_citation_rate AS field_citation_rate
 FROM pm_papers p
 LEFT JOIN icite_raw i ON p.pmid = i.pmid;
 
@@ -107,12 +107,12 @@ ENGINE = MergeTree()
 ORDER BY (work_id, descriptor_ui)
 AS
 SELECT
-    c.work_id,
-    m.descriptor_ui,
-    m.descriptor_name,
-    m.qualifier_ui,
-    m.qualifier_name,
-    m.is_major_topic
+    c.work_id           AS work_id,
+    m.descriptor_ui     AS descriptor_ui,
+    m.descriptor_name   AS descriptor_name,
+    m.qualifier_ui      AS qualifier_ui,
+    m.qualifier_name    AS qualifier_name,
+    m.is_major_topic    AS is_major_topic
 FROM pm_mesh_headings m
 INNER JOIN oa_id_crosswalk c ON m.pmid = c.pmid;
 
