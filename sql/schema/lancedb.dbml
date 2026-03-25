@@ -1,0 +1,25 @@
+// Quarry LanceDB schema — vector search database
+// Source: quarry/store/lance.py
+
+Project quarry_lance {
+  database_type: 'LanceDB'
+  Note: 'Embedded vector DB for ANN + BM25 hybrid search. Populated by paper_embeddings asset.'
+}
+
+Table papers {
+  work_id string [pk, note: 'OpenAlex work ID (e.g. W12345)']
+  content_hash "binary(32)" [note: 'blake3(title + abstract) for change detection']
+  title string
+  abstract string
+  vec_retrieval "list<float32>[256]" [note: 'jina-v5 nano, retrieval LoRA, matryoshka dim=256']
+  vec_cluster "list<float32>[256]" [note: 'jina-v5 nano, clustering LoRA, matryoshka dim=256']
+
+  Note: '''
+    Indexes:
+    - FTS (BM25): title, abstract
+    - IVF_PQ (cosine): vec_retrieval
+    - IVF_PQ (cosine): vec_cluster
+
+    Only T1+T2 works (those with abstract) are indexed.
+  '''
+}
