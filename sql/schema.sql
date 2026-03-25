@@ -164,6 +164,7 @@ CREATE TABLE IF NOT EXISTS id_crosswalk (
 );
 
 CREATE INDEX IF NOT EXISTS idx_works_pmid ON works(pmid);
+CREATE INDEX IF NOT EXISTS idx_works_doi ON works(doi);
 CREATE INDEX IF NOT EXISTS idx_works_tier ON works(tier);
 CREATE INDEX IF NOT EXISTS idx_works_pub_year ON works(pub_year);
 CREATE INDEX IF NOT EXISTS idx_work_authors_wid ON work_authors(work_id);
