@@ -11,14 +11,14 @@ from dagster import (
     asset,
 )
 
-from quarry.assets.load import ch_transform
+from quarry.assets.load import parquet_export
 from quarry.config import settings
 from quarry.etl.embeddings import run as run_embeddings
 
 
 @asset(
     group_name="search",
-    deps=[ch_transform],
+    deps=[parquet_export],
     description="Encode works (blake3 change detection) → LanceDB vectors + FTS index.",
     kinds={"lancedb", "python", "gpu"},
 )

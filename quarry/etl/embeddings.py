@@ -1,17 +1,17 @@
-"""Batch-encode papers from CH → LanceDB with blake3 content caching.
+"""Batch-encode papers from Parquet → LanceDB with blake3 content caching.
 
-Reads works from CH via ArrowStream pipe (T1+T2 filter in SQL),
-skips unchanged (blake3 match), encodes new/modified papers with jina-v5 nano,
-upserts to LanceDB.
+Reads works from Parquet via PyArrow C++ engine (column pruning + predicate
+pushdown), skips unchanged (blake3 match), encodes new/modified papers with
+jina-v5 nano, upserts to LanceDB.
 """
 
 import logging
-import subprocess
 import time
+from pathlib import Path
 
 try:
     import blake3
-    import pyarrow.ipc
+    import pyarrow.parquet as pq
 except ImportError:
     raise ImportError("pip install quarry[elt]") from None
 
@@ -21,41 +21,39 @@ from quarry.store.lance import LanceStore
 
 log = logging.getLogger(__name__)
 
-_WORKS_QUERY = (
-    "SELECT work_id, title, abstract FROM works_export "
-    "WHERE tier IN ('t1', 't2') "
-    "AND abstract IS NOT NULL AND abstract != '' AND title != ''"
-)
-
 
 def content_hash(title: str, abstract: str) -> bytes:
     """blake3 hash of normalized title + abstract for change detection."""
     return blake3.blake3(f"{title}\n{abstract}".encode()).digest()
 
 
-def _ch_arrow_reader() -> tuple[subprocess.Popen, pyarrow.ipc.RecordBatchStreamReader]:
-    """Open CH ArrowStream pipe for works (T1+T2 with abstract)."""
-    cmd = [
-        "clickhouse-client",
-        "--host",
-        settings.ch_host,
-        "--port",
-        str(settings.ch_port),
-        "--database",
-        settings.ch_database,
-        "--receive_timeout",
-        "7200",
-        "--send_timeout",
-        "7200",
-        "--query",
-        _WORKS_QUERY,
-        "--format",
-        "ArrowStream",
-    ]
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    assert proc.stdout is not None
-    reader = pyarrow.ipc.open_stream(proc.stdout)
-    return proc, reader
+def _parquet_batches(batch_size: int = 5000):
+    """Yield dicts from works Parquet. C++ engine, column pruning, predicate pushdown."""
+    parquet_path = Path(settings.parquet_dir) / "works.parquet"
+    table = pq.read_table(
+        parquet_path,
+        columns=["work_id", "title", "abstract", "tier"],
+        filters=[
+            ("tier", "in", ["t1", "t2"]),
+            ("abstract", "is_valid"),
+            ("title", "is_valid"),
+        ],
+    )
+    # Drop tier column after filtering — not needed downstream
+    table = table.drop("tier")
+    for batch in table.to_batches(max_chunksize=batch_size):
+        if len(batch) == 0:
+            continue
+        d = batch.to_pydict()
+        yield [
+            {
+                "work_id": d["work_id"][i],
+                "title": d["title"][i],
+                "abstract": d["abstract"][i],
+            }
+            for i in range(len(d["work_id"]))
+            if d["title"][i] and d["abstract"][i]
+        ]
 
 
 def run(batch_size: int = 5000, limit: int | None = None):
@@ -69,25 +67,13 @@ def run(batch_size: int = 5000, limit: int | None = None):
 
     encoder = JinaEncoder(dim=256)
 
-    # Stream from CH via ArrowStream (memory-bounded, batch at a time)
-    proc, reader = _ch_arrow_reader()
-
     total_encoded = 0
     total_skipped = 0
     batch_num = 0
 
-    for batch in reader:
-        if len(batch) == 0:
+    for works in _parquet_batches(batch_size):
+        if not works:
             continue
-
-        works = [
-            {
-                "work_id": batch.column("work_id")[i].as_py(),
-                "title": batch.column("title")[i].as_py(),
-                "abstract": batch.column("abstract")[i].as_py(),
-            }
-            for i in range(len(batch))
-        ]
 
         hashes = {w["work_id"]: content_hash(w["title"], w["abstract"]) for w in works}
 
@@ -152,13 +138,6 @@ def run(batch_size: int = 5000, limit: int | None = None):
             break
 
     encoder.unload()
-
-    # Check CH process exit
-    proc.wait()
-    if proc.returncode != 0:
-        assert proc.stderr is not None
-        err = proc.stderr.read().decode().strip()
-        log.error("CH query failed: %s", err)
 
     log.info("Done: encoded=%d, skipped=%d", total_encoded, total_skipped)
 
