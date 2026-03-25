@@ -1,11 +1,11 @@
-"""ELT pipeline assets: parse → CH load → CH transform → serve.
+"""ELT pipeline assets: parse → CH load → CH transform → parquet → serve.
 
 Asset graph:
   oa_sync ──→ oa_parse ──────────┐
                                  │
-  pm_sync ──→ pm_parse ──────────┼──→ ch_load ──→ ch_transform ──┬──→ pg_load
-                                 │                               ├──→ paper_embeddings (CH pipe)
-  mesh_sync ──→ mesh_stage ──────┤                               └──→ csr_graph (CH pipe)
+  pm_sync ──→ pm_parse ──────────┼──→ ch_load ──→ ch_transform ──→ parquet_export ──┬──→ pg_load
+                                 │                                                  ├──→ paper_embeddings
+  mesh_sync ──→ mesh_stage ──────┤                                                  └──→ csr_graph
                                  │
   icite_sync ────────────────────┘
 
@@ -15,6 +15,8 @@ DO NOT use `from __future__ import annotations` here — Dagster inspects types 
 import re
 import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 
 from dagster import (
     AssetExecutionContext,
@@ -78,34 +80,6 @@ def _psql(sql: str, context: AssetExecutionContext, label: str | None = None) ->
         context,
         label=label or f"[PG] {sql}",
     )
-
-
-def _ch_to_pg(
-    ch_table: str,
-    pg_table: str,
-    pg_columns: str,
-    context: AssetExecutionContext,
-) -> tuple[str, subprocess.Popen, subprocess.Popen]:
-    """Pipe CH query output (TabSeparated) to PG COPY FROM STDIN.
-
-    Returns (pg_table, ch_proc, pg_proc) so caller can check both exit codes.
-    """
-    ch_query = f"SELECT {pg_columns} FROM {ch_table}"
-    ch_cmd = _ch_client_cmd() + ["--query", ch_query, "--format", "TabSeparated"]
-    pg_cmd = [
-        "psql",
-        settings.pg_conninfo,
-        "-c",
-        f"COPY {pg_table} ({pg_columns}) FROM STDIN",
-    ]
-    context.log.info(f"[PG] pipe: {ch_table} → {pg_table}")
-    ch_proc = subprocess.Popen(
-        ch_cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE
-    )
-    pg_proc = subprocess.Popen(pg_cmd, stdin=ch_proc.stdout, stderr=subprocess.PIPE)
-    assert ch_proc.stdout is not None
-    ch_proc.stdout.close()
-    return pg_table, ch_proc, pg_proc
 
 
 # ── Parse assets ──
@@ -341,14 +315,170 @@ def ch_transform(context: AssetExecutionContext) -> MaterializeResult:
     )
 
 
+# ── Parquet export ──
+
+# CH table → (pg_table, columns) for Parquet export.
+# Column list matches PG schema exactly; CH export SQL pre-formats types
+# (e.g. pub_type Array → '{a,b}' PG text[] literal).
+_EXPORT_TABLES: list[tuple[str, str, str]] = [
+    # (ch_table, pg_table, columns)
+    (
+        "works_export",
+        "works",
+        "work_id, work_id_int, tier, pmid, doi, title, abstract, "
+        "pub_year, pub_date, type, cited_by_count, host_venue, oa_status, oa_url, "
+        "is_retracted, updated_date, pm_journal_abbr, pm_country, pm_medline_status, "
+        "pm_pub_type, pm_created_date, pm_revised_date, pm_indexed_date, "
+        "rcr, nih_percentile, apt, is_clinical",
+    ),
+    ("oa_work_citations", "work_citations", "citing_id, cited_id"),
+    (
+        "papers_export",
+        "papers",
+        "pmid, doi, pmc_id, title, abstract, pub_year, pub_date, "
+        "journal_title, journal_issn, journal_abbr, volume, issue, pages, "
+        "language, pub_type, country, medline_status, created_date, revised_date, "
+        "indexed_date, is_deleted, deleted_date, rcr, nih_percentile, apt, "
+        "is_clinical, human, animal, molecular_cellular, field_citation_rate",
+    ),
+    (
+        "oa_work_authors",
+        "work_authors",
+        "work_id, author_position, display_name, orcid, "
+        "institution_name, institution_ror, raw_affiliation",
+    ),
+    (
+        "oa_work_topics",
+        "work_topics",
+        "work_id, topic_id, topic_name, subfield, field, domain, score, is_primary",
+    ),
+    (
+        "pm_authors",
+        "authors",
+        "pmid, author_position, last_name, fore_name, initials, "
+        "orcid, affiliation, is_collective",
+    ),
+    (
+        "pm_mesh_headings",
+        "mesh_headings",
+        "pmid, descriptor_ui, descriptor_name, qualifier_ui, "
+        "qualifier_name, is_major_topic",
+    ),
+    ("pm_grants", "grants", "pmid, grant_id, acronym, agency, country"),
+    (
+        "pm_chemicals",
+        "chemicals",
+        "pmid, registry_number, substance_ui, substance_name",
+    ),
+    ("oa_id_crosswalk", "id_crosswalk", "work_id, pmid"),
+    ("pm_mesh_tree", "mesh_tree", "descriptor_ui, descriptor_name, tree_number"),
+    (
+        "work_mesh_export",
+        "work_mesh",
+        "work_id, descriptor_ui, descriptor_name, qualifier_ui, "
+        "qualifier_name, is_major_topic",
+    ),
+    ("cited_by_clin_export", "cited_by_clin", "pmid, citing_pmid"),
+]
+
+
+def _ch_export_one(
+    ch_table: str, columns: str, out_path: Path
+) -> subprocess.CompletedProcess:
+    """Export one CH table to Parquet file via subprocess."""
+    query = f"SELECT {columns} FROM {ch_table}"
+    cmd = _ch_client_cmd() + ["--query", query + " FORMAT Parquet"]
+    with open(out_path, "wb") as f:
+        return subprocess.run(cmd, stdout=f, stderr=subprocess.PIPE, text=True)
+
+
+@asset(
+    group_name="export",
+    deps=[ch_transform],
+    description="CH export tables → 13 Parquet files (parallel subprocess).",
+    kinds={"clickhouse", "parquet"},
+)
+def parquet_export(context: AssetExecutionContext) -> MaterializeResult:
+    out_dir = Path(settings.parquet_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    failed: list[str] = []
+
+    def _export(ch_table: str, pg_table: str, columns: str) -> str:
+        out_path = out_dir / f"{pg_table}.parquet"
+        context.log.info(f"[Parquet] exporting {ch_table} → {out_path}")
+        result = _ch_export_one(ch_table, columns, out_path)
+        if result.returncode != 0:
+            context.log.error(f"[Parquet] {pg_table} failed: {result.stderr.strip()}")
+            raise RuntimeError(f"Parquet export failed for {pg_table}: {result.stderr}")
+        return pg_table
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = {
+            pool.submit(_export, ch, pg, cols): pg for ch, pg, cols in _EXPORT_TABLES
+        }
+        done = 0
+        for future in as_completed(futures):
+            pg_table = futures[future]
+            try:
+                future.result()
+                done += 1
+                context.log.info(
+                    f"[Parquet] {pg_table} done [{done}/{len(_EXPORT_TABLES)}]"
+                )
+            except RuntimeError:
+                failed.append(pg_table)
+
+    if failed:
+        raise RuntimeError(f"Parquet export failed for: {', '.join(failed)}")
+
+    return MaterializeResult(
+        metadata={
+            "parquet_dir": MetadataValue.path(str(out_dir)),
+            "num_tables": MetadataValue.int(len(_EXPORT_TABLES)),
+        }
+    )
+
+
 # ── PG load asset ──
+
+
+# PG text[] columns stored as '{a,b}' VARCHAR in Parquet.
+# DuckDB needs explicit conversion: strip braces → split → array.
+_TEXT_ARRAY_COLUMNS = {"pm_pub_type", "pub_type"}
+
+
+def _select_expr(columns: str) -> str:
+    """Build SELECT expression, converting '{a,b}' VARCHAR → VARCHAR[] for text[] cols."""
+    parts = []
+    for col in (c.strip() for c in columns.split(",")):
+        if col in _TEXT_ARRAY_COLUMNS:
+            parts.append(f"string_split(trim('{{}}'  FROM {col}), ',') AS {col}")
+        else:
+            parts.append(col)
+    return ", ".join(parts)
+
+
+def _duckdb_pg_load(pg_table: str, columns: str, parquet_path: Path) -> None:
+    """Insert Parquet → PG via DuckDB Python binding + postgres extension."""
+    import duckdb
+
+    select = _select_expr(columns)
+    conn = duckdb.connect()
+    conn.execute("INSTALL postgres; LOAD postgres;")
+    conn.execute(f"ATTACH '{settings.pg_conninfo}' AS pg (TYPE postgres)")
+    conn.execute(
+        f"INSERT INTO pg.{pg_table} ({columns}) "
+        f"SELECT {select} FROM read_parquet('{parquet_path}')"
+    )
+    conn.close()
 
 
 @asset(
     group_name="serve",
-    deps=[ch_transform],
-    description="CH export → PG TRUNCATE + COPY + CREATE INDEX.",
-    kinds={"clickhouse", "postgres"},
+    deps=[parquet_export],
+    description="Parquet → PG via DuckDB postgres extension (sequential).",
+    kinds={"parquet", "postgres"},
 )
 def pg_load(context: AssetExecutionContext) -> MaterializeResult:
     _psql("\\i sql/drop_indexes.sql", context, label="[PG] dropping indexes")
@@ -360,178 +490,17 @@ def pg_load(context: AssetExecutionContext) -> MaterializeResult:
         label="[PG] truncating all tables",
     )
 
-    # Pipe CH export tables → PG COPY (parallel for large tables)
-    pipes: list[tuple[str, subprocess.Popen, subprocess.Popen]] = []
+    pq_dir = Path(settings.parquet_dir)
 
-    # Large tables: works, work_citations
-    pipes.append(
-        _ch_to_pg(
-            "works_export",
-            "works",
-            "work_id, work_id_int, tier, pmid, doi, title, abstract, "
-            "pub_year, pub_date, type, cited_by_count, host_venue, oa_status, oa_url, "
-            "is_retracted, updated_date, pm_journal_abbr, pm_country, pm_medline_status, "
-            "pm_pub_type, pm_created_date, pm_revised_date, pm_indexed_date, "
-            "rcr, nih_percentile, apt, is_clinical",
-            context,
-        )
-    )
-    pipes.append(
-        _ch_to_pg(
-            "oa_work_citations",
-            "work_citations",
-            "citing_id, cited_id",
-            context,
-        )
-    )
-
-    # Medium tables
-    pipes.append(
-        _ch_to_pg(
-            "papers_export",
-            "papers",
-            "pmid, doi, pmc_id, title, abstract, pub_year, pub_date, "
-            "journal_title, journal_issn, journal_abbr, volume, issue, pages, "
-            "language, pub_type, country, medline_status, created_date, revised_date, "
-            "indexed_date, is_deleted, deleted_date, rcr, nih_percentile, apt, "
-            "is_clinical, human, animal, molecular_cellular, field_citation_rate",
-            context,
-        )
-    )
-    pipes.append(
-        _ch_to_pg(
-            "oa_work_authors",
-            "work_authors",
-            "work_id, author_position, display_name, orcid, "
-            "institution_name, institution_ror, raw_affiliation",
-            context,
-        )
-    )
-    pipes.append(
-        _ch_to_pg(
-            "oa_work_topics",
-            "work_topics",
-            "work_id, topic_id, topic_name, subfield, field, domain, score, is_primary",
-            context,
-        )
-    )
-    pipes.append(
-        _ch_to_pg(
-            "pm_authors",
-            "authors",
-            "pmid, author_position, last_name, fore_name, initials, "
-            "orcid, affiliation, is_collective",
-            context,
-        )
-    )
-    pipes.append(
-        _ch_to_pg(
-            "pm_mesh_headings",
-            "mesh_headings",
-            "pmid, descriptor_ui, descriptor_name, qualifier_ui, "
-            "qualifier_name, is_major_topic",
-            context,
-        )
-    )
-    pipes.append(
-        _ch_to_pg(
-            "pm_grants",
-            "grants",
-            "pmid, grant_id, acronym, agency, country",
-            context,
-        )
-    )
-    pipes.append(
-        _ch_to_pg(
-            "pm_chemicals",
-            "chemicals",
-            "pmid, registry_number, substance_ui, substance_name",
-            context,
-        )
-    )
-    pipes.append(
-        _ch_to_pg(
-            "oa_id_crosswalk",
-            "id_crosswalk",
-            "work_id, pmid",
-            context,
-        )
-    )
-    pipes.append(
-        _ch_to_pg(
-            "pm_mesh_tree",
-            "mesh_tree",
-            "descriptor_ui, descriptor_name, tree_number",
-            context,
-        )
-    )
-    pipes.append(
-        _ch_to_pg(
-            "work_mesh_export",
-            "work_mesh",
-            "work_id, descriptor_ui, descriptor_name, qualifier_ui, "
-            "qualifier_name, is_major_topic",
-            context,
-        )
-    )
-    pipes.append(
-        _ch_to_pg(
-            "cited_by_clin_export",
-            "cited_by_clin",
-            "pmid, citing_pmid",
-            context,
-        )
-    )
-
-    n = len(pipes)
-    done = 0
-    failed: list[str] = []
-    remaining: list[tuple[str, subprocess.Popen, subprocess.Popen]] = list(pipes)
-    context.log.info(f"[PG] waiting for {n} pipes")
-    while remaining:
-        for name, ch_proc, pg_proc in remaining:
-            if pg_proc.poll() is not None:
-                done += 1
-                ch_rc = ch_proc.wait()
-                # Log stderr from both processes
-                ch_err = ch_proc.stderr.read().strip() if ch_proc.stderr else ""
-                pg_err = pg_proc.stderr.read().strip() if pg_proc.stderr else ""
-                if ch_rc != 0:
-                    context.log.error(
-                        f"[PG] {name}: CH export failed (exit {ch_rc}): {ch_err}"
-                    )
-                    failed.append(name)
-                elif pg_proc.returncode != 0:
-                    context.log.error(
-                        f"[PG] {name}: COPY failed (exit {pg_proc.returncode}): {pg_err}"
-                    )
-                    failed.append(name)
-                else:
-                    context.log.info(f"[PG] {name} done [{done}/{n}]")
-        remaining = [(nm, ch, pg) for nm, ch, pg in remaining if pg.poll() is None]
-        if remaining:
-            time.sleep(1)
-    if failed:
-        raise RuntimeError(f"PG load failed for: {', '.join(failed)}")
+    for i, (_, pg_table, columns) in enumerate(_EXPORT_TABLES, 1):
+        pq_path = pq_dir / f"{pg_table}.parquet"
+        context.log.info(f"[PG] loading {pg_table} from {pq_path}")
+        _duckdb_pg_load(pg_table, columns, pq_path)
+        context.log.info(f"[PG] {pg_table} done [{i}/{len(_EXPORT_TABLES)}]")
 
     _psql("\\i sql/schema.sql", context, label="[PG] recreating indexes")
 
-    pg_tables = [
-        "papers",
-        "authors",
-        "mesh_headings",
-        "grants",
-        "chemicals",
-        "cited_by_clin",
-        "works",
-        "work_authors",
-        "work_topics",
-        "work_mesh",
-        "work_citations",
-        "id_crosswalk",
-        "mesh_tree",
-    ]
-    for t in pg_tables:
+    for _, t, _ in _EXPORT_TABLES:
         _psql(f"VACUUM ANALYZE {t}", context, label=f"[PG] VACUUM ANALYZE {t}")
 
     return MaterializeResult(
