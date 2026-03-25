@@ -12,6 +12,9 @@ __pycache__/
 # Rust
 target/
 
+# Environment
+.env
+
 # Dagster
 .dg-home/
 !.dg-home/dagster.yaml
