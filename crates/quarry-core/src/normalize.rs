@@ -20,7 +20,7 @@ static HTML_TAG: LazyLock<Regex> = LazyLock::new(|| {
 static MULTI_SP: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+").unwrap());
 
 /// Strip HTML tags, collapse whitespace, trim.
-fn normalize_one(text: &str) -> String {
+pub fn normalize_one(text: &str) -> String {
     let text = HTML_TAG.replace_all(text, " ");
     let text = MULTI_SP.replace_all(&text, " ");
     text.trim().to_string()

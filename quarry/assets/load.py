@@ -52,6 +52,10 @@ def _ch_client_cmd() -> list[str]:
         "0",
         "--max_partition_size_to_drop",
         "0",
+        # Parquet files live in Hive-partitioned dirs (updated_date=.../) but
+        # the column already exists in the file — disable auto-detection.
+        "--use_hive_partitioning",
+        "0",
     ]
 
 
@@ -95,8 +99,10 @@ def _ch_to_pg(
         f"COPY {pg_table} ({pg_columns}) FROM STDIN",
     ]
     context.log.info(f"[PG] pipe: {ch_table} → {pg_table}")
-    ch_proc = subprocess.Popen(ch_cmd, stdout=subprocess.PIPE)
-    pg_proc = subprocess.Popen(pg_cmd, stdin=ch_proc.stdout)
+    ch_proc = subprocess.Popen(
+        ch_cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    )
+    pg_proc = subprocess.Popen(pg_cmd, stdin=ch_proc.stdout, stderr=subprocess.PIPE)
     assert ch_proc.stdout is not None
     ch_proc.stdout.close()
     return pg_table, ch_proc, pg_proc
@@ -165,7 +171,11 @@ def _ch_insert_async(
     cmd = _ch_client_cmd() + ["--query", query]
     context.log.info(f"[CH] loading {ch_table}")
     return subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+        cmd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
     )
 
 
@@ -483,12 +493,17 @@ def pg_load(context: AssetExecutionContext) -> MaterializeResult:
             if pg_proc.poll() is not None:
                 done += 1
                 ch_rc = ch_proc.wait()
+                # Log stderr from both processes
+                ch_err = ch_proc.stderr.read().strip() if ch_proc.stderr else ""
+                pg_err = pg_proc.stderr.read().strip() if pg_proc.stderr else ""
                 if ch_rc != 0:
-                    context.log.error(f"[PG] {name}: CH export failed (exit {ch_rc})")
+                    context.log.error(
+                        f"[PG] {name}: CH export failed (exit {ch_rc}): {ch_err}"
+                    )
                     failed.append(name)
                 elif pg_proc.returncode != 0:
                     context.log.error(
-                        f"[PG] {name}: COPY failed (exit {pg_proc.returncode})"
+                        f"[PG] {name}: COPY failed (exit {pg_proc.returncode}): {pg_err}"
                     )
                     failed.append(name)
                 else:
@@ -516,8 +531,8 @@ def pg_load(context: AssetExecutionContext) -> MaterializeResult:
         "id_crosswalk",
         "mesh_tree",
     ]
-    vacuum_sql = "; ".join(f"VACUUM ANALYZE {t}" for t in pg_tables)
-    _psql(vacuum_sql, context, label=f"[PG] VACUUM ANALYZE {len(pg_tables)} tables")
+    for t in pg_tables:
+        _psql(f"VACUUM ANALYZE {t}", context, label=f"[PG] VACUUM ANALYZE {t}")
 
     return MaterializeResult(
         metadata={"status": MetadataValue.text("ok")},

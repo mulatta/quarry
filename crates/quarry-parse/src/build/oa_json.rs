@@ -6,7 +6,7 @@
 
 use serde::Deserialize;
 
-use quarry_core::abstract_recon;
+use quarry_core::{abstract_recon, normalize};
 
 // ── URL prefixes (stripped during transformation) ──
 
@@ -227,14 +227,15 @@ pub fn parse_line(
         (false, false) => Tier::T4, // neither: graph node only
     };
 
-    // Abstract reconstruction — T1/T2 only (tiers with abstract)
+    // Abstract reconstruction + normalization — T1/T2 only (tiers with abstract)
+    // HTML strip + whitespace collapse here so downstream (CH/PG/embeddings) gets clean text
     let abstract_text = if tier <= Tier::T2 {
         raw.abstract_inverted_index
             .as_ref()
             .and_then(|v| {
                 let json_str = sonic_rs::to_string(v).ok()?;
                 let text = abstract_recon::reconstruct_one(&json_str);
-                if text.is_empty() { None } else { Some(text) }
+                if text.is_empty() { None } else { Some(normalize::normalize_one(&text)) }
             })
     } else {
         None
@@ -423,6 +424,35 @@ mod tests {
         assert_eq!(result.citations.len(), 2);
         assert!(result.crosswalk.is_some());
         assert_eq!(result.crosswalk.unwrap().pmid, 99999);
+    }
+
+    #[test]
+    fn test_abstract_html_stripped() {
+        let json = r#"{
+            "id": "https://openalex.org/W11111",
+            "ids": {"pmid": "https://pubmed.ncbi.nlm.nih.gov/88888"},
+            "title": "HTML test",
+            "abstract_inverted_index": {"the": [0], "<em>important</em>": [1], "result": [2], "(p": [3], "<": [4], "0.05)": [5]}
+        }"#;
+
+        let result = parse_line(json).unwrap();
+        let abs = result.work.abstract_text.as_deref().unwrap();
+        // HTML tags stripped, math inequality preserved
+        assert_eq!(abs, "the important result (p < 0.05)");
+    }
+
+    #[test]
+    fn test_abstract_whitespace_collapsed() {
+        let json = r#"{
+            "id": "https://openalex.org/W22222",
+            "title": "Whitespace test",
+            "abstract_inverted_index": {"hello": [0], "world": [2]}
+        }"#;
+
+        let result = parse_line(json).unwrap();
+        let abs = result.work.abstract_text.as_deref().unwrap();
+        // Gap at position 1 produces extra space, collapsed to single space
+        assert!(!abs.contains("  "), "should not have double spaces: {abs}");
     }
 
     #[test]
