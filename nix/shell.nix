@@ -83,7 +83,10 @@ in
       devShells.default = pkgs.mkShell {
         packages = (shellPackages pkgs) ++ [ self'.packages.quarry-parse ];
         env = shellEnv // {
-          LD_LIBRARY_PATH = "${pkgs.stdenv.cc.cc.lib}/lib";
+          LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
+            pkgs.stdenv.cc.cc.lib
+            "${pkgs.addDriverRunpath.driverLink}"
+          ];
         };
         shellHook = ''
           uv sync --all-extras --quiet

@@ -31,7 +31,7 @@
       # crane — standalone Rust binary build (no nixpkgs input of its own)
       craneLib = inputs.crane.mkLib pkgs;
 
-      # Source: repo root filtered to quarry-parse (quarry-parse crate) + quarry-core (path dep)
+      # Source: repo root filtered to crates/quarry-parse + crates/quarry-core (path dep)
       parseSrc = pkgs.lib.cleanSourceWith {
         src = ../.;
         filter =
@@ -39,8 +39,8 @@
           let
             rel = pkgs.lib.removePrefix (toString ../.) path;
           in
-          pkgs.lib.hasPrefix "/quarry-parse" rel
-          || pkgs.lib.hasPrefix "/quarry-core" rel
+          pkgs.lib.hasPrefix "/crates/quarry-parse" rel
+          || pkgs.lib.hasPrefix "/crates/quarry-core" rel
           || (craneLib.filterCargoSources path type);
       };
     in
@@ -49,14 +49,14 @@
         # Python extension module (cdylib) — normalize + abstract_recon
         quarry-core = mkMaturinPackage {
           pname = "quarry-core";
-          src = ../quarry-core;
-          lockFile = ../quarry-core/Cargo.lock;
+          src = ../crates/quarry-core;
+          lockFile = ../crates/quarry-core/Cargo.lock;
         };
 
         quarry-graph = mkMaturinPackage {
           pname = "quarry-graph";
-          src = ../quarry-graph;
-          lockFile = ../quarry-graph/Cargo.lock;
+          src = ../crates/quarry-graph;
+          lockFile = ../crates/quarry-graph/Cargo.lock;
         };
 
         # Standalone Rust binary — parse CLI (local files → Parquet)
@@ -65,13 +65,13 @@
           version = "0.1.0";
           src = parseSrc;
 
-          cargoLock = ../quarry-parse/Cargo.lock;
+          cargoLock = ../crates/quarry-parse/Cargo.lock;
           cargoExtraArgs = "--bin quarry-parse";
           nativeBuildInputs = [ pkgs.cmake ];
 
-          # Build from quarry-parse subdirectory (crate lives here)
+          # Build from crates/quarry-parse subdirectory (crate lives here)
           postUnpack = ''
-            cd $sourceRoot/quarry-parse
+            cd $sourceRoot/crates/quarry-parse
             export sourceRoot=$(pwd)
           '';
 
