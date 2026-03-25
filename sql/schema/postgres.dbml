@@ -1,0 +1,215 @@
+// Quarry PostgreSQL schema — serving database
+// Source: sql/schema.sql
+
+Project quarry_pg {
+  database_type: 'PostgreSQL'
+  Note: 'Serving DB for quarry. Populated by CH → PG COPY pipe (pg_load asset).'
+}
+
+// ── PubMed tables ──
+
+Table papers {
+  pmid integer [pk]
+  doi text
+  pmc_id text
+  title text
+  abstract text
+  pub_year smallint
+  pub_date date
+  journal_title text
+  journal_issn text
+  journal_abbr text
+  volume text
+  issue text
+  pages text
+  language text
+  pub_type "text[]"
+  country text
+  medline_status text
+  created_date date
+  revised_date date
+  indexed_date date
+  is_deleted boolean [default: false]
+  deleted_date date
+  rcr real [note: 'iCite relative citation ratio']
+  nih_percentile real
+  apt real [note: 'iCite approximate potential to translate']
+  is_clinical boolean
+  human real
+  animal real
+  molecular_cellular real
+  field_citation_rate real
+}
+
+Table authors {
+  pmid integer [not null, ref: > papers.pmid]
+  author_position smallint
+  last_name text
+  fore_name text
+  initials text
+  orcid text
+  affiliation text
+  is_collective boolean [default: false]
+
+  indexes {
+    pmid [name: 'idx_authors_pmid']
+  }
+}
+
+Table mesh_headings {
+  pmid integer [not null, ref: > papers.pmid]
+  descriptor_ui text [not null, ref: > mesh_tree.descriptor_ui]
+  descriptor_name text [not null]
+  qualifier_ui text
+  qualifier_name text
+  is_major_topic boolean [default: false]
+
+  indexes {
+    pmid [name: 'idx_mesh_pmid']
+    descriptor_ui [name: 'idx_mesh_descriptor']
+  }
+}
+
+Table mesh_tree {
+  descriptor_ui text [not null]
+  descriptor_name text [not null]
+  tree_number text [not null]
+
+  indexes {
+    (descriptor_ui, tree_number) [pk]
+  }
+}
+
+Table grants {
+  pmid integer [not null, ref: > papers.pmid]
+  grant_id text
+  acronym text
+  agency text
+  country text
+
+  indexes {
+    pmid [name: 'idx_grants_pmid']
+  }
+}
+
+Table chemicals {
+  pmid integer [not null, ref: > papers.pmid]
+  registry_number text
+  substance_ui text
+  substance_name text
+
+  indexes {
+    pmid [name: 'idx_chemicals_pmid']
+  }
+}
+
+Table cited_by_clin {
+  pmid integer [not null, ref: > papers.pmid]
+  citing_pmid integer [not null]
+
+  indexes {
+    pmid [name: 'idx_cbc_pmid']
+    citing_pmid [name: 'idx_cbc_citing']
+  }
+}
+
+// ── OpenAlex tables ──
+
+Table works {
+  work_id text [pk]
+  work_id_int bigint [not null]
+  tier text [not null, note: 't1/t2/t3/t4']
+  pmid integer [ref: > papers.pmid]
+  doi text
+  title text
+  abstract text
+  pub_year smallint
+  pub_date date
+  type text
+  cited_by_count integer
+  host_venue text
+  oa_status text
+  oa_url text
+  rcr real [note: 'iCite enrichment via CH JOIN']
+  nih_percentile real
+  apt real
+  is_clinical boolean
+  is_retracted boolean [default: false]
+  updated_date date
+  pm_journal_abbr text [note: 'PubMed enrichment via CH JOIN']
+  pm_country text
+  pm_medline_status text
+  pm_pub_type "text[]"
+  pm_created_date date
+  pm_revised_date date
+  pm_indexed_date date
+
+  indexes {
+    pmid [name: 'idx_works_pmid']
+    doi [name: 'idx_works_doi']
+    tier [name: 'idx_works_tier']
+    pub_year [name: 'idx_works_pub_year']
+  }
+}
+
+Table work_authors {
+  work_id text [not null, ref: > works.work_id]
+  author_position smallint
+  display_name text
+  orcid text
+  institution_name text
+  institution_ror text
+  raw_affiliation text
+
+  indexes {
+    work_id [name: 'idx_work_authors_wid']
+  }
+}
+
+Table work_topics {
+  work_id text [not null, ref: > works.work_id]
+  topic_id text [not null]
+  topic_name text
+  subfield text
+  field text
+  domain text
+  score real
+  is_primary boolean [default: false]
+
+  indexes {
+    work_id [name: 'idx_work_topics_wid']
+  }
+}
+
+Table work_mesh {
+  work_id text [not null, ref: > works.work_id]
+  descriptor_ui text [not null, ref: > mesh_tree.descriptor_ui]
+  descriptor_name text [not null]
+  qualifier_ui text
+  qualifier_name text
+  is_major_topic boolean [default: false]
+
+  indexes {
+    work_id [name: 'idx_work_mesh_wid']
+    descriptor_ui [name: 'idx_work_mesh_desc']
+  }
+}
+
+Table work_citations {
+  citing_id bigint [not null]
+  cited_id bigint [not null]
+
+  indexes {
+    citing_id [name: 'idx_work_cit_citing']
+    cited_id [name: 'idx_work_cit_cited']
+  }
+}
+
+Table id_crosswalk {
+  work_id text [pk, ref: > works.work_id]
+  pmid integer [not null, ref: > papers.pmid]
+
+  indexes {
+    pmid [name: 'idx_crosswalk_pmid']
+  }
+}
