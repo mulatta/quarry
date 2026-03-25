@@ -15,6 +15,7 @@ let
       just
       postgresql_16
       clickhouse
+      duckdb
       awscli2
     ];
 

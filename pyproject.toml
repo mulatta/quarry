@@ -37,6 +37,8 @@ elt = [
     "sentence-transformers",
     "blake3",
     "httpx",
+    "boto3",
+    "duckdb",
 ]
 dev = [
     "quarry[elt]",
