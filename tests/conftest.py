@@ -38,6 +38,7 @@ _OVERRIDES = {
     "QUARRY_OA_PARQUET_DIR": str(PARSED_DIR / "oa"),
     "QUARRY_PM_PARQUET_DIR": str(PARSED_DIR / "pubmed"),
     "QUARRY_MESH_PARQUET_DIR": str(PARSED_DIR / "mesh"),
+    "QUARRY_PARQUET_DIR": str(DATA_DIR / "parquet"),
     # Test-isolated databases
     "QUARRY_CH_DATABASE": TEST_CH_DATABASE,
     "QUARRY_PG_CONNINFO": TEST_PG_CONNINFO,
