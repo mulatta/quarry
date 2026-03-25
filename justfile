@@ -5,7 +5,7 @@
 #   just sync         # uv sync — fast dev iteration
 #   just dev          # cargo debug build all crates
 #   just check        # clippy + test all
-#   just kill-dagster # stop all dagster processes
+#   just cleanup      # stop all project processes (dagster, PG, CH)
 
 # List available recipes
 default:
@@ -103,33 +103,68 @@ test: test-parse test-graph
 # Clippy + test all
 check: clippy test
 
-# ── Dagster ──
+# ── Process management ──
 
-# Kill all Dagster processes (grpc, daemon, workers)
-kill-dagster:
+# Stop all project processes (Dagster, process-compose, PG, CH)
+# Only kills processes owned by current user matching project-specific patterns.
+cleanup:
     #!/usr/bin/env bash
     set -euo pipefail
-    pids=$(pgrep -f 'dagster|dg dev' -u "$USER" 2>/dev/null || true)
-    if [ -z "$pids" ]; then
-        echo "No Dagster processes found"
+
+    # Project-specific patterns — won't match system services
+    patterns=(
+        'dagster|dg dev'                      # Dagster grpc, daemon, workers
+        'process-compose'                     # process-compose orchestrator
+        'postgres.*/tmp/quarry-pg'            # PG with quarry socket dir
+        'postgres.*\.pg-data'                 # PG with project data dir
+        'clickhouse-server.*/nix/store/'      # CH started via nix (not system pkg)
+    )
+
+    all_pids=""
+    for pat in "${patterns[@]}"; do
+        pids=$(pgrep -f "$pat" -u "$USER" 2>/dev/null || true)
+        if [ -n "$pids" ]; then
+            echo "[$pat] found: $pids"
+            all_pids="$all_pids $pids"
+        fi
+    done
+    all_pids=$(echo "$all_pids" | xargs -n1 | sort -u | xargs)
+
+    if [ -z "$all_pids" ]; then
+        echo "No project processes found"
         exit 0
     fi
-    echo "SIGTERM: $pids"
-    echo "$pids" | xargs kill 2>/dev/null || true
+
+    echo "SIGTERM: $all_pids"
+    echo "$all_pids" | xargs kill 2>/dev/null || true
+
     for i in 1 2 3 4 5; do
-        pids=$(pgrep -f 'dagster|dg dev' -u "$USER" 2>/dev/null || true)
-        [ -z "$pids" ] && break
+        remaining=""
+        for pat in "${patterns[@]}"; do
+            pids=$(pgrep -f "$pat" -u "$USER" 2>/dev/null || true)
+            [ -n "$pids" ] && remaining="$remaining $pids"
+        done
+        remaining=$(echo "$remaining" | xargs -n1 | sort -u | xargs)
+        [ -z "$remaining" ] && break
         sleep 1
     done
-    pids=$(pgrep -f 'dagster|dg dev' -u "$USER" 2>/dev/null || true)
-    if [ -n "$pids" ]; then
-        echo "SIGKILL: $pids"
-        echo "$pids" | xargs kill -9 2>/dev/null || true
+
+    if [ -n "$remaining" ]; then
+        echo "SIGKILL: $remaining"
+        echo "$remaining" | xargs kill -9 2>/dev/null || true
         sleep 1
     fi
-    pids=$(pgrep -f 'dagster|dg dev' -u "$USER" 2>/dev/null || true)
-    if [ -n "$pids" ]; then
-        echo "WARNING: still alive: $pids"
+
+    # Final check
+    still_alive=""
+    for pat in "${patterns[@]}"; do
+        pids=$(pgrep -f "$pat" -u "$USER" 2>/dev/null || true)
+        [ -n "$pids" ] && still_alive="$still_alive $pids"
+    done
+    still_alive=$(echo "$still_alive" | xargs)
+
+    if [ -n "$still_alive" ]; then
+        echo "WARNING: still alive: $still_alive"
         exit 1
     fi
-    echo "Dagster processes stopped"
+    echo "All project processes stopped"
