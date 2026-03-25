@@ -59,6 +59,14 @@ class Settings(BaseSettings):
     # iCite figshare collection ID (stable, auto-discovers latest monthly snapshot)
     icite_figshare_collection: int = 4586573
 
+    # R2 (Cloudflare)
+    r2_endpoint: str = ""
+    r2_bucket: str = "quarry-data"
+
+    # AWS Batch
+    batch_job_queue: str = "quarry-spot"
+    batch_job_definition: str = "quarry-etl"
+
     # Download
     ftp_parallel: int = 4
 
