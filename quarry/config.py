@@ -38,6 +38,9 @@ class Settings(BaseSettings):
     pm_parquet_dir: Path = _DATA_DIR / "parsed" / "pubmed"
     mesh_parquet_dir: Path = _DATA_DIR / "parsed" / "mesh"
 
+    # Parquet intermediate (CH export → downstream consumers)
+    parquet_dir: Path = _DATA_DIR / "parquet"
+
     # CSR mmap output
     csr_dir: Path = _DATA_DIR / "csr"
 
