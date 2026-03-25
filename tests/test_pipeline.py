@@ -1,8 +1,8 @@
-"""E2E pipeline test: API → raw files → quarry-parse → CH → PG.
+"""E2E pipeline test: API → raw files → quarry-parse → CH → Parquet → PG.
 
 Fetches 100 T1 works from OpenAlex/PubMed/iCite APIs, writes raw input
 files, then runs the full Dagster pipeline (parse → ch_load → ch_transform
-→ pg_load) with paths overridden to tests/data/.
+→ parquet_export → pg_load) with paths overridden to tests/data/.
 
 QUARRY_* env vars are set in conftest.py before any quarry module is imported.
 
@@ -251,6 +251,14 @@ def test_data(test_databases):
 # ── Tests ──
 
 
+class TestDefsLoad:
+    def test_definitions_resolve(self):
+        """Verify Dagster Definitions load without import/validation errors."""
+        from quarry.defs import defs
+
+        assert defs.resolve_implicit_global_asset_job_def() is not None
+
+
 class TestDataCreation:
     def test_files_exist(self, test_data):
         assert (
@@ -322,7 +330,7 @@ class TestParse:
 
 
 class TestDagsterPipeline:
-    """Full Dagster E2E: ch_load → ch_transform → pg_load.
+    """Full Dagster E2E: ch_load → ch_transform → parquet_export → pg_load.
 
     Requires: quarry-parse tests passed (parquet files exist),
     ClickHouse running on port 9001, PostgreSQL running on /tmp/quarry-pg.
@@ -344,7 +352,7 @@ class TestDagsterPipeline:
         # Ensure Dagster logs are visible in pytest output
         logging.getLogger("dagster").setLevel(logging.INFO)
 
-        job = defs.get_implicit_global_asset_job_def()
+        job = defs.resolve_implicit_global_asset_job_def()
         result = job.execute_in_process(
             asset_selection=[
                 AssetKey("oa_parse"),
@@ -352,6 +360,7 @@ class TestDagsterPipeline:
                 AssetKey("mesh_stage"),
                 AssetKey("ch_load"),
                 AssetKey("ch_transform"),
+                AssetKey("parquet_export"),
                 AssetKey("pg_load"),
             ],
         )
@@ -365,6 +374,14 @@ class TestDagsterPipeline:
                     print(f"OK: {event.step_key}")
 
         assert result.success, "Pipeline failed — see step failures above"
+
+        # Verify Parquet export created files
+        pq_dir = DATA_DIR / "parquet"
+        pq_files = list(pq_dir.glob("*.parquet")) if pq_dir.exists() else []
+        print(f"\n=== Parquet files: {len(pq_files)} ===")
+        for f in sorted(pq_files):
+            print(f"  {f.name}: {f.stat().st_size:,} bytes")
+        assert len(pq_files) == 13, f"Expected 13 parquet files, got {len(pq_files)}"
 
         # Verify PG has data
         r = subprocess.run(
