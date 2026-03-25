@@ -12,6 +12,7 @@ DROP INDEX IF EXISTS idx_chemicals_pmid;
 
 -- OpenAlex
 DROP INDEX IF EXISTS idx_works_pmid;
+DROP INDEX IF EXISTS idx_works_doi;
 DROP INDEX IF EXISTS idx_works_tier;
 DROP INDEX IF EXISTS idx_works_pub_year;
 DROP INDEX IF EXISTS idx_work_authors_wid;
