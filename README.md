@@ -51,11 +51,13 @@ icite_sync ──────────────────┘            
 ## Project Structure
 
 ```
-quarry-parse/     Rust crate: OA JSONL + PubMed XML → Parquet
-quarry-core/      Rust crate: shared utilities (abstract reconstruction)
-quarry-graph/     Rust crate: CSR citation graph (PyO3 bindings)
+crates/
+  quarry-parse/   Rust: OA JSONL + PubMed XML → Parquet (CLI binary)
+  quarry-core/    Rust: shared utilities (abstract reconstruction)
+  quarry-graph/   Rust: CSR citation graph (PyO3 bindings)
 quarry/           Python: Dagster assets, MCP server, embeddings
 sql/              Schema DDL (PG, CH) and transform SQL
+tests/            E2E pipeline tests
 nix/              Flake modules (dev shell, services, packages)
 ```
 

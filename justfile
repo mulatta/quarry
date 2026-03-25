@@ -21,17 +21,17 @@ sync:
 
 # Debug build quarry-core (.so for Python)
 dev-core:
-    cargo build --manifest-path quarry-core/Cargo.toml --features extension-module
+    cargo build --manifest-path crates/quarry-core/Cargo.toml --features extension-module
     @echo "quarry-core built (debug)"
 
 # Debug build quarry-parse binary
 dev-parse:
-    cargo build --manifest-path quarry-parse/Cargo.toml --bin quarry-parse
-    @echo "quarry-parse built (debug): quarry-parse/target/debug/quarry-parse"
+    cargo build --manifest-path crates/quarry-parse/Cargo.toml --bin quarry-parse
+    @echo "quarry-parse built (debug): crates/quarry-parse/target/debug/quarry-parse"
 
 # Debug build quarry-graph (.so for Python)
 dev-graph:
-    cargo build --manifest-path quarry-graph/Cargo.toml --features extension-module
+    cargo build --manifest-path crates/quarry-graph/Cargo.toml --features extension-module
     @echo "quarry-graph built (debug)"
 
 # Debug build all crates
@@ -41,17 +41,17 @@ dev: dev-core dev-parse dev-graph
 
 # Release build quarry-core
 release-core:
-    cargo build --manifest-path quarry-core/Cargo.toml --features extension-module --release
+    cargo build --manifest-path crates/quarry-core/Cargo.toml --features extension-module --release
     @echo "quarry-core built (release)"
 
 # Release build quarry-parse binary
 release-parse:
-    cargo build --manifest-path quarry-parse/Cargo.toml --bin quarry-parse --release
-    @echo "quarry-parse built (release): quarry-parse/target/release/quarry-parse"
+    cargo build --manifest-path crates/quarry-parse/Cargo.toml --bin quarry-parse --release
+    @echo "quarry-parse built (release): crates/quarry-parse/target/release/quarry-parse"
 
 # Release build quarry-graph
 release-graph:
-    cargo build --manifest-path quarry-graph/Cargo.toml --features extension-module --release
+    cargo build --manifest-path crates/quarry-graph/Cargo.toml --features extension-module --release
     @echo "quarry-graph built (release)"
 
 # Release build all crates
@@ -61,9 +61,9 @@ release: release-core release-parse release-graph
 
 # Clean all Rust crate targets
 clean:
-    cargo clean --manifest-path quarry-core/Cargo.toml
-    cargo clean --manifest-path quarry-parse/Cargo.toml
-    cargo clean --manifest-path quarry-graph/Cargo.toml
+    cargo clean --manifest-path crates/quarry-core/Cargo.toml
+    cargo clean --manifest-path crates/quarry-parse/Cargo.toml
+    cargo clean --manifest-path crates/quarry-graph/Cargo.toml
 
 # Clean + release rebuild
 rebuild: clean release
@@ -72,30 +72,30 @@ rebuild: clean release
 
 # Clippy quarry-core
 clippy-core:
-    cargo clippy --manifest-path quarry-core/Cargo.toml --all-features -- -D warnings
+    cargo clippy --manifest-path crates/quarry-core/Cargo.toml --all-features -- -D warnings
 
 # Clippy quarry-parse
 clippy-parse: clippy-core
-    cargo clippy --manifest-path quarry-parse/Cargo.toml -- -D warnings
+    cargo clippy --manifest-path crates/quarry-parse/Cargo.toml -- -D warnings
 
 # Clippy quarry-graph
 clippy-graph:
-    cargo clippy --manifest-path quarry-graph/Cargo.toml --all-features -- -D warnings
+    cargo clippy --manifest-path crates/quarry-graph/Cargo.toml --all-features -- -D warnings
 
 # Clippy all crates
 clippy: clippy-parse clippy-graph
 
 # Test quarry-core
 test-core:
-    cargo test --manifest-path quarry-core/Cargo.toml
+    cargo test --manifest-path crates/quarry-core/Cargo.toml
 
 # Test quarry-parse
 test-parse: test-core
-    cargo test --manifest-path quarry-parse/Cargo.toml
+    cargo test --manifest-path crates/quarry-parse/Cargo.toml
 
 # Test quarry-graph
 test-graph:
-    cargo test --manifest-path quarry-graph/Cargo.toml
+    cargo test --manifest-path crates/quarry-graph/Cargo.toml
 
 # Test all crates
 test: test-parse test-graph

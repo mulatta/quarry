@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "dagster-postgres>=0.28.20",
+    "peft>=0.18.1",
     "psycopg[binary]",
     "pydantic-settings",
 ]
@@ -42,7 +43,7 @@ elt = [
 quarry = "quarry.cli:app"
 
 [tool.uv.workspace]
-members = ["quarry-core", "quarry-graph"]
+members = ["crates/quarry-core", "crates/quarry-graph"]
 
 [tool.uv.sources]
 quarry-core = { workspace = true }
