@@ -29,30 +29,22 @@ class Settings(BaseSettings):
     ch_port: int = 9001
     ch_database: str = "quarry"
 
-    # PubMed FTP paths
+    # --- raw/ (sync stage: source downloads) ---
     pubmed_baseline_dir: Path = Path()
     pubmed_update_dir: Path = Path()
     pubmed_mesh_dir: Path = Path()
-
-    # iCite
     icite_dir: Path = Path()
-
-    # OpenAlex
-    oa_s3_prefix: str = "s3://openalex/data/works"
     oa_local_dir: Path = Path()
 
-    # Parquet output
+    # --- staging/ (parse + CH export) ---
+    oa_s3_prefix: str = "s3://openalex/data/works"
     oa_parquet_dir: Path = Path()
     pm_parquet_dir: Path = Path()
     mesh_parquet_dir: Path = Path()
-
-    # Parquet intermediate (CH export -> downstream)
     parquet_dir: Path = Path()
 
-    # CSR mmap output
+    # --- serving/ (final consumers) ---
     csr_dir: Path = Path()
-
-    # LanceDB
     lancedb_uri: str = ""
 
     # FTP
@@ -83,18 +75,24 @@ class Settings(BaseSettings):
     def _resolve_data_paths(cls, values: dict) -> dict:
         raw = values.get("data_dir")
         d = Path(str(raw)) if raw is not None else _xdg_data_home() / "quarry"
+        raw = d / "raw"
+        stg = d / "staging"
+        srv = d / "serving"
         defaults = {
-            "pubmed_baseline_dir": d / "pubmed" / "baseline",
-            "pubmed_update_dir": d / "pubmed" / "updatefiles",
-            "pubmed_mesh_dir": d / "pubmed" / "mesh",
-            "icite_dir": d / "icite",
-            "oa_local_dir": d / "oa" / "works",
-            "oa_parquet_dir": d / "parsed" / "oa",
-            "pm_parquet_dir": d / "parsed" / "pubmed",
-            "mesh_parquet_dir": d / "parsed" / "mesh",
-            "parquet_dir": d / "parquet",
-            "csr_dir": d / "csr",
-            "lancedb_uri": str(d / "lancedb"),
+            # raw/
+            "pubmed_baseline_dir": raw / "pubmed" / "baseline",
+            "pubmed_update_dir": raw / "pubmed" / "updatefiles",
+            "pubmed_mesh_dir": raw / "pubmed" / "mesh",
+            "icite_dir": raw / "icite",
+            "oa_local_dir": raw / "openalex" / "works",
+            # staging/
+            "oa_parquet_dir": stg / "oa",
+            "pm_parquet_dir": stg / "pubmed",
+            "mesh_parquet_dir": stg / "mesh",
+            "parquet_dir": stg / "export",
+            # serving/
+            "csr_dir": srv / "csr",
+            "lancedb_uri": str(srv / "lancedb"),
         }
         for k, v in defaults.items():
             values.setdefault(k, v)
