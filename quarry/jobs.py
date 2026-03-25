@@ -53,6 +53,6 @@ full_job = define_asset_job(
 
 # Sensor targets: single-asset jobs for chaining
 r2_download_job = define_asset_job(
-    "r2_download",
+    "r2_download_job",
     selection=_r2_down,
 )
