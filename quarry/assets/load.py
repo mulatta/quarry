@@ -1,8 +1,9 @@
-"""ELT pipeline assets: parse → CH load → CH transform → parquet → serve.
+"""ELT pipeline assets: init → parse → CH load → CH transform → parquet → serve.
 
 Asset graph:
-  oa_sync ──→ oa_parse ──────────┐
-                                 │
+                                                ch_init ────────┐
+  oa_sync ──→ oa_parse ──────────┐              (DB + tables)   │
+                                 │                              │
   pm_sync ──→ pm_parse ──────────┼──→ ch_load ──→ ch_transform ──→ parquet_export ──┬──→ pg_load
                                  │                                                  ├──→ paper_embeddings
   mesh_sync ──→ mesh_stage ──────┤                                                  └──→ csr_graph
@@ -82,6 +83,54 @@ def _psql(sql: str, context: AssetExecutionContext, label: str | None = None) ->
     )
 
 
+# ── CH init asset ──
+
+_CH_SCHEMA_SQL = Path(__file__).resolve().parent.parent.parent / "sql" / "ch_schema.sql"
+
+
+def _ch_query_no_db(
+    query: str, context: AssetExecutionContext, label: str | None = None
+) -> None:
+    """Run a CH query without --database (for CREATE DATABASE)."""
+    cmd = [
+        "clickhouse-client",
+        "--host",
+        settings.ch_host,
+        "--port",
+        str(settings.ch_port),
+        "--query",
+        query,
+    ]
+    run(cmd, context, label=label or f"[CH] {query}")
+
+
+@asset(
+    group_name="init",
+    description="Create CH database + tables from ch_schema.sql (idempotent).",
+    kinds={"clickhouse"},
+)
+def ch_init(context: AssetExecutionContext) -> MaterializeResult:
+    content = _CH_SCHEMA_SQL.read_text()
+    # Strip block comments (/* ... */) before splitting
+    cleaned = re.sub(r"/\*.*?\*/", "", content, flags=re.DOTALL)
+    stmts = [s.strip() for s in cleaned.split(";") if s.strip()]
+
+    for stmt in stmts:
+        if stmt.startswith("--"):
+            continue
+        # CREATE DATABASE runs without --database flag
+        if stmt.upper().startswith("CREATE DATABASE"):
+            _ch_query_no_db(stmt, context, label=f"[CH] {stmt.split(chr(10))[0]}")
+        elif stmt.upper().startswith("USE"):
+            continue  # --database flag handles this
+        else:
+            _ch_query(stmt, context)
+
+    return MaterializeResult(
+        metadata={"status": MetadataValue.text("ok")},
+    )
+
+
 # ── Parse assets ──
 
 
@@ -155,7 +204,7 @@ def _ch_insert_async(
 
 @asset(
     group_name="load",
-    deps=[oa_parse, pm_parse, mesh_stage, icite_metadata_sync],
+    deps=[ch_init, oa_parse, pm_parse, mesh_stage, icite_metadata_sync],
     description="Parquet + CSV → CH: parallel INSERT across all tables.",
     kinds={"clickhouse"},
 )
