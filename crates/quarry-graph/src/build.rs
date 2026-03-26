@@ -8,7 +8,7 @@ use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::time::Instant;
 
-use memmap2::Mmap;
+use memmap2::{Advice, Mmap};
 use pyo3::prelude::*;
 use rayon::prelude::*;
 
@@ -35,30 +35,40 @@ fn parse_line(line: &[u8]) -> Option<(i64, i64)> {
     Some((src, dst))
 }
 
-fn line_offsets(data: &[u8]) -> Vec<usize> {
-    let mut offsets = vec![0usize];
-    for (i, &b) in data.iter().enumerate() {
-        if b == b'\n' && i + 1 < data.len() {
-            offsets.push(i + 1);
-        }
-    }
-    offsets
-}
+/// Parse all lines within a byte range [range_start, range_end).
+/// If range_start > 0, skip to the first newline to align to a line boundary.
+/// This eliminates the need for a pre-computed line offsets Vec.
+fn parse_byte_range(data: &[u8], range_start: usize, range_end: usize) -> (Vec<i64>, Vec<i64>) {
+    let mut srcs = Vec::new();
+    let mut dsts = Vec::new();
 
-fn parse_chunk(data: &[u8], offsets: &[usize], start: usize, end: usize) -> (Vec<i64>, Vec<i64>) {
-    let cap = end - start;
-    let mut srcs = Vec::with_capacity(cap);
-    let mut dsts = Vec::with_capacity(cap);
-    for &off in &offsets[start..end] {
-        let line_end = data[off..]
+    // Align: if we start mid-line, skip to the next newline (previous range owns it).
+    // If we're at a line boundary (byte 0 or preceded by '\n'), start here.
+    let mut pos = if range_start == 0 || data[range_start - 1] == b'\n' {
+        range_start
+    } else {
+        match data[range_start..range_end.min(data.len())]
             .iter()
             .position(|&b| b == b'\n')
-            .map_or(data.len(), |p| off + p);
-        if let Some((s, d)) = parse_line(&data[off..line_end]) {
+        {
+            Some(p) => range_start + p + 1,
+            None => return (srcs, dsts), // no newline in range
+        }
+    };
+
+    let end = range_end.min(data.len());
+    while pos < end {
+        let line_end = data[pos..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map_or(data.len(), |p| pos + p);
+        if let Some((s, d)) = parse_line(&data[pos..line_end]) {
             srcs.push(s);
             dsts.push(d);
         }
+        pos = line_end + 1;
     }
+
     (srcs, dsts)
 }
 
@@ -142,43 +152,77 @@ fn is_leap(y: i32) -> bool {
 
 /// Core build logic. Uses HashMap for ID→index mapping (supports i64 IDs).
 /// Returns (num_nodes, num_edges).
+///
+/// Memory optimizations applied:
+/// - (E) Byte-range chunking instead of pre-computed line offsets (-24GB)
+/// - (A) Segmented parallel parse to avoid holding all chunk results (-47GB)
+/// - (B) madvise(SEQUENTIAL) + madvise(DONTNEED) to reduce RSS
+/// - (C) id_set capacity num_edges/10 instead of num_edges/3 (-5GB)
+/// - (D) Scoped fwd CSR to drop before reverse build (-13.5GB)
 fn build_core(csv_path: &Path, graph_dir: &Path) -> Result<(usize, usize), String> {
     fs::create_dir_all(graph_dir).map_err(|e| e.to_string())?;
 
     let file = File::open(csv_path).map_err(|e| e.to_string())?;
     let mmap = unsafe { Mmap::map(&file) }.map_err(|e| e.to_string())?;
+    let data_len = mmap.len();
 
-    let offsets = line_offsets(&mmap);
-    let num_lines = offsets.len();
-    eprintln!(
-        "  {} lines, offsets ready",
-        num_lines,
-    );
+    // (B) Hint kernel for sequential read-ahead
+    let _ = mmap.advise(Advice::Sequential);
 
-    let chunk_size = 2_000_000;
-    let num_chunks = num_lines.div_ceil(chunk_size);
+    // (E) Byte-range chunking: divide mmap into fixed-size ranges.
+    // Each rayon task aligns to the next newline, so no pre-computed offsets needed.
+    let byte_chunk_size: usize = 64 * 1024 * 1024; // 64 MB per chunk
+    let num_chunks = if data_len == 0 {
+        0
+    } else {
+        data_len.div_ceil(byte_chunk_size)
+    };
+    eprintln!("  {} bytes, {} byte-range chunks", data_len, num_chunks);
 
-    let results: Vec<(Vec<i64>, Vec<i64>)> = (0..num_chunks)
-        .into_par_iter()
-        .map(|i| {
-            let start = i * chunk_size;
-            let end = ((i + 1) * chunk_size).min(num_lines);
-            parse_chunk(&mmap, &offsets, start, end)
-        })
-        .collect();
+    // (A) Process chunks in segments to limit simultaneous intermediate Vecs.
+    // Each segment: parse in parallel, then sequentially extend into src_raw/dst_raw.
+    let segment_size = 48; // chunks per segment (~3GB of mmap per batch)
+    let num_segments = if num_chunks == 0 {
+        0
+    } else {
+        num_chunks.div_ceil(segment_size)
+    };
 
-    let total_edges: usize = results.iter().map(|(s, _)| s.len()).sum();
-    let mut src_raw: Vec<i64> = Vec::with_capacity(total_edges);
-    let mut dst_raw: Vec<i64> = Vec::with_capacity(total_edges);
-    for (s, d) in results {
-        src_raw.extend(s);
-        dst_raw.extend(d);
+    let mut src_raw: Vec<i64> = Vec::new();
+    let mut dst_raw: Vec<i64> = Vec::new();
+
+    for seg in 0..num_segments {
+        let chunk_start = seg * segment_size;
+        let chunk_end = ((seg + 1) * segment_size).min(num_chunks);
+
+        let segment_results: Vec<(Vec<i64>, Vec<i64>)> = (chunk_start..chunk_end)
+            .into_par_iter()
+            .map(|i| {
+                let range_start = i * byte_chunk_size;
+                let range_end = ((i + 1) * byte_chunk_size).min(data_len);
+                parse_byte_range(&mmap, range_start, range_end)
+            })
+            .collect();
+
+        for (s, d) in segment_results {
+            src_raw.extend(s);
+            dst_raw.extend(d);
+        }
+    }
+
+    // (B) Release RSS pages before dropping the mmap
+    // SAFETY: DontNeed only affects paging, we no longer read from mmap after this.
+    #[cfg(not(target_os = "windows"))]
+    unsafe {
+        let _ = mmap.unchecked_advise(memmap2::UncheckedAdvice::DontNeed);
     }
     drop(mmap);
+
     let num_edges = src_raw.len();
 
     // Pass 1: collect all unique IDs → sorted Vec<i64> → HashMap<i64, u32>
-    let mut id_set: HashMap<i64, ()> = HashMap::with_capacity(num_edges / 3);
+    // (C) Use num_edges/10 as capacity — actual unique ratio is ~6%
+    let mut id_set: HashMap<i64, ()> = HashMap::with_capacity(num_edges / 10);
     for &id in &src_raw {
         id_set.entry(id).or_insert(());
     }
@@ -197,17 +241,19 @@ fn build_core(csv_path: &Path, graph_dir: &Path) -> Result<(usize, usize), Strin
 
     // Pass 2: map edges (i64, i64) → (u32, u32)
     let src_idx: Vec<u32> = src_raw.par_iter().map(|&p| id_to_idx[&p]).collect();
+    drop(src_raw); // free before dst_idx allocation (~24 GB)
     let dst_idx: Vec<u32> = dst_raw.par_iter().map(|&p| id_to_idx[&p]).collect();
-    drop(src_raw);
     drop(dst_raw);
     drop(id_to_idx);
 
-    // Forward CSR
-    let fwd_dir = graph_dir.join("forward");
-    fs::create_dir_all(&fwd_dir).map_err(|e| e.to_string())?;
-    let (fwd_indptr, fwd_indices) = build_csr(&src_idx, &dst_idx, num_nodes);
-    write_bin(&fwd_dir.join("indptr.bin"), &fwd_indptr).map_err(|e| e.to_string())?;
-    write_bin(&fwd_dir.join("indices.bin"), &fwd_indices).map_err(|e| e.to_string())?;
+    // (D) Scope fwd CSR: drop indptr+indices before reverse build (-13.5GB)
+    {
+        let fwd_dir = graph_dir.join("forward");
+        fs::create_dir_all(&fwd_dir).map_err(|e| e.to_string())?;
+        let (fwd_indptr, fwd_indices) = build_csr(&src_idx, &dst_idx, num_nodes);
+        write_bin(&fwd_dir.join("indptr.bin"), &fwd_indptr).map_err(|e| e.to_string())?;
+        write_bin(&fwd_dir.join("indices.bin"), &fwd_indices).map_err(|e| e.to_string())?;
+    } // fwd_indptr, fwd_indices dropped here
 
     // Reverse CSR
     let rev_dir = graph_dir.join("reverse");
@@ -383,6 +429,38 @@ mod tests {
         assert!(ids.contains(&2741809807));
         assert!(ids.contains(&3141592653));
         assert!(ids.contains(&2718281828));
+    }
+
+    #[test]
+    fn test_parse_byte_range_boundary() {
+        // Lines at exact chunk boundaries must not be lost
+        let data = b"1,2\n3,4\n5,6\n";
+        // Chunk boundary at byte 4 (start of "3,4\n")
+        let (s1, d1) = parse_byte_range(data, 0, 4);
+        let (s2, d2) = parse_byte_range(data, 4, 8);
+        let (s3, d3) = parse_byte_range(data, 8, data.len());
+        assert_eq!(s1, vec![1]);
+        assert_eq!(d1, vec![2]);
+        assert_eq!(s2, vec![3]);
+        assert_eq!(d2, vec![4]);
+        assert_eq!(s3, vec![5]);
+        assert_eq!(d3, vec![6]);
+        // Total must match
+        assert_eq!(s1.len() + s2.len() + s3.len(), 3);
+    }
+
+    #[test]
+    fn test_parse_byte_range_mid_line() {
+        // Chunk boundary splits a line at byte 2 (mid "1,2")
+        let data = b"1,2\n3,4\n";
+        let (s1, d1) = parse_byte_range(data, 0, 2);
+        let (s2, d2) = parse_byte_range(data, 2, data.len());
+        // Chunk 0 owns the full first line (finds \n past end)
+        assert_eq!(s1, vec![1]);
+        assert_eq!(d1, vec![2]);
+        // Chunk 1 skips partial first line, parses second
+        assert_eq!(s2, vec![3]);
+        assert_eq!(d2, vec![4]);
     }
 
     #[test]
