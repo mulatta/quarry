@@ -139,6 +139,8 @@ def run(batch_size: int = 5000, limit: int | None = None):
     if total_encoded > 0:
         log.info("Building FTS index...")
         lance.create_fts_index()
+        log.info("Building scalar index on content_hash...")
+        lance.create_scalar_index("content_hash")
         log.info("Building vector index...")
         lance.create_vector_index("vec_retrieval")
         lance.create_vector_index("vec_cluster")
