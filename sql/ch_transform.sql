@@ -33,6 +33,7 @@ SELECT
     w.doi           AS doi,
     w.title         AS title,
     w.abstract      AS abstract,
+    w.content_hash  AS content_hash,
     w.pub_year      AS pub_year,
     w.pub_date      AS pub_date,
     w.type          AS type,
