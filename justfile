@@ -97,11 +97,19 @@ test-parse: test-core
 test-graph:
     cargo test --manifest-path crates/quarry-graph/Cargo.toml
 
-# Test all crates
+# Test all Rust crates
 test: test-parse test-graph
 
-# Clippy + test all
-check: clippy test
+# Test Python unit tests (no CH/PG required)
+test-py:
+    python -m pytest tests/unit -v
+
+# Test Python integration (requires CH/PG)
+test-py-integration:
+    python -m pytest tests/integration -v
+
+# Clippy + test all (Rust + Python)
+check: clippy test test-py
 
 # ── Process management ──
 

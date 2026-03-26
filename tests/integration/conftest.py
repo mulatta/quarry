@@ -3,7 +3,7 @@
 This must run before quarry.config.settings singleton is created.
 
 Test isolation:
-  - CH: quarry_test database (port 9001)
+  - CH: quarry_test database (port 9000)
   - PG: quarry_test database (socket /tmp/quarry-pg)
   - Paths: tests/data/ and tests/data/parsed/
   - Databases are created at session start, dropped at session end.
@@ -19,9 +19,10 @@ import pytest
 logger = logging.getLogger("quarry.test")
 
 TEST_DIR = Path(__file__).parent
-DATA_DIR = TEST_DIR / "data"
+TESTS_ROOT = TEST_DIR.parent
+DATA_DIR = TESTS_ROOT / "data"
 PARSED_DIR = DATA_DIR / "parsed"
-SQL_DIR = TEST_DIR.parent / "sql"
+SQL_DIR = TESTS_ROOT.parent / "sql"
 
 # Test database names
 TEST_CH_DATABASE = "quarry_test"
@@ -81,7 +82,7 @@ def _ch_cmd(database: str = "default") -> list[str]:
         "--host",
         "localhost",
         "--port",
-        "9001",
+        "9000",
         "--database",
         database,
     ]
