@@ -26,7 +26,7 @@ class Settings(BaseSettings):
 
     # ClickHouse
     ch_host: str = "localhost"
-    ch_port: int = 9001
+    ch_port: int = 9000
     ch_database: str = "quarry"
 
     # --- raw/ (sync stage: source downloads) ---
