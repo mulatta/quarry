@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     ch_host: str = "localhost"
     ch_port: int = 9000
     ch_database: str = "quarry"
+    ch_export_max_concurrent: int = 4
 
     # --- raw/ (sync stage: source downloads) ---
     pubmed_baseline_dir: Path = Path()

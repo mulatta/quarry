@@ -335,12 +335,27 @@ def ch_transform(context: AssetExecutionContext) -> MaterializeResult:
         "pm_mesh_tree",
         "icite_raw",
     ]
-    for table in optimize_tables:
-        _ch_query(
-            f"OPTIMIZE TABLE {table} FINAL",
-            context,
-            label=f"[CH] OPTIMIZE {table} FINAL",
+
+    def _optimize(table: str) -> tuple[str, int, str]:
+        query = f"OPTIMIZE TABLE {table} FINAL"
+        proc = subprocess.run(
+            _ch_client_cmd() + ["--query", query],
+            capture_output=True,
+            text=True,
         )
+        return table, proc.returncode, proc.stderr
+
+    with ThreadPoolExecutor(max_workers=len(optimize_tables)) as pool:
+        futures = {pool.submit(_optimize, t): t for t in optimize_tables}
+        for future in as_completed(futures):
+            table, rc, stderr = future.result()
+            if stderr.strip():
+                context.log.info(f"  [OPTIMIZE {table}] {stderr.strip()}")
+            if rc != 0:
+                raise RuntimeError(
+                    f"OPTIMIZE {table} FINAL failed (exit {rc}): {stderr}"
+                )
+            context.log.info(f"[CH] OPTIMIZE {table} FINAL done")
 
     # 2-5. Enriched export tables
     export_sql = "sql/ch_transform.sql"
@@ -494,7 +509,7 @@ def parquet_export(context: AssetExecutionContext) -> MaterializeResult:
             raise RuntimeError(f"Parquet export failed for {pg_table}: {result.stderr}")
         return pg_table
 
-    with ThreadPoolExecutor(max_workers=4) as pool:
+    with ThreadPoolExecutor(max_workers=settings.ch_export_max_concurrent) as pool:
         futures: dict[object, str] = {}
         for tier in _WORKS_TIERS:
             futures[pool.submit(_export_works_tier, tier)] = f"works/tier={tier}"
