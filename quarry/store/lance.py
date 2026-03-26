@@ -85,6 +85,10 @@ class LanceStore:
         """Build BM25 full-text index on title and abstract."""
         self.table.create_fts_index(["title", "abstract"], replace=True)
 
+    def create_scalar_index(self, column: str = "content_hash"):
+        """Build b-tree scalar index for fast equality lookups."""
+        self.table.create_scalar_index(column, index_type="BTREE", replace=True)
+
     def create_vector_index(self, column: str = "vec_retrieval"):
         """Build IVF_PQ vector index for ANN search."""
         self.table.create_index(metric="cosine", vector_column_name=column)
