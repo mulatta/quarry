@@ -42,6 +42,7 @@ elt = [
 dev = [
     "quarry[elt]",
     "pytest",
+    "moto[batch]",
 ]
 
 [project.scripts]
