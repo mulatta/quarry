@@ -11,6 +11,7 @@ from pathlib import Path
 
 try:
     import blake3
+    import pyarrow.compute as pc
     import pyarrow.parquet as pq
 except ImportError:
     raise ImportError("pip install quarry[elt]") from None
@@ -33,11 +34,11 @@ def _parquet_batches(batch_size: int = 5000):
     table = pq.read_table(
         parquet_path,
         columns=["work_id", "title", "abstract", "tier"],
-        filters=[
-            ("tier", "in", ["t1", "t2"]),
-            ("abstract", "is_valid"),
-            ("title", "is_valid"),
-        ],
+        filters=(
+            (pc.field("tier").isin(["t1", "t2"]))
+            & pc.field("abstract").is_valid()
+            & pc.field("title").is_valid()
+        ),
     )
     # Drop tier column after filtering — not needed downstream
     table = table.drop("tier")
