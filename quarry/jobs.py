@@ -1,6 +1,6 @@
 """Dagster job definitions for pipeline execution modes.
 
-etl:        sync → parse → ch → parquet_export → r2_upload
+etl:        sync → parse → ch_init → ch → parquet_export → r2_upload
 serve:      pg_load + csr_graph + paper_embeddings (assumes parquet on disk)
 embeddings: paper_embeddings only
 full:       etl (without r2) + serve (single machine E2E)
@@ -19,6 +19,7 @@ _sync = AssetSelection.assets(
     "icite_metadata_sync",
 )
 _parse = AssetSelection.assets("oa_parse", "pm_parse", "mesh_stage")
+_ch_init = AssetSelection.assets("ch_init")
 _ch = AssetSelection.assets("ch_load", "ch_transform")
 _parquet = AssetSelection.assets("parquet_export")
 _pg = AssetSelection.assets("pg_load")
@@ -30,7 +31,7 @@ _embed = AssetSelection.assets("paper_embeddings")
 # ETL → R2 (runs on Batch instance or locally with CH)
 etl_job = define_asset_job(
     "etl",
-    selection=_sync | _parse | _ch | _parquet | _r2_up,
+    selection=_sync | _parse | _ch_init | _ch | _parquet | _r2_up,
 )
 
 # Serve: load parquet into serving layer (PG + CSR + embeddings)
@@ -48,7 +49,7 @@ embeddings_job = define_asset_job(
 # Full: single-machine E2E (no R2)
 full_job = define_asset_job(
     "full",
-    selection=_sync | _parse | _ch | _parquet | _pg | _csr | _embed,
+    selection=_sync | _parse | _ch_init | _ch | _parquet | _pg | _csr | _embed,
 )
 
 # Sensor targets: single-asset jobs for chaining

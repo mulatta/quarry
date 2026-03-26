@@ -2,6 +2,8 @@
    Raw tables: ReplacingMergeTree for dedup (append-only, no DELETE needed).
    Export tables: created by ch_transform.sql after dedup + enrich. */
 
+CREATE DATABASE IF NOT EXISTS quarry;
+
 USE quarry;
 
 /* OA raw tables */
