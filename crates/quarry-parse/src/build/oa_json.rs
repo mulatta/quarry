@@ -11,7 +11,11 @@ use quarry_core::{abstract_recon, normalize};
 /// blake3 content hash of normalized "{title}\n{abstract}" for embedding change detection.
 /// Computed only for T1/T2 (works with abstract). Matches the format expected by LanceDB.
 fn compute_content_hash(title: &str, abstract_text: &str) -> [u8; 32] {
-    blake3::hash(format!("{title}\n{abstract_text}").as_bytes()).into()
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(title.as_bytes());
+    hasher.update(b"\n");
+    hasher.update(abstract_text.as_bytes());
+    hasher.finalize().into()
 }
 
 // ── URL prefixes (stripped during transformation) ──
@@ -595,5 +599,48 @@ mod tests {
         }"#;
         let result = parse_line(json).unwrap();
         assert_eq!(result.citations.len(), 2);
+    }
+
+    #[test]
+    fn test_empty_abstract_inverted_index_no_hash() {
+        let json = r#"{
+            "id": "https://openalex.org/W33333",
+            "ids": {"pmid": "https://pubmed.ncbi.nlm.nih.gov/44444"},
+            "title": "Empty abstract map",
+            "abstract_inverted_index": {}
+        }"#;
+        let result = parse_line(json).unwrap();
+        // Empty inverted index reconstructs to "" → filtered to None
+        assert!(result.work.abstract_text.is_none());
+        assert!(result.work.content_hash.is_none());
+    }
+
+    #[test]
+    fn test_html_only_abstract_no_hash() {
+        let json = r#"{
+            "id": "https://openalex.org/W44444",
+            "title": "HTML-only abstract",
+            "abstract_inverted_index": {"<br/>": [0]}
+        }"#;
+        let result = parse_line(json).unwrap();
+        // HTML tag stripped → empty string → None
+        assert!(result.work.abstract_text.is_none());
+        assert!(result.work.content_hash.is_none());
+    }
+
+    #[test]
+    fn test_empty_title_with_abstract_has_hash() {
+        let json = r#"{
+            "id": "https://openalex.org/W55556",
+            "title": "",
+            "abstract_inverted_index": {"some": [0], "text": [1]}
+        }"#;
+        let result = parse_line(json).unwrap();
+        assert_eq!(result.work.title, "");
+        assert_eq!(result.work.abstract_text.as_deref(), Some("some text"));
+        // Hash of "\nsome text" — empty title is valid
+        assert!(result.work.content_hash.is_some());
+        let expected = blake3::hash(b"\nsome text");
+        assert_eq!(result.work.content_hash.unwrap(), *expected.as_bytes());
     }
 }

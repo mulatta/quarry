@@ -3,15 +3,15 @@
 /// Parse configuration — thread count.
 #[derive(Default)]
 pub struct ParseConfig {
-    /// Max parallel parse threads (rayon). Each thread holds ~400MB.
-    /// `None` = auto from available memory.
+    /// Max parallel parse threads (rayon). Each thread holds ~200MB peak
+    /// (100K-line chunk). `None` = auto from available memory.
     pub parse_threads: Option<usize>,
 }
 
 impl ParseConfig {
     /// Effective parse thread count: explicit value, or auto-detect from
-    /// available system memory. Each parse thread holds ~2GB peak
-    /// (decompressed data + parsed structs + Arrow batch).
+    /// available system memory. Each parse thread holds ~200MB peak
+    /// (100K-line chunk: parsed structs + Arrow batch).
     pub fn effective_parse_threads(&self) -> usize {
         if let Some(n) = self.parse_threads {
             return n.max(1);
@@ -19,7 +19,7 @@ impl ParseConfig {
         let cpus = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
-        let mem_threads = available_memory_gb() / 2.0;
+        let mem_threads = available_memory_gb() / 0.5;
         let n = (mem_threads as usize).min(cpus).max(1);
         eprintln!(
             "parse_threads: auto={n} (cpus={cpus}, mem_limit={})",
