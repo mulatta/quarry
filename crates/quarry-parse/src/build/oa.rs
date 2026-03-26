@@ -25,6 +25,10 @@ use crate::build::config::ParseConfig;
 use crate::build::oa_json::{self, OaAuthor, OaCitation, OaCrosswalk, OaTopic, OaWork};
 use crate::build::parquet_writer;
 
+/// Lines per chunk before flushing to Parquet.
+/// 100K lines ≈ 200MB per thread (works+authors+topics+citations).
+const FLUSH_CHUNK_SIZE: usize = 100_000;
+
 /// Stats from an OA parse run.
 #[derive(Serialize)]
 pub struct OaParseStats {
@@ -41,18 +45,49 @@ pub struct OaParseStats {
     pub elapsed_secs: f64,
 }
 
-/// Parsed output from a single file.
-struct FileOutput {
+/// Accumulated parsed data for one chunk, flushed periodically.
+#[derive(Default)]
+struct ChunkBuf {
     works: Vec<OaWork>,
     authors: Vec<OaAuthor>,
     topics: Vec<OaTopic>,
     citations: Vec<OaCitation>,
     crosswalk: Vec<OaCrosswalk>,
+}
+
+impl ChunkBuf {
+    fn clear(&mut self) {
+        self.works.clear();
+        self.authors.clear();
+        self.topics.clear();
+        self.citations.clear();
+        self.crosswalk.clear();
+    }
+
+    fn is_empty(&self) -> bool {
+        self.works.is_empty()
+    }
+}
+
+/// Aggregate counts from processing a single file.
+#[derive(Default)]
+struct FileStats {
+    works: usize,
+    authors: usize,
+    topics: usize,
+    citations: usize,
+    crosswalk: usize,
     failed_lines: usize,
-    /// Hive partition key: extracted from filename (e.g. "updated_date=2025-03-01")
-    partition: String,
-    /// Base filename for Parquet part naming
-    part_name: String,
+}
+
+impl FileStats {
+    fn accum(&mut self, buf: &ChunkBuf) {
+        self.works += buf.works.len();
+        self.authors += buf.authors.len();
+        self.topics += buf.topics.len();
+        self.citations += buf.citations.len();
+        self.crosswalk += buf.crosswalk.len();
+    }
 }
 
 /// Extract Hive partition key from OA path.
@@ -71,25 +106,74 @@ fn extract_part_name(filename: &str) -> String {
     base.strip_suffix(".gz").unwrap_or(base).to_string()
 }
 
-/// Parse a gz file into struct vecs (streaming from disk, no full-file load).
-fn parse_gz_to_structs(
+/// Flush one chunk of parsed data to Parquet files.
+fn flush_chunk(
+    partition: &str,
+    part_name: &str,
+    chunk_idx: u32,
+    buf: &ChunkBuf,
+    output_dir: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let suffix = format!("{part_name}_c{chunk_idx:04}");
+
+    if !buf.works.is_empty() {
+        parquet_writer::write_oa_works(
+            &buf.works,
+            &output_dir.join(format!("works/{partition}/{suffix}.parquet")),
+        )?;
+    }
+    if !buf.authors.is_empty() {
+        parquet_writer::write_oa_work_authors(
+            &buf.authors,
+            &output_dir.join(format!("work_authors/{partition}/{suffix}.parquet")),
+        )?;
+    }
+    if !buf.topics.is_empty() {
+        parquet_writer::write_oa_work_topics(
+            &buf.topics,
+            &output_dir.join(format!("work_topics/{partition}/{suffix}.parquet")),
+        )?;
+    }
+    if !buf.citations.is_empty() {
+        parquet_writer::write_oa_work_citations(
+            &buf.citations,
+            &output_dir.join(format!("work_citations/{partition}/{suffix}.parquet")),
+        )?;
+    }
+    if !buf.crosswalk.is_empty() {
+        parquet_writer::write_oa_id_crosswalk(
+            &buf.crosswalk,
+            &output_dir.join(format!("id_crosswalk/{partition}/{suffix}.parquet")),
+        )?;
+    }
+    Ok(())
+}
+
+/// Parse a .gz file and write Parquet in bounded-memory chunks.
+///
+/// Every FLUSH_CHUNK_SIZE lines, accumulated data is flushed to disk
+/// and vecs are cleared. Peak memory per thread ≈ FLUSH_CHUNK_SIZE × ~2KB.
+fn process_gz_chunked(
     path: &Path,
     filename: &str,
-) -> Result<FileOutput, std::io::Error> {
+    output_dir: &Path,
+) -> Result<FileStats, Box<dyn std::error::Error>> {
     let file = File::open(path)?;
     let reader = BufReader::with_capacity(256 * 1024, GzDecoder::new(BufReader::new(file)));
-    let mut works = Vec::new();
-    let mut authors = Vec::new();
-    let mut topics = Vec::new();
-    let mut citations = Vec::new();
-    let mut crosswalk = Vec::new();
-    let mut failed = 0usize;
+
+    let partition = extract_partition(filename);
+    let part_name = extract_part_name(filename);
+
+    let mut buf = ChunkBuf::default();
+    let mut line_count = 0usize;
+    let mut chunk_idx = 0u32;
+    let mut stats = FileStats::default();
 
     for line_result in reader.lines() {
         let line = match line_result {
             Ok(l) => l,
             Err(_) => {
-                failed += 1;
+                stats.failed_lines += 1;
                 continue;
             }
         };
@@ -98,71 +182,44 @@ fn parse_gz_to_structs(
         }
         match oa_json::parse_line(&line) {
             Ok(parsed) => {
-                works.push(parsed.work);
-                authors.extend(parsed.authors);
-                topics.extend(parsed.topics);
-                citations.extend(parsed.citations);
+                buf.works.push(parsed.work);
+                buf.authors.extend(parsed.authors);
+                buf.topics.extend(parsed.topics);
+                buf.citations.extend(parsed.citations);
                 if let Some(cw) = parsed.crosswalk {
-                    crosswalk.push(cw);
+                    buf.crosswalk.push(cw);
                 }
+                line_count += 1;
             }
             Err(_) => {
-                failed += 1;
+                stats.failed_lines += 1;
             }
+        }
+        if line_count >= FLUSH_CHUNK_SIZE {
+            stats.accum(&buf);
+            flush_chunk(&partition, &part_name, chunk_idx, &buf, output_dir)?;
+            buf.clear();
+            line_count = 0;
+            chunk_idx += 1;
         }
     }
 
-    Ok(FileOutput {
-        works,
-        authors,
-        topics,
-        citations,
-        crosswalk,
-        failed_lines: failed,
-        partition: extract_partition(filename),
-        part_name: extract_part_name(filename),
-    })
-}
+    // Flush remaining lines
+    if !buf.is_empty() {
+        stats.accum(&buf);
+        flush_chunk(&partition, &part_name, chunk_idx, &buf, output_dir)?;
+    }
 
-/// Write a FileOutput to Parquet files in output_dir.
-fn write_file_output(
-    output: &FileOutput,
-    output_dir: &Path,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let part = &output.partition;
-    let name = &output.part_name;
+    // Write sentinel file to mark this input as fully processed.
+    // Without this, a crash mid-file would leave partial chunks that get
+    // skipped on retry, causing silent data loss.
+    let sentinel = output_dir.join(format!("works/{partition}/{part_name}.done"));
+    if let Some(parent) = sentinel.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&sentinel, [])?;
 
-    if !output.works.is_empty() {
-        parquet_writer::write_oa_works(
-            &output.works,
-            &output_dir.join(format!("works/{part}/{name}.parquet")),
-        )?;
-    }
-    if !output.authors.is_empty() {
-        parquet_writer::write_oa_work_authors(
-            &output.authors,
-            &output_dir.join(format!("work_authors/{part}/{name}.parquet")),
-        )?;
-    }
-    if !output.topics.is_empty() {
-        parquet_writer::write_oa_work_topics(
-            &output.topics,
-            &output_dir.join(format!("work_topics/{part}/{name}.parquet")),
-        )?;
-    }
-    if !output.citations.is_empty() {
-        parquet_writer::write_oa_work_citations(
-            &output.citations,
-            &output_dir.join(format!("work_citations/{part}/{name}.parquet")),
-        )?;
-    }
-    if !output.crosswalk.is_empty() {
-        parquet_writer::write_oa_id_crosswalk(
-            &output.crosswalk,
-            &output_dir.join(format!("id_crosswalk/{part}/{name}.parquet")),
-        )?;
-    }
-    Ok(())
+    Ok(stats)
 }
 
 /// Recursively collect .gz files from a directory, returning relative paths.
@@ -212,14 +269,15 @@ pub fn parse_oa(
     let num_files = gz_files.len();
     eprintln!("oa: found {num_files} .gz files in {}", input_dir.display());
 
-    // Skip files whose Parquet output already exists
+    // Skip files whose .done sentinel exists (written after all chunks complete).
+    // Partial chunks from a crashed run are ignored and overwritten on retry.
     let todo: Vec<_> = gz_files
         .into_iter()
         .filter(|(_, rel)| {
             let part = extract_partition(rel);
             let name = extract_part_name(rel);
-            let pq_path = output_dir.join(format!("works/{part}/{name}.parquet"));
-            !pq_path.exists()
+            let done = output_dir.join(format!("works/{part}/{name}.done"));
+            !done.exists()
         })
         .collect();
 
@@ -244,26 +302,21 @@ pub fn parse_oa(
 
     pool.install(|| {
         todo.par_iter().for_each(|(abs_path, rel_path)| {
-            let output = match parse_gz_to_structs(abs_path, rel_path) {
-                Ok(o) => o,
+            let stats = match process_gz_chunked(abs_path, rel_path, &out_dir) {
+                Ok(s) => s,
                 Err(e) => {
-                    eprintln!("oa: WARN: cannot read {}: {e}", abs_path.display());
+                    eprintln!("oa: WARN: failed {rel_path}: {e}");
                     failed_files_count.fetch_add(1, Ordering::Relaxed);
                     return;
                 }
             };
-            if let Err(e) = write_file_output(&output, &out_dir) {
-                eprintln!("oa: WARN: write failed for {rel_path}: {e}");
-                failed_files_count.fetch_add(1, Ordering::Relaxed);
-                return;
-            }
 
-            works_count.fetch_add(output.works.len(), Ordering::Relaxed);
-            authors_count.fetch_add(output.authors.len(), Ordering::Relaxed);
-            topics_count.fetch_add(output.topics.len(), Ordering::Relaxed);
-            citations_count.fetch_add(output.citations.len(), Ordering::Relaxed);
-            crosswalk_count.fetch_add(output.crosswalk.len(), Ordering::Relaxed);
-            failed_lines_count.fetch_add(output.failed_lines, Ordering::Relaxed);
+            works_count.fetch_add(stats.works, Ordering::Relaxed);
+            authors_count.fetch_add(stats.authors, Ordering::Relaxed);
+            topics_count.fetch_add(stats.topics, Ordering::Relaxed);
+            citations_count.fetch_add(stats.citations, Ordering::Relaxed);
+            crosswalk_count.fetch_add(stats.crosswalk, Ordering::Relaxed);
+            failed_lines_count.fetch_add(stats.failed_lines, Ordering::Relaxed);
 
             let done = files_done.fetch_add(1, Ordering::Relaxed) + 1;
             if done.is_multiple_of(10) || done == num_todo {
