@@ -29,19 +29,17 @@ def content_hash(title: str, abstract: str) -> bytes:
 
 
 def _parquet_batches(batch_size: int = 5000):
-    """Yield dicts from works Parquet. C++ engine, column pruning, predicate pushdown."""
-    parquet_path = Path(settings.parquet_dir) / "works.parquet"
+    """Yield dicts from works Parquet. Hive partition pruning reads only t1+t2."""
+    works_dir = Path(settings.parquet_dir) / "works"
     table = pq.read_table(
-        parquet_path,
-        columns=["work_id", "title", "abstract", "tier"],
+        works_dir,
+        columns=["work_id", "title", "abstract"],
         filters=(
             (pc.field("tier").isin(["t1", "t2"]))
             & pc.field("abstract").is_valid()
             & pc.field("title").is_valid()
         ),
     )
-    # Drop tier column after filtering — not needed downstream
-    table = table.drop("tier")
     for batch in table.to_batches(max_chunksize=batch_size):
         if len(batch) == 0:
             continue

@@ -369,17 +369,28 @@ def ch_transform(context: AssetExecutionContext) -> MaterializeResult:
 # CH table → (pg_table, columns) for Parquet export.
 # Column list matches PG schema exactly; CH export SQL pre-formats types
 # (e.g. pub_type Array → '{a,b}' PG text[] literal).
+# works is exported separately with Hive partitioning by tier.
+_WORKS_CH_TABLE = "works_export"
+# Full column list (includes tier — reconstructed from Hive partition key on read).
+_WORKS_COLUMNS = (
+    "work_id, work_id_int, tier, pmid, doi, title, abstract, "
+    "pub_year, pub_date, type, cited_by_count, host_venue, oa_status, oa_url, "
+    "is_retracted, updated_date, pm_journal_abbr, pm_country, pm_medline_status, "
+    "pm_pub_type, pm_created_date, pm_revised_date, pm_indexed_date, "
+    "rcr, nih_percentile, apt, is_clinical"
+)
+# Export columns (tier excluded — encoded in Hive directory structure).
+_WORKS_EXPORT_COLUMNS = (
+    "work_id, work_id_int, pmid, doi, title, abstract, "
+    "pub_year, pub_date, type, cited_by_count, host_venue, oa_status, oa_url, "
+    "is_retracted, updated_date, pm_journal_abbr, pm_country, pm_medline_status, "
+    "pm_pub_type, pm_created_date, pm_revised_date, pm_indexed_date, "
+    "rcr, nih_percentile, apt, is_clinical"
+)
+_WORKS_TIERS = ["t1", "t2", "t3", "t4"]
+
 _EXPORT_TABLES: list[tuple[str, str, str]] = [
     # (ch_table, pg_table, columns)
-    (
-        "works_export",
-        "works",
-        "work_id, work_id_int, tier, pmid, doi, title, abstract, "
-        "pub_year, pub_date, type, cited_by_count, host_venue, oa_status, oa_url, "
-        "is_retracted, updated_date, pm_journal_abbr, pm_country, pm_medline_status, "
-        "pm_pub_type, pm_created_date, pm_revised_date, pm_indexed_date, "
-        "rcr, nih_percentile, apt, is_clinical",
-    ),
     ("oa_work_citations", "work_citations", "citing_id, cited_id"),
     (
         "papers_export",
@@ -452,7 +463,28 @@ def parquet_export(context: AssetExecutionContext) -> MaterializeResult:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     failed: list[str] = []
+    total = len(_EXPORT_TABLES) + len(_WORKS_TIERS)
 
+    # --- works: Hive-partitioned by tier ---
+    def _export_works_tier(tier: str) -> str:
+        tier_dir = out_dir / "works" / f"tier={tier}"
+        tier_dir.mkdir(parents=True, exist_ok=True)
+        out_path = tier_dir / "data.parquet"
+        query = f"SELECT {_WORKS_EXPORT_COLUMNS} FROM {_WORKS_CH_TABLE} WHERE tier = '{tier}'"
+        cmd = _ch_client_cmd() + ["--query", query + " FORMAT Parquet"]
+        context.log.info(f"[Parquet] exporting works tier={tier} → {out_path}")
+        with open(out_path, "wb") as f:
+            result = subprocess.run(cmd, stdout=f, stderr=subprocess.PIPE, text=True)
+        if result.returncode != 0:
+            context.log.error(
+                f"[Parquet] works tier={tier} failed: {result.stderr.strip()}"
+            )
+            raise RuntimeError(
+                f"Parquet export failed for works tier={tier}: {result.stderr}"
+            )
+        return f"works/tier={tier}"
+
+    # --- flat tables ---
     def _export(ch_table: str, pg_table: str, columns: str) -> str:
         out_path = out_dir / f"{pg_table}.parquet"
         context.log.info(f"[Parquet] exporting {ch_table} → {out_path}")
@@ -463,20 +495,21 @@ def parquet_export(context: AssetExecutionContext) -> MaterializeResult:
         return pg_table
 
     with ThreadPoolExecutor(max_workers=4) as pool:
-        futures = {
-            pool.submit(_export, ch, pg, cols): pg for ch, pg, cols in _EXPORT_TABLES
-        }
+        futures: dict[object, str] = {}
+        for tier in _WORKS_TIERS:
+            futures[pool.submit(_export_works_tier, tier)] = f"works/tier={tier}"
+        for ch, pg, cols in _EXPORT_TABLES:
+            futures[pool.submit(_export, ch, pg, cols)] = pg
+
         done = 0
         for future in as_completed(futures):
-            pg_table = futures[future]
+            name = futures[future]
             try:
                 future.result()
                 done += 1
-                context.log.info(
-                    f"[Parquet] {pg_table} done [{done}/{len(_EXPORT_TABLES)}]"
-                )
+                context.log.info(f"[Parquet] {name} done [{done}/{total}]")
             except RuntimeError:
-                failed.append(pg_table)
+                failed.append(name)
 
     if failed:
         raise RuntimeError(f"Parquet export failed for: {', '.join(failed)}")
@@ -484,7 +517,7 @@ def parquet_export(context: AssetExecutionContext) -> MaterializeResult:
     return MaterializeResult(
         metadata={
             "parquet_dir": MetadataValue.path(str(out_dir)),
-            "num_tables": MetadataValue.int(len(_EXPORT_TABLES)),
+            "num_tables": MetadataValue.int(total),
         }
     )
 
@@ -509,16 +542,21 @@ def _select_expr(columns: str) -> str:
 
 
 def _duckdb_pg_load(pg_table: str, columns: str, parquet_path: Path) -> None:
-    """Insert Parquet → PG via DuckDB Python binding + postgres extension."""
+    """Insert Parquet → PG via DuckDB Python binding + postgres extension.
+
+    parquet_path can be a single .parquet file or a Hive-partitioned directory.
+    """
     import duckdb
 
     select = _select_expr(columns)
+    # Hive directory: glob all parquet files; single file: use directly
+    src = f"{parquet_path}/**/*.parquet" if parquet_path.is_dir() else str(parquet_path)
     conn = duckdb.connect()
     conn.execute("INSTALL postgres; LOAD postgres;")
     conn.execute(f"ATTACH '{settings.pg_conninfo}' AS pg (TYPE postgres)")
     conn.execute(
         f"INSERT INTO pg.{pg_table} ({columns}) "
-        f"SELECT {select} FROM read_parquet('{parquet_path}')"
+        f"SELECT {select} FROM read_parquet('{src}', hive_partitioning=true)"
     )
     conn.close()
 
@@ -541,14 +579,21 @@ def pg_load(context: AssetExecutionContext) -> MaterializeResult:
 
     pq_dir = Path(settings.parquet_dir)
 
-    for i, (_, pg_table, columns) in enumerate(_EXPORT_TABLES, 1):
+    # works: Hive-partitioned directory
+    works_dir = pq_dir / "works"
+    context.log.info(f"[PG] loading works from {works_dir}")
+    _duckdb_pg_load("works", _WORKS_COLUMNS, works_dir)
+    context.log.info("[PG] works done [1/{n}]".format(n=len(_EXPORT_TABLES) + 1))
+
+    for i, (_, pg_table, columns) in enumerate(_EXPORT_TABLES, 2):
         pq_path = pq_dir / f"{pg_table}.parquet"
         context.log.info(f"[PG] loading {pg_table} from {pq_path}")
         _duckdb_pg_load(pg_table, columns, pq_path)
-        context.log.info(f"[PG] {pg_table} done [{i}/{len(_EXPORT_TABLES)}]")
+        context.log.info(f"[PG] {pg_table} done [{i}/{len(_EXPORT_TABLES) + 1}]")
 
     _psql("\\i sql/schema.sql", context, label="[PG] recreating indexes")
 
+    _psql("VACUUM ANALYZE works", context, label="[PG] VACUUM ANALYZE works")
     for _, t, _ in _EXPORT_TABLES:
         _psql(f"VACUUM ANALYZE {t}", context, label=f"[PG] VACUUM ANALYZE {t}")
 
