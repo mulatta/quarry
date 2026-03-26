@@ -10,7 +10,6 @@ import time
 from pathlib import Path
 
 try:
-    import blake3
     import pyarrow.compute as pc
     import pyarrow.parquet as pq
 except ImportError:
@@ -23,17 +22,12 @@ from quarry.store.lance import LanceStore
 log = logging.getLogger(__name__)
 
 
-def content_hash(title: str, abstract: str) -> bytes:
-    """blake3 hash of normalized title + abstract for change detection."""
-    return blake3.blake3(f"{title}\n{abstract}".encode()).digest()
-
-
 def _parquet_batches(batch_size: int = 5000):
     """Yield dicts from works Parquet. Hive partition pruning reads only t1+t2."""
     works_dir = Path(settings.parquet_dir) / "works"
     table = pq.read_table(
         works_dir,
-        columns=["work_id", "title", "abstract"],
+        columns=["work_id", "title", "abstract", "content_hash"],
         filters=(
             (pc.field("tier").isin(["t1", "t2"]))
             & pc.field("abstract").is_valid()
@@ -49,6 +43,7 @@ def _parquet_batches(batch_size: int = 5000):
                 "work_id": d["work_id"][i],
                 "title": d["title"][i],
                 "abstract": d["abstract"][i],
+                "content_hash": d["content_hash"][i],
             }
             for i in range(len(d["work_id"]))
             if d["title"][i] and d["abstract"][i]
@@ -74,7 +69,7 @@ def run(batch_size: int = 5000, limit: int | None = None):
         if not works:
             continue
 
-        hashes = {w["work_id"]: content_hash(w["title"], w["abstract"]) for w in works}
+        hashes = {w["work_id"]: w["content_hash"] for w in works}
 
         # Check existing hashes in LanceDB
         ids = list(hashes.keys())

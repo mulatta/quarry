@@ -35,7 +35,6 @@ elt = [
     "dagster-dg-cli>=1.12.19",
     "torch",
     "sentence-transformers",
-    "blake3",
     "httpx",
     "boto3",
     "duckdb",
