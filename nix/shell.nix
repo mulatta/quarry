@@ -68,7 +68,7 @@ in
 
         services.clickhouse."quarry-ch" = {
           enable = true;
-          port = 9001;
+          port = 9000;
           extraConfig = {
             http_port = 8124;
           };
