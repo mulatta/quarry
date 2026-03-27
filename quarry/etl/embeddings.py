@@ -1,11 +1,13 @@
 """Batch-encode papers from Parquet → LanceDB with blake3 content caching.
 
-Reads works from Parquet via PyArrow C++ engine (column pruning + predicate
-pushdown), skips unchanged (blake3 match), encodes new/modified papers with
-jina-v5 nano, upserts to LanceDB.
+Reads works from Parquet via PyArrow dataset scanner (streaming, ~50MB memory),
+skips unchanged (blake3 match), encodes new/modified papers with jina-v5 nano,
+upserts to LanceDB. I/O and GPU are overlapped via a prefetch queue.
 """
 
 import logging
+import queue
+import threading
 import time
 from pathlib import Path
 
@@ -20,13 +22,11 @@ from quarry.store.lance import LanceStore
 
 log = logging.getLogger(__name__)
 
+_PREFETCH_DEPTH = 3  # bounded queue depth for backpressure
+
 
 def _parquet_batches(batch_size: int = 5000):
-    """Yield dicts from works Parquet via streaming (no full table load).
-
-    Uses pyarrow.dataset Scanner for constant memory (~50MB per batch)
-    instead of pq.read_table which loads everything into RAM (~60-80GB).
-    """
+    """Yield RecordBatch dicts from works Parquet via streaming."""
     works_dir = Path(settings.parquet_dir) / "works"
     dataset = ds.dataset(works_dir, format="parquet", partitioning="hive")
     scanner = dataset.scanner(
@@ -54,6 +54,55 @@ def _parquet_batches(batch_size: int = 5000):
         ]
 
 
+def _prefetch(batch_size, lance, logger):
+    """Background I/O: read parquet + blake3 filter → bounded queue.
+
+    Yields (works, to_encode, hashes) tuples. The producer thread reads
+    batches and checks blake3 hashes while the main thread encodes on GPU.
+    Queue depth of 3 limits memory to ~15MB of pre-fetched text.
+    """
+    q = queue.Queue(maxsize=_PREFETCH_DEPTH)
+
+    _error: list[BaseException] = []  # mutable container for thread→generator
+
+    def _producer():
+        try:
+            for works in _parquet_batches(batch_size):
+                if not works:
+                    continue
+                hashes = {w["work_id"]: w["content_hash"] for w in works}
+                ids = list(hashes.keys())
+                try:
+                    existing = lance.existing_hashes(ids)
+                except Exception as exc:
+                    logger.warning("existing_hashes failed (%s), re-encoding all", exc)
+                    existing = {}
+                to_encode = [
+                    w
+                    for w in works
+                    if hashes[w["work_id"]] != existing.get(w["work_id"])
+                ]
+                q.put((works, to_encode, hashes))
+        except Exception as exc:
+            logger.exception("prefetch producer failed")
+            _error.append(exc)
+        finally:
+            q.put(None, timeout=30)
+
+    thread = threading.Thread(target=_producer, daemon=True)
+    thread.start()
+
+    while True:
+        item = q.get()
+        if item is None:
+            break
+        yield item
+
+    thread.join()
+    if _error:
+        raise _error[0]
+
+
 def run(batch_size: int = 5000, limit: int | None = None, logger=None):
     if logger is None:
         logger = log
@@ -71,25 +120,7 @@ def run(batch_size: int = 5000, limit: int | None = None, logger=None):
     total_skipped = 0
     batch_num = 0
 
-    for works in _parquet_batches(batch_size):
-        if not works:
-            continue
-
-        hashes = {w["work_id"]: w["content_hash"] for w in works}
-
-        # Check existing hashes in LanceDB
-        ids = list(hashes.keys())
-        try:
-            existing = lance.existing_hashes(ids)
-        except Exception as exc:
-            logger.warning("existing_hashes failed (%s), re-encoding all", exc)
-            existing = {}
-
-        # Filter to only new/changed works
-        to_encode = [
-            w for w in works if hashes[w["work_id"]] != existing.get(w["work_id"])
-        ]
-
+    for works, to_encode, hashes in _prefetch(batch_size, lance, logger):
         if not to_encode:
             total_skipped += len(works)
             batch_num += 1
@@ -97,7 +128,7 @@ def run(batch_size: int = 5000, limit: int | None = None, logger=None):
                 break
             continue
 
-        # Encode
+        # Encode on GPU (main thread)
         texts = [f"{w['title']}. {w['abstract']}" for w in to_encode]
         t0 = time.time()
         vec_ret = encoder.encode_passages(texts)
@@ -105,18 +136,17 @@ def run(batch_size: int = 5000, limit: int | None = None, logger=None):
         elapsed = time.time() - t0
 
         # Build rows for LanceDB upsert
-        lance_rows = []
-        for i, w in enumerate(to_encode):
-            lance_rows.append(
-                {
-                    "work_id": w["work_id"],
-                    "content_hash": hashes[w["work_id"]],
-                    "title": w["title"],
-                    "abstract": w["abstract"],
-                    "vec_retrieval": vec_ret[i].tolist(),
-                    "vec_cluster": vec_clust[i].tolist(),
-                }
-            )
+        lance_rows = [
+            {
+                "work_id": w["work_id"],
+                "content_hash": hashes[w["work_id"]],
+                "title": w["title"],
+                "abstract": w["abstract"],
+                "vec_retrieval": vec_ret[i].tolist(),
+                "vec_cluster": vec_clust[i].tolist(),
+            }
+            for i, w in enumerate(to_encode)
+        ]
 
         lance.upsert(lance_rows)
 
