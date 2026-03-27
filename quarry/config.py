@@ -68,6 +68,9 @@ class Settings(BaseSettings):
     batch_job_queue: str = "quarry-spot"
     batch_job_definition: str = "quarry-etl"
 
+    # Embeddings
+    embed_batch_size: int = 32  # GPU forward pass batch; OOM-sensitive (VRAM dependent)
+
     # Download
     ftp_parallel: int = 4
 
