@@ -32,7 +32,7 @@ def _parquet_batches(batch_size: int = 5000):
     Token-level truncation is handled by JinaEncoder (max_seq_length).
     """
     works_dir = Path(settings.parquet_dir) / "works"
-    dataset = ds.dataset(works_dir, format="parquet", partitioning="hive")
+    dataset = ds.dataset(works_dir, format="parquet")
     scanner = dataset.scanner(
         columns=["work_id", "title", "abstract", "content_hash"],
         filter=(

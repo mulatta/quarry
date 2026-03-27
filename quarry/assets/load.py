@@ -384,9 +384,9 @@ def ch_transform(context: AssetExecutionContext) -> MaterializeResult:
 # CH table → (pg_table, columns) for Parquet export.
 # Column list matches PG schema exactly; CH export SQL pre-formats types
 # (e.g. pub_type Array → '{a,b}' PG text[] literal).
-# works is exported separately with Hive partitioning by tier.
+# works is exported as 256 hash-bucketed parquet files for uniform size.
 _WORKS_CH_TABLE = "works_export"
-# Full column list (includes tier — reconstructed from Hive partition key on read).
+# Full column list (tier is a regular column, not a partition key).
 _WORKS_COLUMNS = (
     "work_id, work_id_int, tier, pmid, doi, title, abstract, content_hash, "
     "pub_year, pub_date, type, cited_by_count, host_venue, oa_status, oa_url, "
@@ -394,15 +394,8 @@ _WORKS_COLUMNS = (
     "pm_pub_type, pm_created_date, pm_revised_date, pm_indexed_date, "
     "rcr, nih_percentile, apt, is_clinical"
 )
-# Export columns (tier excluded — encoded in Hive directory structure).
-_WORKS_EXPORT_COLUMNS = (
-    "work_id, work_id_int, pmid, doi, title, abstract, content_hash, "
-    "pub_year, pub_date, type, cited_by_count, host_venue, oa_status, oa_url, "
-    "is_retracted, updated_date, pm_journal_abbr, pm_country, pm_medline_status, "
-    "pm_pub_type, pm_created_date, pm_revised_date, pm_indexed_date, "
-    "rcr, nih_percentile, apt, is_clinical"
-)
-_WORKS_TIERS = ["t1", "t2", "t3", "t4"]
+_WORKS_EXPORT_COLUMNS = _WORKS_COLUMNS
+_WORKS_BUCKETS = 256  # sipHash64(work_id) hex prefix → uniform ~380MB files
 
 _EXPORT_TABLES: list[tuple[str, str, str]] = [
     # (ch_table, pg_table, columns)
@@ -470,7 +463,7 @@ def _ch_export_one(
 @asset(
     group_name="export",
     deps=[ch_transform],
-    description="CH export tables → 13 Parquet files (parallel subprocess).",
+    description="CH → Parquet (works: 256 hash-bucketed files + 12 flat tables).",
     kinds={"clickhouse", "parquet"},
 )
 def parquet_export(context: AssetExecutionContext) -> MaterializeResult:
@@ -478,26 +471,30 @@ def parquet_export(context: AssetExecutionContext) -> MaterializeResult:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     failed: list[str] = []
-    total = len(_EXPORT_TABLES) + len(_WORKS_TIERS)
+    total = len(_EXPORT_TABLES) + _WORKS_BUCKETS
 
-    # --- works: Hive-partitioned by tier ---
-    def _export_works_tier(tier: str) -> str:
-        tier_dir = out_dir / "works" / f"tier={tier}"
-        tier_dir.mkdir(parents=True, exist_ok=True)
-        out_path = tier_dir / "data.parquet"
-        query = f"SELECT {_WORKS_EXPORT_COLUMNS} FROM {_WORKS_CH_TABLE} WHERE tier = '{tier}'"
+    # --- works: hash-bucketed by sipHash64(work_id) hex prefix (256 files) ---
+    def _export_works_bucket(bucket: int) -> str:
+        works_dir = out_dir / "works"
+        works_dir.mkdir(parents=True, exist_ok=True)
+        hex_prefix = f"{bucket:02x}"
+        out_path = works_dir / f"{hex_prefix}.parquet"
+        query = (
+            f"SELECT {_WORKS_EXPORT_COLUMNS} FROM {_WORKS_CH_TABLE} "
+            f"WHERE substring(hex(sipHash64(work_id)), 1, 2) = upper('{hex_prefix}')"
+        )
         cmd = _ch_client_cmd() + ["--query", query + " FORMAT Parquet"]
-        context.log.info(f"[Parquet] exporting works tier={tier} → {out_path}")
+        context.log.info(f"[Parquet] exporting works bucket={hex_prefix} → {out_path}")
         with open(out_path, "wb") as f:
             result = subprocess.run(cmd, stdout=f, stderr=subprocess.PIPE, text=True)
         if result.returncode != 0:
             context.log.error(
-                f"[Parquet] works tier={tier} failed: {result.stderr.strip()}"
+                f"[Parquet] works bucket={hex_prefix} failed: {result.stderr.strip()}"
             )
             raise RuntimeError(
-                f"Parquet export failed for works tier={tier}: {result.stderr}"
+                f"Parquet export failed for works bucket={hex_prefix}: {result.stderr}"
             )
-        return f"works/tier={tier}"
+        return f"works/{hex_prefix}"
 
     # --- flat tables ---
     def _export(ch_table: str, pg_table: str, columns: str) -> str:
@@ -511,8 +508,8 @@ def parquet_export(context: AssetExecutionContext) -> MaterializeResult:
 
     with ThreadPoolExecutor(max_workers=settings.ch_export_max_concurrent) as pool:
         futures: dict[object, str] = {}
-        for tier in _WORKS_TIERS:
-            futures[pool.submit(_export_works_tier, tier)] = f"works/tier={tier}"
+        for bucket in range(_WORKS_BUCKETS):
+            futures[pool.submit(_export_works_bucket, bucket)] = f"works/{bucket:02x}"
         for ch, pg, cols in _EXPORT_TABLES:
             futures[pool.submit(_export, ch, pg, cols)] = pg
 
@@ -559,19 +556,18 @@ def _select_expr(columns: str) -> str:
 def _duckdb_pg_load(pg_table: str, columns: str, parquet_path: Path) -> None:
     """Insert Parquet → PG via DuckDB Python binding + postgres extension.
 
-    parquet_path can be a single .parquet file or a Hive-partitioned directory.
+    parquet_path can be a single .parquet file or a directory of parquet files.
     """
     import duckdb
 
     select = _select_expr(columns)
-    # Hive directory: glob all parquet files; single file: use directly
-    src = f"{parquet_path}/**/*.parquet" if parquet_path.is_dir() else str(parquet_path)
+    src = f"{parquet_path}/*.parquet" if parquet_path.is_dir() else str(parquet_path)
     conn = duckdb.connect()
     conn.execute("INSTALL postgres; LOAD postgres;")
     conn.execute(f"ATTACH '{settings.pg_conninfo}' AS pg (TYPE postgres)")
     conn.execute(
         f"INSERT INTO pg.{pg_table} ({columns}) "
-        f"SELECT {select} FROM read_parquet('{src}', hive_partitioning=true)"
+        f"SELECT {select} FROM read_parquet('{src}')"
     )
     conn.close()
 
