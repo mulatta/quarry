@@ -379,18 +379,28 @@ class TestDagsterPipeline:
         pq_dir = DATA_DIR / "parquet"
         flat_files = list(pq_dir.glob("*.parquet")) if pq_dir.exists() else []
         works_files = (
-            list((pq_dir / "works").glob("*.parquet"))
+            list((pq_dir / "works").rglob("*.parquet"))
+            if (pq_dir / "works").exists()
+            else []
+        )
+        tier_dirs = (
+            [d for d in (pq_dir / "works").iterdir() if d.is_dir()]
             if (pq_dir / "works").exists()
             else []
         )
         print(
-            f"\n=== Parquet: {len(flat_files)} flat + {len(works_files)} works buckets ==="
+            f"\n=== Parquet: {len(flat_files)} flat + {len(works_files)} works "
+            f"in {len(tier_dirs)} tier dirs ==="
         )
         for f in sorted(flat_files):
             print(f"  {f.name}: {f.stat().st_size:,} bytes")
+        for d in sorted(tier_dirs):
+            n = len(list(d.glob("*.parquet")))
+            print(f"  {d.name}/: {n} files")
         assert len(flat_files) == 12, (
             f"Expected 12 flat parquet files, got {len(flat_files)}"
         )
+        assert len(tier_dirs) > 0, "Expected hive tier directories"
         assert len(works_files) > 0, "Expected works bucket parquet files"
 
         # Verify PG has data
