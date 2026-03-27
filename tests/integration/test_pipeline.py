@@ -377,11 +377,21 @@ class TestDagsterPipeline:
 
         # Verify Parquet export created files
         pq_dir = DATA_DIR / "parquet"
-        pq_files = list(pq_dir.glob("*.parquet")) if pq_dir.exists() else []
-        print(f"\n=== Parquet files: {len(pq_files)} ===")
-        for f in sorted(pq_files):
+        flat_files = list(pq_dir.glob("*.parquet")) if pq_dir.exists() else []
+        works_files = (
+            list((pq_dir / "works").glob("*.parquet"))
+            if (pq_dir / "works").exists()
+            else []
+        )
+        print(
+            f"\n=== Parquet: {len(flat_files)} flat + {len(works_files)} works buckets ==="
+        )
+        for f in sorted(flat_files):
             print(f"  {f.name}: {f.stat().st_size:,} bytes")
-        assert len(pq_files) == 13, f"Expected 13 parquet files, got {len(pq_files)}"
+        assert len(flat_files) == 12, (
+            f"Expected 12 flat parquet files, got {len(flat_files)}"
+        )
+        assert len(works_files) > 0, "Expected works bucket parquet files"
 
         # Verify PG has data
         r = subprocess.run(
