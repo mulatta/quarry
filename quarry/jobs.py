@@ -1,7 +1,7 @@
 """Dagster job definitions for pipeline execution modes.
 
 etl:        sync → parse → ch_init → ch → parquet_export → r2_upload
-serve:      pg_load + csr_graph + paper_embeddings (assumes parquet on disk)
+serve:      pg_load + csr_graph → paper_embeddings (sequential for memory safety)
 embeddings: paper_embeddings only
 full:       etl (without r2) + serve (single machine E2E)
 

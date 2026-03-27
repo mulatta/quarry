@@ -11,6 +11,7 @@ from dagster import (
     asset,
 )
 
+from quarry.assets.citations import csr_graph
 from quarry.assets.load import parquet_export
 from quarry.config import settings
 from quarry.etl.embeddings import run as run_embeddings
@@ -18,7 +19,7 @@ from quarry.etl.embeddings import run as run_embeddings
 
 @asset(
     group_name="search",
-    deps=[parquet_export],
+    deps=[parquet_export, csr_graph],
     description="Encode works (blake3 change detection) → LanceDB vectors + FTS index.",
     kinds={"lancedb", "python", "gpu"},
 )

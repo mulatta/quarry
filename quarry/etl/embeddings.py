@@ -10,8 +10,7 @@ import time
 from pathlib import Path
 
 try:
-    import pyarrow.compute as pc
-    import pyarrow.parquet as pq
+    import pyarrow.dataset as ds
 except ImportError:
     raise ImportError("pip install quarry[elt]") from None
 
@@ -23,18 +22,23 @@ log = logging.getLogger(__name__)
 
 
 def _parquet_batches(batch_size: int = 5000):
-    """Yield dicts from works Parquet. Hive partition pruning reads only t1+t2."""
+    """Yield dicts from works Parquet via streaming (no full table load).
+
+    Uses pyarrow.dataset Scanner for constant memory (~50MB per batch)
+    instead of pq.read_table which loads everything into RAM (~60-80GB).
+    """
     works_dir = Path(settings.parquet_dir) / "works"
-    table = pq.read_table(
-        works_dir,
+    dataset = ds.dataset(works_dir, format="parquet", partitioning="hive")
+    scanner = dataset.scanner(
         columns=["work_id", "title", "abstract", "content_hash"],
-        filters=(
-            (pc.field("tier").isin(["t1", "t2"]))
-            & pc.field("abstract").is_valid()
-            & pc.field("title").is_valid()
+        filter=(
+            ds.field("tier").isin(["t1", "t2"])
+            & ds.field("abstract").is_valid()
+            & ds.field("title").is_valid()
         ),
+        batch_size=batch_size,
     )
-    for batch in table.to_batches(max_chunksize=batch_size):
+    for batch in scanner.to_batches():
         if len(batch) == 0:
             continue
         d = batch.to_pydict()
