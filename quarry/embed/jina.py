@@ -11,7 +11,7 @@ from sentence_transformers import SentenceTransformer
 MODEL_NAME = "jinaai/jina-embeddings-v5-text-nano"
 FULL_DIM = 768
 DEFAULT_DIM = 256
-BATCH_SIZE = 32
+DEFAULT_BATCH_SIZE = 32
 
 
 def _default_device() -> str:
@@ -36,8 +36,14 @@ def _truncate_norm(embs: np.ndarray, dim: int) -> np.ndarray:
 class JinaEncoder:
     """Stateful encoder wrapping jina-v5 nano with dual LoRA."""
 
-    def __init__(self, device: str | None = None, dim: int = DEFAULT_DIM):
+    def __init__(
+        self,
+        device: str | None = None,
+        dim: int = DEFAULT_DIM,
+        batch_size: int = DEFAULT_BATCH_SIZE,
+    ):
         self.dim = dim
+        self.batch_size = batch_size
         self.device = device or _default_device()
         self._model = SentenceTransformer(
             MODEL_NAME,
@@ -51,7 +57,7 @@ class JinaEncoder:
     ) -> np.ndarray:
         kwargs = {
             "task": task,
-            "batch_size": BATCH_SIZE,
+            "batch_size": self.batch_size,
             "show_progress_bar": False,
             "convert_to_numpy": True,
             "normalize_embeddings": True,

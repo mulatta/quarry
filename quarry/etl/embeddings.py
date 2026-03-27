@@ -114,7 +114,7 @@ def run(batch_size: int = 5000, limit: int | None = None, logger=None):
     except Exception:
         lance.create_table()
 
-    encoder = JinaEncoder(dim=256)
+    encoder = JinaEncoder(dim=256, batch_size=settings.embed_batch_size)
 
     total_encoded = 0
     total_skipped = 0
