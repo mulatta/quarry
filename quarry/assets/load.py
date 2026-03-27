@@ -468,6 +468,39 @@ def _ch_export_one(
         return subprocess.run(cmd, stdout=f, stderr=subprocess.PIPE, text=True)
 
 
+def _split_parquet_by_bucket(src: Path, dest_dir: Path) -> int:
+    """Split single parquet into _BUCKETS files by work_id_int % _BUCKETS.
+
+    Streams record batches → bounded memory. 256 ParquetWriters stay open,
+    each flushing per-batch (no large row-group buffering).
+    """
+    import pyarrow as pa
+    import pyarrow.compute as pc
+    import pyarrow.dataset as pa_ds
+    import pyarrow.parquet as pq
+
+    writers: dict[int, pq.ParquetWriter] = {}
+    total = 0
+    mask = pa.scalar(_BUCKETS - 1, type=pa.uint64())  # 255 — power-of-two modulo
+
+    try:
+        for batch in pa_ds.dataset(src, format="parquet").scanner().to_batches():
+            tbl = pa.Table.from_batches([batch])
+            total += len(tbl)
+            bucket_ids = pc.bit_wise_and(tbl.column("work_id_int"), mask)
+            for bval in pc.unique(bucket_ids).to_pylist():
+                subset = tbl.filter(pc.equal(bucket_ids, bval))
+                if bval not in writers:
+                    writers[bval] = pq.ParquetWriter(
+                        str(dest_dir / f"{bval:03d}.parquet"), tbl.schema
+                    )
+                writers[bval].write_table(subset)
+    finally:
+        for w in writers.values():
+            w.close()
+    return total
+
+
 @asset(
     group_name="export",
     deps=[ch_transform],
@@ -479,28 +512,36 @@ def parquet_export(context: AssetExecutionContext) -> MaterializeResult:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     failed: list[str] = []
-    total = len(_EXPORT_TABLES) + len(_TIERS) * _BUCKETS
+    total = len(_EXPORT_TABLES) + len(_TIERS)
 
-    # --- works: tier (hive L1) × work_id_int % 256 (bucket files) ---
-    def _export_works_bucket(tier: str, bucket: int) -> str:
-        tier_dir = out_dir / "works" / f"tier={tier}"
-        tier_dir.mkdir(parents=True, exist_ok=True)
-        out_path = tier_dir / f"{bucket:03d}.parquet"
+    # --- works: CH export per tier (1 full scan each) → PyArrow bucket split ---
+    def _export_and_split_tier(tier: str) -> str:
+        temp_path = out_dir / f"_tmp_works_{tier}.parquet"
         query = (
             f"SELECT {_WORKS_EXPORT_COLUMNS} FROM {_WORKS_CH_TABLE} "
-            f"WHERE tier = '{tier}' AND work_id_int % {_BUCKETS} = {bucket}"
+            f"WHERE tier = '{tier}'"
         )
         cmd = _ch_client_cmd() + ["--query", query + " FORMAT Parquet"]
-        with open(out_path, "wb") as f:
+        context.log.info(f"[Parquet] exporting works tier={tier} → temp")
+        with open(temp_path, "wb") as f:
             result = subprocess.run(cmd, stdout=f, stderr=subprocess.PIPE, text=True)
         if result.returncode != 0:
             context.log.error(
-                f"[Parquet] works tier={tier}/{bucket:03d} failed: {result.stderr.strip()}"
+                f"[Parquet] works tier={tier} failed: {result.stderr.strip()}"
             )
             raise RuntimeError(
-                f"Parquet export failed for works tier={tier}/{bucket:03d}: {result.stderr}"
+                f"Parquet export failed for works tier={tier}: {result.stderr}"
             )
-        return f"works/tier={tier}/{bucket:03d}"
+        tier_dir = out_dir / "works" / f"tier={tier}"
+        tier_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            rows = _split_parquet_by_bucket(temp_path, tier_dir)
+        finally:
+            temp_path.unlink(missing_ok=True)
+        context.log.info(
+            f"[Parquet] works tier={tier}: {rows:,} rows → {_BUCKETS} buckets"
+        )
+        return f"works/tier={tier}"
 
     # --- flat tables ---
     def _export(ch_table: str, pg_table: str, columns: str) -> str:
@@ -515,10 +556,7 @@ def parquet_export(context: AssetExecutionContext) -> MaterializeResult:
     with ThreadPoolExecutor(max_workers=settings.ch_export_max_concurrent) as pool:
         futures: dict[object, str] = {}
         for tier in _TIERS:
-            for bucket in range(_BUCKETS):
-                futures[pool.submit(_export_works_bucket, tier, bucket)] = (
-                    f"works/tier={tier}/{bucket:03d}"
-                )
+            futures[pool.submit(_export_and_split_tier, tier)] = f"works/tier={tier}"
         for ch, pg, cols in _EXPORT_TABLES:
             futures[pool.submit(_export, ch, pg, cols)] = pg
 
