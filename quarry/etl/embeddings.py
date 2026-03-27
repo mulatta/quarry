@@ -54,7 +54,9 @@ def _parquet_batches(batch_size: int = 5000):
         ]
 
 
-def run(batch_size: int = 5000, limit: int | None = None):
+def run(batch_size: int = 5000, limit: int | None = None, logger=None):
+    if logger is None:
+        logger = log
     lance = LanceStore(settings.lancedb_uri)
 
     # Ensure table exists
@@ -80,7 +82,7 @@ def run(batch_size: int = 5000, limit: int | None = None):
         try:
             existing = lance.existing_hashes(ids)
         except Exception as exc:
-            log.warning("existing_hashes failed (%s), re-encoding all", exc)
+            logger.warning("existing_hashes failed (%s), re-encoding all", exc)
             existing = {}
 
         # Filter to only new/changed works
@@ -123,7 +125,7 @@ def run(batch_size: int = 5000, limit: int | None = None):
         batch_num += 1
         throughput = len(texts) / elapsed if elapsed > 0 else 0
 
-        log.info(
+        logger.info(
             "batch %d: encoded=%d, skipped=%d, %.0f vec/s, %.1fs",
             batch_num,
             len(to_encode),
@@ -137,15 +139,15 @@ def run(batch_size: int = 5000, limit: int | None = None):
 
     encoder.unload()
 
-    log.info("Done: encoded=%d, skipped=%d", total_encoded, total_skipped)
+    logger.info("Done: encoded=%d, skipped=%d", total_encoded, total_skipped)
 
     # Build indices if we encoded anything
     if total_encoded > 0:
-        log.info("Building FTS index...")
+        logger.info("Building FTS index...")
         lance.create_fts_index()
-        log.info("Building scalar index on content_hash...")
+        logger.info("Building scalar index on content_hash...")
         lance.create_scalar_index("content_hash")
-        log.info("Building vector index...")
+        logger.info("Building vector index...")
         lance.create_vector_index("vec_retrieval")
         lance.create_vector_index("vec_cluster")
-        log.info("Indices built.")
+        logger.info("Indices built.")

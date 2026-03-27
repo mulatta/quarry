@@ -27,7 +27,7 @@ def paper_embeddings(
     context: AssetExecutionContext,
 ) -> MaterializeResult:
     context.log.info("[Embed] running pipeline (blake3 cache + jina-v5)")
-    run_embeddings()
+    run_embeddings(logger=context.log)
     return MaterializeResult(
         metadata={
             "lancedb_uri": MetadataValue.text(settings.lancedb_uri),
