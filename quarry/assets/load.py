@@ -459,10 +459,12 @@ _EXPORT_TABLES: list[tuple[str, str, str]] = [
 
 
 def _ch_export_one(
-    ch_table: str, columns: str, out_path: Path
+    ch_table: str, columns: str, out_path: Path, *, where: str | None = None
 ) -> subprocess.CompletedProcess:
     """Export one CH table to Parquet file via subprocess."""
     query = f"SELECT {columns} FROM {ch_table}"
+    if where:
+        query += f" WHERE {where}"
     cmd = _ch_client_cmd() + ["--query", query + " FORMAT Parquet"]
     with open(out_path, "wb") as f:
         return subprocess.run(cmd, stdout=f, stderr=subprocess.PIPE, text=True)
@@ -517,14 +519,10 @@ def parquet_export(context: AssetExecutionContext) -> MaterializeResult:
     # --- works: CH export per tier (1 full scan each) → PyArrow bucket split ---
     def _export_and_split_tier(tier: str) -> str:
         temp_path = out_dir / f"_tmp_works_{tier}.parquet"
-        query = (
-            f"SELECT {_WORKS_EXPORT_COLUMNS} FROM {_WORKS_CH_TABLE} "
-            f"WHERE tier = '{tier}'"
-        )
-        cmd = _ch_client_cmd() + ["--query", query + " FORMAT Parquet"]
         context.log.info(f"[Parquet] exporting works tier={tier} → temp")
-        with open(temp_path, "wb") as f:
-            result = subprocess.run(cmd, stdout=f, stderr=subprocess.PIPE, text=True)
+        result = _ch_export_one(
+            _WORKS_CH_TABLE, _WORKS_EXPORT_COLUMNS, temp_path, where=f"tier = '{tier}'"
+        )
         if result.returncode != 0:
             context.log.error(
                 f"[Parquet] works tier={tier} failed: {result.stderr.strip()}"
@@ -618,13 +616,15 @@ def _duckdb_pg_load(
         src = str(parquet_path)
     opts = ", hive_partitioning=true" if hive else ""
     conn = duckdb.connect()
-    conn.execute("INSTALL postgres; LOAD postgres;")
-    conn.execute(f"ATTACH '{settings.pg_conninfo}' AS pg (TYPE postgres)")
-    conn.execute(
-        f"INSERT INTO pg.{pg_table} ({columns}) "
-        f"SELECT {select} FROM read_parquet('{src}'{opts})"
-    )
-    conn.close()
+    try:
+        conn.execute("INSTALL postgres; LOAD postgres;")
+        conn.execute(f"ATTACH '{settings.pg_conninfo}' AS pg (TYPE postgres)")
+        conn.execute(
+            f"INSERT INTO pg.{pg_table} ({columns}) "
+            f"SELECT {select} FROM read_parquet('{src}'{opts})"
+        )
+    finally:
+        conn.close()
 
 
 @asset(

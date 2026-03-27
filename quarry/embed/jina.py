@@ -53,6 +53,8 @@ class JinaEncoder:
             model_kwargs={"torch_dtype": torch.bfloat16},
             trust_remote_code=True,
         )
+        if max_tokens:
+            self._model.max_seq_length = max_tokens
 
     def _encode(
         self, texts: list[str], task: str, prompt_name: str | None = None
