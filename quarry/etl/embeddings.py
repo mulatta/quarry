@@ -26,13 +26,18 @@ _PREFETCH_DEPTH = 3  # bounded queue depth for backpressure
 
 
 def _parquet_batches(batch_size: int = 5000):
-    """Yield RecordBatch dicts from works Parquet via streaming."""
+    """Yield RecordBatch dicts from works Parquet via streaming.
+
+    Filters by tier (t1/t2) and allowed document types.
+    Token-level truncation is handled by JinaEncoder (max_seq_length).
+    """
     works_dir = Path(settings.parquet_dir) / "works"
     dataset = ds.dataset(works_dir, format="parquet", partitioning="hive")
     scanner = dataset.scanner(
         columns=["work_id", "title", "abstract", "content_hash"],
         filter=(
             ds.field("tier").isin(["t1", "t2"])
+            & ds.field("type").isin(settings.embed_allowed_types)
             & ds.field("abstract").is_valid()
             & ds.field("title").is_valid()
         ),
@@ -114,7 +119,11 @@ def run(batch_size: int = 5000, limit: int | None = None, logger=None):
     except Exception:
         lance.create_table()
 
-    encoder = JinaEncoder(dim=256, batch_size=settings.embed_batch_size)
+    encoder = JinaEncoder(
+        dim=256,
+        batch_size=settings.embed_batch_size,
+        max_tokens=settings.embed_max_tokens,
+    )
 
     total_encoded = 0
     total_skipped = 0
