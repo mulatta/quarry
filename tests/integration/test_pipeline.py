@@ -450,3 +450,38 @@ class TestDagsterPipeline:
             )
             cnt = r.stdout.strip() if r.returncode == 0 else "ERROR"
             print(f"  {t}: {cnt}")
+
+        # Verify hive parquet → PyArrow scan (embedding pipeline input)
+        import pyarrow.dataset as pa_ds
+
+        works_dir = pq_dir / "works"
+        dataset = pa_ds.dataset(works_dir, format="parquet", partitioning="hive")
+        scan = dataset.scanner(
+            columns=["work_id", "title", "abstract", "content_hash", "tier", "type"],
+            filter=pa_ds.field("tier").isin(["t1", "t2"]),
+        ).to_table()
+        assert len(scan) > 0, "No rows from hive scan with tier filter"
+        assert "tier" in scan.column_names, "tier column missing from hive partition"
+        print(
+            f"\n=== Hive scan (t1+t2): {len(scan)} rows, cols={scan.column_names} ==="
+        )
+
+        # Verify LanceStore round-trip with dummy vectors (no GPU needed)
+        from quarry.store.lance import LanceStore
+
+        lance_uri = str(DATA_DIR / "lance_test")
+        lance = LanceStore(lance_uri)
+        lance.create_table()
+        row = {
+            "work_id": scan.column("work_id")[0].as_py(),
+            "content_hash": scan.column("content_hash")[0].as_py(),
+            "title": scan.column("title")[0].as_py(),
+            "abstract": scan.column("abstract")[0].as_py(),
+            "vec_retrieval": [0.0] * 256,
+            "vec_cluster": [0.0] * 256,
+        }
+        lance.upsert([row])
+        rows = lance.table.to_pandas()
+        assert len(rows) == 1, f"Expected 1 row in LanceDB, got {len(rows)}"
+        assert rows.iloc[0]["work_id"] == row["work_id"]
+        print(f"=== LanceDB round-trip OK: {row['work_id']} ===")
