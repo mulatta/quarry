@@ -41,9 +41,11 @@ class JinaEncoder:
         device: str | None = None,
         dim: int = DEFAULT_DIM,
         batch_size: int = DEFAULT_BATCH_SIZE,
+        max_tokens: int | None = None,
     ):
         self.dim = dim
         self.batch_size = batch_size
+        self.max_tokens = max_tokens
         self.device = device or _default_device()
         self._model = SentenceTransformer(
             MODEL_NAME,

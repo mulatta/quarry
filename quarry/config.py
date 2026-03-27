@@ -70,6 +70,20 @@ class Settings(BaseSettings):
 
     # Embeddings
     embed_batch_size: int = 32  # GPU forward pass batch; OOM-sensitive (VRAM dependent)
+    embed_max_tokens: int = (
+        1024  # tokenizer truncation; prevents GPU OOM from long texts
+    )
+    embed_allowed_types: list[str] = [
+        "article",
+        "preprint",
+        "review",
+        "dissertation",
+        "book-chapter",
+        "letter",
+        "editorial",
+        "report",
+        "book",
+    ]
 
     # Download
     ftp_parallel: int = 4
