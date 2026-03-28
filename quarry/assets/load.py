@@ -473,8 +473,9 @@ def _ch_export_one(
 def _split_parquet_by_bucket(src: Path, dest_dir: Path) -> int:
     """Split single parquet into _BUCKETS files by work_id_int % _BUCKETS.
 
-    Streams record batches → bounded memory. 256 ParquetWriters stay open,
-    each flushing per-batch (no large row-group buffering).
+    Streams record batches → bounded memory. Per-bucket rows are buffered
+    and flushed as row groups of ch_export_row_group_size so downstream scanners
+    (embeddings) get batches matching their requested batch_size.
     """
     import pyarrow as pa
     import pyarrow.compute as pc
@@ -482,8 +483,18 @@ def _split_parquet_by_bucket(src: Path, dest_dir: Path) -> int:
     import pyarrow.parquet as pq
 
     writers: dict[int, pq.ParquetWriter] = {}
+    buffers: dict[int, list[pa.Table]] = {}
+    buf_lens: dict[int, int] = {}
     total = 0
-    mask = pa.scalar(_BUCKETS - 1, type=pa.uint64())  # 255 — power-of-two modulo
+    mask = pa.scalar(_BUCKETS - 1, type=pa.uint64())
+
+    def _flush(bval: int) -> None:
+        if bval not in buffers or not buffers[bval]:
+            return
+        merged = pa.concat_tables(buffers[bval])
+        writers[bval].write_table(merged)
+        buffers[bval].clear()
+        buf_lens[bval] = 0
 
     try:
         for batch in pa_ds.dataset(src, format="parquet").scanner().to_batches():
@@ -496,8 +507,15 @@ def _split_parquet_by_bucket(src: Path, dest_dir: Path) -> int:
                     writers[bval] = pq.ParquetWriter(
                         str(dest_dir / f"{bval:03d}.parquet"), tbl.schema
                     )
-                writers[bval].write_table(subset)
+                    buffers[bval] = []
+                    buf_lens[bval] = 0
+                buffers[bval].append(subset)
+                buf_lens[bval] += len(subset)
+                if buf_lens[bval] >= settings.ch_export_row_group_size:
+                    _flush(bval)
     finally:
+        for bval in list(buffers):
+            _flush(bval)
         for w in writers.values():
             w.close()
     return total
