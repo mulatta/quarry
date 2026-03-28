@@ -108,7 +108,8 @@ def _prefetch(batch_size, lance, logger):
         raise _error[0]
 
 
-def run(batch_size: int = 5000, limit: int | None = None, logger=None):
+def run(batch_size: int | None = None, limit: int | None = None, logger=None):
+    batch_size = batch_size or settings.embed_parquet_batch
     if logger is None:
         logger = log
     lance = LanceStore(settings.lancedb_uri)
