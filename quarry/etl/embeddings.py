@@ -113,9 +113,11 @@ def run(batch_size: int = 5000, limit: int | None = None, logger=None):
         logger = log
     lance = LanceStore(settings.lancedb_uri)
 
-    # Ensure table exists
+    # Ensure table exists; build work_id index for fast existing_hashes lookups
     try:
-        lance.table
+        if lance.table.count_rows() > 0:
+            logger.info("Building work_id BTree index for hash lookups...")
+            lance.create_scalar_index("work_id")
     except Exception:
         lance.create_table()
 
@@ -184,8 +186,8 @@ def run(batch_size: int = 5000, limit: int | None = None, logger=None):
     if total_encoded > 0:
         logger.info("Building FTS index...")
         lance.create_fts_index()
-        logger.info("Building scalar index on content_hash...")
-        lance.create_scalar_index("content_hash")
+        logger.info("Building scalar index on work_id...")
+        lance.create_scalar_index("work_id")
         logger.info("Building vector index...")
         lance.create_vector_index("vec_retrieval")
         lance.create_vector_index("vec_cluster")
