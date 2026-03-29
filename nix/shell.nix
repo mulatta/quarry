@@ -50,7 +50,7 @@ in
             listen_addresses = "";
             synchronous_commit = "off";
             wal_buffers = "64MB";
-            max_wal_size = "4GB";
+            max_wal_size = "32GB";
             shared_buffers = "2GB";
             work_mem = "256MB";
             maintenance_work_mem = "1GB";
