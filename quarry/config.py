@@ -65,10 +65,6 @@ class Settings(BaseSettings):
     r2_endpoint: str = ""
     r2_bucket: str = "quarry-data"
 
-    # AWS Batch
-    batch_job_queue: str = "quarry-spot"
-    batch_job_definition: str = "quarry-etl"
-
     # Embeddings
     embed_batch_size: int = 32  # GPU forward pass batch; OOM-sensitive (VRAM dependent)
     embed_max_tokens: int = (

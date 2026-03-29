@@ -6,7 +6,6 @@ except ImportError:
     raise ImportError("pip install quarry[elt]") from None
 
 from quarry.assets import (
-    batch,
     citations,
     download,
     export,
@@ -27,13 +26,12 @@ from quarry.resources import PGResource
 from quarry.schedules import (
     daily_update_schedule,
     monthly_citation_schedule,
-    weekly_distributed_schedule,
 )
 from quarry.sensors import distributed_r2_sync, distributed_serve, r2_upload_sensor
 
 defs = Definitions(
     assets=load_assets_from_modules(
-        [download, stage, load, export, import_, batch, citations, search],
+        [download, stage, load, export, import_, citations, search],
     ),
     jobs=[
         build_job,
@@ -49,7 +47,6 @@ defs = Definitions(
     schedules=[
         daily_update_schedule,
         monthly_citation_schedule,
-        weekly_distributed_schedule,
     ],
     sensors=[
         r2_upload_sensor,
