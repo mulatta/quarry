@@ -481,7 +481,8 @@ class TestDagsterPipeline:
             "vec_cluster": [0.0] * 256,
         }
         lance.upsert([row])
-        rows = lance.table.to_pandas()
-        assert len(rows) == 1, f"Expected 1 row in LanceDB, got {len(rows)}"
-        assert rows.iloc[0]["work_id"] == row["work_id"]
+        count = lance.table.count_rows()
+        assert count == 1, f"Expected 1 row in LanceDB, got {count}"
+        result = lance.table.search().limit(1).to_list()
+        assert result[0]["work_id"] == row["work_id"]
         print(f"=== LanceDB round-trip OK: {row['work_id']} ===")
