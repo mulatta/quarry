@@ -1,10 +1,11 @@
-"""Batch-encode papers from Parquet → LanceDB with blake3 content caching.
+"""Batch-encode papers from Parquet → LanceDB with content-hash caching.
 
 Reads works from Parquet via PyArrow dataset scanner (streaming, ~50MB memory),
-skips unchanged (blake3 match), encodes new/modified papers with jina-v5 nano,
-upserts to LanceDB. I/O and GPU are overlapped via a prefetch queue.
+skips unchanged (blake2b content+config hash match), encodes new/modified papers
+with jina-v5 nano, upserts to LanceDB. I/O and GPU are overlapped via a prefetch queue.
 """
 
+import hashlib
 import logging
 import queue
 import threading
@@ -17,12 +18,31 @@ except ImportError:
     raise ImportError("pip install quarry[elt]") from None
 
 from quarry.config import settings
-from quarry.embed.jina import JinaEncoder
+from quarry.embed.jina import JinaEncoder, MODEL_NAME
 from quarry.store.lance import LanceStore
 
 log = logging.getLogger(__name__)
 
 _PREFETCH_DEPTH = 3  # bounded queue depth for backpressure
+
+
+def _encode_config_hash() -> bytes:
+    """Hash of encoding parameters — changes trigger full re-encoding."""
+    h = hashlib.blake2b(digest_size=32)
+    h.update(
+        f"{MODEL_NAME}:{settings.embed_max_tokens}:{settings.embed_batch_size}".encode()
+    )
+    return h.digest()
+
+
+def _content_hash(title: str, abstract: str, config: bytes) -> bytes:
+    """blake2b(config + title + abstract) — encoding-aware change detection."""
+    h = hashlib.blake2b(digest_size=32)
+    h.update(config)
+    h.update(title.encode())
+    h.update(b"\n")
+    h.update(abstract.encode())
+    return h.digest()
 
 
 def _parquet_batches(batch_size: int = 5000):
@@ -34,7 +54,7 @@ def _parquet_batches(batch_size: int = 5000):
     works_dir = Path(settings.parquet_dir) / "works"
     dataset = ds.dataset(works_dir, format="parquet", partitioning="hive")
     scanner = dataset.scanner(
-        columns=["work_id", "title", "abstract", "content_hash"],
+        columns=["work_id", "title", "abstract"],
         filter=(
             ds.field("tier").isin(["t1", "t2"])
             & ds.field("type").isin(settings.embed_allowed_types)
@@ -52,7 +72,6 @@ def _parquet_batches(batch_size: int = 5000):
                 "work_id": d["work_id"][i],
                 "title": d["title"][i],
                 "abstract": d["abstract"][i],
-                "content_hash": d["content_hash"][i],
             }
             for i in range(len(d["work_id"]))
             if d["title"][i] and d["abstract"][i]
@@ -60,13 +79,15 @@ def _parquet_batches(batch_size: int = 5000):
 
 
 def _prefetch(batch_size, lance, logger):
-    """Background I/O: read parquet + blake3 filter → bounded queue.
+    """Background I/O: read parquet + content hash filter → bounded queue.
 
     Yields (works, to_encode, hashes) tuples. The producer thread reads
-    batches and checks blake3 hashes while the main thread encodes on GPU.
+    batches, computes content hashes (encoding-config-aware), and checks
+    against LanceDB while the main thread encodes on GPU.
     Queue depth of 3 limits memory to ~15MB of pre-fetched text.
     """
     q = queue.Queue(maxsize=_PREFETCH_DEPTH)
+    cfg = _encode_config_hash()
 
     _error: list[BaseException] = []  # mutable container for thread→generator
 
@@ -75,7 +96,10 @@ def _prefetch(batch_size, lance, logger):
             for works in _parquet_batches(batch_size):
                 if not works:
                     continue
-                hashes = {w["work_id"]: w["content_hash"] for w in works}
+                hashes = {
+                    w["work_id"]: _content_hash(w["title"], w["abstract"], cfg)
+                    for w in works
+                }
                 ids = list(hashes.keys())
                 try:
                     existing = lance.existing_hashes(ids)

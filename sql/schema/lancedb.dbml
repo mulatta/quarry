@@ -8,7 +8,7 @@ Project quarry_lance {
 
 Table papers {
   work_id string [pk, note: 'OpenAlex work ID (e.g. W12345)']
-  content_hash "binary(32)" [note: 'blake3(title + abstract) for change detection']
+  content_hash "binary(32)" [note: 'blake2b(encode_config + title + abstract) for change detection; computed at encode time']
   title string
   abstract string
   vec_retrieval "list<float32>[256]" [note: 'jina-v5 nano, retrieval LoRA, matryoshka dim=256']
