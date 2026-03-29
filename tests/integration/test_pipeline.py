@@ -457,7 +457,7 @@ class TestDagsterPipeline:
         works_dir = pq_dir / "works"
         dataset = pa_ds.dataset(works_dir, format="parquet", partitioning="hive")
         scan = dataset.scanner(
-            columns=["work_id", "title", "abstract", "content_hash", "tier", "type"],
+            columns=["work_id", "title", "abstract", "tier", "type"],
             filter=pa_ds.field("tier").isin(["t1", "t2"]),
         ).to_table()
         assert len(scan) > 0, "No rows from hive scan with tier filter"
@@ -474,7 +474,7 @@ class TestDagsterPipeline:
         lance.create_table()
         row = {
             "work_id": scan.column("work_id")[0].as_py(),
-            "content_hash": scan.column("content_hash")[0].as_py(),
+            "content_hash": b"\x00" * 32,  # dummy hash for round-trip test
             "title": scan.column("title")[0].as_py(),
             "abstract": scan.column("abstract")[0].as_py(),
             "vec_retrieval": [0.0] * 256,

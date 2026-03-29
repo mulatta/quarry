@@ -16,7 +16,6 @@ CREATE TABLE IF NOT EXISTS oa_works (
     doi            Nullable(String),
     title          String,
     abstract       Nullable(String),
-    content_hash   Nullable(FixedString(32)),
     pub_year       Nullable(UInt16),
     pub_date       Nullable(Date32),
     type           Nullable(String),

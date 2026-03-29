@@ -8,16 +8,6 @@ use serde::Deserialize;
 
 use quarry_core::{abstract_recon, normalize};
 
-/// blake3 content hash of normalized "{title}\n{abstract}" for embedding change detection.
-/// Computed only for T1/T2 (works with abstract). Matches the format expected by LanceDB.
-fn compute_content_hash(title: &str, abstract_text: &str) -> [u8; 32] {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(title.as_bytes());
-    hasher.update(b"\n");
-    hasher.update(abstract_text.as_bytes());
-    hasher.finalize().into()
-}
-
 // ── URL prefixes (stripped during transformation) ──
 
 const OA_PREFIX: &str = "https://openalex.org/";
@@ -59,7 +49,6 @@ pub struct OaWork {
     pub doi: Option<String>,
     pub title: String,
     pub abstract_text: Option<String>,
-    pub content_hash: Option<[u8; 32]>,
     pub pub_year: Option<i16>,
     pub pub_date: Option<String>,
     pub work_type: Option<String>,
@@ -259,11 +248,6 @@ pub fn parse_line(
 
     let title = raw.title.unwrap_or_default();
 
-    // blake3 content hash — computed AFTER HTML strip + whitespace normalization
-    let content_hash = abstract_text
-        .as_ref()
-        .map(|abs| compute_content_hash(&title, abs));
-
     let host_venue = raw
         .primary_location
         .and_then(|loc| loc.source)
@@ -281,7 +265,6 @@ pub fn parse_line(
         doi,
         title,
         abstract_text,
-        content_hash,
         pub_year: raw.publication_year,
         pub_date: raw.publication_date,
         work_type: raw.work_type,
@@ -428,10 +411,6 @@ mod tests {
         assert_eq!(w.pmid, Some(99999));
         assert_eq!(w.title, "Test Paper");
         assert_eq!(w.abstract_text.as_deref(), Some("hello world"));
-        // content_hash computed from normalized title+abstract
-        assert!(w.content_hash.is_some());
-        let expected = blake3::hash(b"Test Paper\nhello world");
-        assert_eq!(w.content_hash.unwrap(), *expected.as_bytes());
         assert_eq!(w.host_venue.as_deref(), Some("Nature"));
         assert_eq!(w.oa_status.as_deref(), Some("gold"));
 
@@ -496,7 +475,6 @@ mod tests {
         let result = parse_line(json).unwrap();
         assert_eq!(result.work.tier, Tier::T2);
         assert_eq!(result.work.abstract_text.as_deref(), Some("some text"));
-        assert!(result.work.content_hash.is_some());
         assert!(result.work.pmid.is_none());
         assert_eq!(result.topics.len(), 1);
         assert!(result.topics[0].is_primary);
@@ -516,7 +494,6 @@ mod tests {
         let result = parse_line(json).unwrap();
         assert_eq!(result.work.tier, Tier::T3);
         assert!(result.work.abstract_text.is_none());
-        assert!(result.work.content_hash.is_none());
         assert_eq!(result.work.pmid, Some(22222));
         assert_eq!(result.authors.len(), 1); // T3 parses authors
         assert_eq!(result.topics.len(), 1);  // T3 parses topics
@@ -536,7 +513,6 @@ mod tests {
         let result = parse_line(json).unwrap();
         assert_eq!(result.work.tier, Tier::T4);
         assert!(result.work.abstract_text.is_none());
-        assert!(result.work.content_hash.is_none());
         assert!(result.authors.is_empty());  // T4 skips authors
         assert!(result.topics.is_empty());   // T4 skips topics
         assert_eq!(result.citations.len(), 1); // T4 keeps citations
@@ -612,7 +588,6 @@ mod tests {
         let result = parse_line(json).unwrap();
         // Empty inverted index reconstructs to "" → filtered to None
         assert!(result.work.abstract_text.is_none());
-        assert!(result.work.content_hash.is_none());
     }
 
     #[test]
@@ -625,7 +600,6 @@ mod tests {
         let result = parse_line(json).unwrap();
         // HTML tag stripped → empty string → None
         assert!(result.work.abstract_text.is_none());
-        assert!(result.work.content_hash.is_none());
     }
 
     #[test]
@@ -638,9 +612,5 @@ mod tests {
         let result = parse_line(json).unwrap();
         assert_eq!(result.work.title, "");
         assert_eq!(result.work.abstract_text.as_deref(), Some("some text"));
-        // Hash of "\nsome text" — empty title is valid
-        assert!(result.work.content_hash.is_some());
-        let expected = blake3::hash(b"\nsome text");
-        assert_eq!(result.work.content_hash.unwrap(), *expected.as_bytes());
     }
 }

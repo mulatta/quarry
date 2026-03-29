@@ -102,7 +102,6 @@ pub fn write_oa_works(works: &[OaWork], path: &Path) -> Result<usize, Box<dyn st
         Field::new("doi", DataType::Utf8, true),
         Field::new("title", DataType::Utf8, false),
         Field::new("abstract", DataType::Utf8, true),
-        Field::new("content_hash", DataType::FixedSizeBinary(32), true),
         Field::new("pub_year", DataType::UInt16, true),
         Field::new("pub_date", DataType::Date32, true),
         Field::new("type", DataType::Utf8, true),
@@ -122,10 +121,6 @@ pub fn write_oa_works(works: &[OaWork], path: &Path) -> Result<usize, Box<dyn st
         Arc::new(StringArray::from_iter(works.iter().map(|w| w.doi.as_deref()))),
         Arc::new(StringArray::from_iter_values(works.iter().map(|w| w.title.as_str()))),
         Arc::new(StringArray::from_iter(works.iter().map(|w| w.abstract_text.as_deref()))),
-        Arc::new(FixedSizeBinaryArray::try_from_sparse_iter_with_size(
-            works.iter().map(|w| w.content_hash.as_ref().map(|h| h.as_slice())),
-            32,
-        )?),
         Arc::new(UInt16Array::from_iter(works.iter().map(|w| w.pub_year.and_then(i16_to_u16)))),
         Arc::new(Date32Array::from_iter(works.iter().map(|w| w.pub_date.as_deref().and_then(date_str_to_days)))),
         Arc::new(StringArray::from_iter(works.iter().map(|w| w.work_type.as_deref()))),

@@ -388,7 +388,7 @@ def ch_transform(context: AssetExecutionContext) -> MaterializeResult:
 _WORKS_CH_TABLE = "works_export"
 # PG target columns (tier comes from hive partition, not parquet file).
 _WORKS_COLUMNS = (
-    "work_id, work_id_int, tier, pmid, doi, title, abstract, content_hash, "
+    "work_id, work_id_int, tier, pmid, doi, title, abstract, "
     "pub_year, pub_date, type, cited_by_count, host_venue, oa_status, oa_url, "
     "is_retracted, updated_date, pm_journal_abbr, pm_country, pm_medline_status, "
     "pm_pub_type, pm_created_date, pm_revised_date, pm_indexed_date, "
@@ -396,7 +396,7 @@ _WORKS_COLUMNS = (
 )
 # Parquet export columns: tier excluded (derived from hive directory tier=t1/).
 _WORKS_EXPORT_COLUMNS = (
-    "work_id, work_id_int, pmid, doi, title, abstract, content_hash, "
+    "work_id, work_id_int, pmid, doi, title, abstract, "
     "pub_year, pub_date, type, cited_by_count, host_venue, oa_status, oa_url, "
     "is_retracted, updated_date, pm_journal_abbr, pm_country, pm_medline_status, "
     "pm_pub_type, pm_created_date, pm_revised_date, pm_indexed_date, "
