@@ -49,11 +49,11 @@ in
           settings = {
             listen_addresses = "";
             synchronous_commit = "off";
-            wal_buffers = "64MB";
-            max_wal_size = "32GB";
-            shared_buffers = "2GB";
+            # Memory — tuned for 188GB system
+            shared_buffers = "8GB";
             work_mem = "256MB";
-            maintenance_work_mem = "1GB";
+            maintenance_work_mem = "2GB";
+            effective_io_concurrency = 200; # NVMe
             autovacuum = "off";
           };
           superuser = null;
