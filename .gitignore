@@ -22,6 +22,7 @@ target/
 # Databases
 .pg-data/
 data/
+.qdrant-initialized
 
 # test
 tests/data/
