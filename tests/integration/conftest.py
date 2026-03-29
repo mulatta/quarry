@@ -20,7 +20,7 @@ logger = logging.getLogger("quarry.test")
 
 TEST_DIR = Path(__file__).parent
 TESTS_ROOT = TEST_DIR.parent
-DATA_DIR = TESTS_ROOT / "data"
+DATA_DIR = TEST_DIR / "data"
 PARSED_DIR = DATA_DIR / "parsed"
 SQL_DIR = TESTS_ROOT.parent / "sql"
 
