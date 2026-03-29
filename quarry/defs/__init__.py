@@ -16,11 +16,12 @@ from quarry.assets import (
     stage,
 )
 from quarry.jobs import (
+    build_job,
     embeddings_job,
-    etl_job,
     full_job,
+    load_job,
     r2_download_job,
-    serve_job,
+    r2_upload_job,
 )
 from quarry.resources import PGResource
 from quarry.schedules import (
@@ -28,17 +29,18 @@ from quarry.schedules import (
     monthly_citation_schedule,
     weekly_distributed_schedule,
 )
-from quarry.sensors import distributed_r2_sync, distributed_serve
+from quarry.sensors import distributed_r2_sync, distributed_serve, r2_upload_sensor
 
 defs = Definitions(
     assets=load_assets_from_modules(
         [download, stage, load, export, import_, batch, citations, search],
     ),
     jobs=[
-        etl_job,
-        serve_job,
+        build_job,
+        load_job,
         embeddings_job,
         full_job,
+        r2_upload_job,
         r2_download_job,
     ],
     resources={
@@ -50,6 +52,7 @@ defs = Definitions(
         weekly_distributed_schedule,
     ],
     sensors=[
+        r2_upload_sensor,
         distributed_r2_sync,
         distributed_serve,
     ],
