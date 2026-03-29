@@ -17,9 +17,6 @@ serde = { version = "1", features = ["derive"] }
 flate2 = { version = "1", features = ["zlib-ng"], default-features = false }
 rayon = "1.10"
 
-# Content hashing (change detection for embeddings)
-blake3 = "1"
-
 # Parquet output
 arrow = "55"
 parquet = { version = "55", features = ["zstd"] }

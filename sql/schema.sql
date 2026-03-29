@@ -101,7 +101,6 @@ CREATE TABLE IF NOT EXISTS works (
     doi            TEXT,
     title          TEXT,
     abstract       TEXT,
-    content_hash   BYTEA,
     pub_year       SMALLINT,
     pub_date       DATE,
     type           TEXT,
