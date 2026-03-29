@@ -1,4 +1,4 @@
-"""Dagster schedules for periodic ETL jobs.
+"""Dagster schedules for periodic pipeline jobs.
 
 Schedules only trigger download assets. Downstream stage/load assets
 run automatically via AutomationCondition.eager() when upstream
@@ -28,11 +28,4 @@ monthly_citation_schedule = ScheduleDefinition(
         "icite_metadata_sync",
     ),
     cron_schedule="0 2 1 * *",  # 02:00 UTC, 1st of each month
-)
-
-# Weekly: kick off distributed pipeline (sensors chain r2_download → serve)
-weekly_distributed_schedule = ScheduleDefinition(
-    name="weekly_distributed",
-    target=AssetSelection.assets("etl_on_batch"),
-    cron_schedule="0 2 * * 0",  # 02:00 UTC, Sundays
 )
