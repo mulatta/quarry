@@ -1,11 +1,10 @@
 """Batch-encode papers from Parquet → LanceDB with content-hash caching.
 
 Reads works from Parquet via PyArrow dataset scanner (streaming, ~50MB memory),
-skips unchanged (blake2b content+config hash match), encodes new/modified papers
+skips unchanged (blake3 content+config hash match), encodes new/modified papers
 with jina-v5 nano, upserts to LanceDB. I/O and GPU are overlapped via a prefetch queue.
 """
 
-import hashlib
 import logging
 import queue
 import threading
@@ -13,6 +12,7 @@ import time
 from pathlib import Path
 
 try:
+    import blake3
     import pyarrow.dataset as ds
 except ImportError:
     raise ImportError("pip install quarry[elt]") from None
@@ -28,17 +28,14 @@ _PREFETCH_DEPTH = 3  # bounded queue depth for backpressure
 
 def _encode_config_hash() -> bytes:
     """Hash of encoding parameters — changes trigger full re-encoding."""
-    h = hashlib.blake2b(digest_size=32)
-    h.update(
+    return blake3.blake3(
         f"{MODEL_NAME}:{settings.embed_max_tokens}:{settings.embed_batch_size}".encode()
-    )
-    return h.digest()
+    ).digest()
 
 
 def _content_hash(title: str, abstract: str, config: bytes) -> bytes:
-    """blake2b(config + title + abstract) — encoding-aware change detection."""
-    h = hashlib.blake2b(digest_size=32)
-    h.update(config)
+    """blake3(config + title + abstract) — encoding-aware change detection."""
+    h = blake3.blake3(config)
     h.update(title.encode())
     h.update(b"\n")
     h.update(abstract.encode())
