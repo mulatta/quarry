@@ -15,8 +15,8 @@ target/
 # Environment
 .env
 
-# Dagster
-.dg-home/
+# Dagster — ignore contents except dagster.yaml
+.dg-home/*
 !.dg-home/dagster.yaml
 
 # Databases
