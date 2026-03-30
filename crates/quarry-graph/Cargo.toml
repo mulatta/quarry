@@ -27,3 +27,8 @@ strip = true
 lto = "thin"
 codegen-units = 1
 opt-level = 3
+
+[profile.profiling]
+inherits = "release"
+strip = false
+debug = 1
