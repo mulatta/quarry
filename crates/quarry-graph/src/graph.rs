@@ -511,6 +511,9 @@ impl Graph {
     // -- Subgraph methods --
 
     /// PageRank on induced subgraph.
+    /// PageRank or Personalized PageRank on an induced subgraph.
+    /// If restart_node is given, runs PPR (teleport to that node).
+    #[pyo3(signature = (ids, alpha=0.85, max_iter=100, tol=1e-6, restart_node=None))]
     fn subgraph_pagerank(
         &self,
         py: Python<'_>,
@@ -518,8 +521,18 @@ impl Graph {
         alpha: f64,
         max_iter: usize,
         tol: f64,
+        restart_node: Option<i64>,
     ) -> PyResult<Vec<(i64, f64)>> {
-        py.allow_threads(|| Ok(algo::pagerank::subgraph(self, &ids, alpha, max_iter, tol)))
+        py.allow_threads(|| {
+            Ok(algo::pagerank::subgraph(
+                self,
+                &ids,
+                alpha,
+                max_iter,
+                tol,
+                restart_node,
+            ))
+        })
     }
 
     /// Brandes betweenness centrality on induced subgraph.
@@ -884,7 +897,7 @@ mod tests {
     #[test]
     fn test_subgraph_pagerank() {
         let g = test_graph();
-        let pr = algo::pagerank::subgraph(&g, &[1, 2, 3], 0.85, 100, 1e-8);
+        let pr = algo::pagerank::subgraph(&g, &[1, 2, 3], 0.85, 100, 1e-8, None);
         assert_eq!(pr.len(), 3);
         assert!(pr.iter().all(|&(_, s)| s > 0.0));
         let total: f64 = pr.iter().map(|&(_, s)| s).sum();
