@@ -75,12 +75,8 @@ class Settings(BaseSettings):
         "article",
         "preprint",
         "review",
-        "dissertation",
-        "book-chapter",
         "letter",
         "editorial",
-        "report",
-        "book",
     ]
 
     # Download

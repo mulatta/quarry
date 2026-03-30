@@ -45,7 +45,7 @@ def _content_hash(title: str, abstract: str, config: bytes) -> bytes:
 def _parquet_batches(batch_size: int = 5000):
     """Yield RecordBatch dicts from works Parquet via streaming.
 
-    Filters by tier (t1/t2) and allowed document types.
+    Filters by tier (t1/t2), allowed document types, and English language.
     Token-level truncation is handled by JinaEncoder (max_seq_length).
     """
     works_dir = Path(settings.parquet_dir) / "works"
@@ -55,6 +55,7 @@ def _parquet_batches(batch_size: int = 5000):
         filter=(
             ds.field("tier").isin(["t1", "t2"])
             & ds.field("type").isin(settings.embed_allowed_types)
+            & (ds.field("language").isin(["en"]) | ~ds.field("language").is_valid())
             & ds.field("abstract").is_valid()
             & ds.field("title").is_valid()
         ),
