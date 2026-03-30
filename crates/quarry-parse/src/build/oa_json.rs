@@ -98,6 +98,13 @@ pub struct OaCrosswalk {
     pub pmid: i32,
 }
 
+pub struct OaCountByYear {
+    pub work_id: Arc<str>,
+    pub year: i16,
+    pub cited_by_count: i32,
+    pub updated_date: Option<String>,
+}
+
 /// Result of parsing a single JSON line.
 pub struct OaLineResult {
     pub work: OaWork,
@@ -105,6 +112,7 @@ pub struct OaLineResult {
     pub topics: Vec<OaTopic>,
     pub citations: Vec<OaCitation>,
     pub crosswalk: Option<OaCrosswalk>,
+    pub counts_by_year: Vec<OaCountByYear>,
 }
 
 // ── Serde JSON structs ──
@@ -127,6 +135,7 @@ struct RawWork {
     fwci: Option<f32>,
     citation_normalized_percentile: Option<RawCitationPercentile>,
     cited_by_percentile_year: Option<RawCitedByPercentileYear>,
+    counts_by_year: Option<Vec<RawCountByYear>>,
     primary_location: Option<RawPrimaryLocation>,
     open_access: Option<RawOpenAccess>,
     authorships: Option<Vec<RawAuthorship>>,
@@ -146,6 +155,13 @@ struct RawCitationPercentile {
 struct RawCitedByPercentileYear {
     min: Option<i16>,
     max: Option<i16>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct RawCountByYear {
+    year: Option<i16>,
+    cited_by_count: Option<i32>,
 }
 
 #[derive(Deserialize, Default)]
@@ -295,6 +311,8 @@ pub fn parse_line(
         None => (None, None),
     };
 
+    let updated_date = raw.updated_date;
+
     let work = OaWork {
         work_id: Arc::clone(&work_id),
         work_id_int,
@@ -311,7 +329,7 @@ pub fn parse_line(
         oa_status,
         oa_url,
         is_retracted: raw.is_retracted.unwrap_or(false),
-        updated_date: raw.updated_date,
+        updated_date: updated_date.clone(),
         language: raw.language,
         fwci: raw.fwci,
         citation_normalized_percentile,
@@ -402,12 +420,36 @@ pub fn parse_line(
         pmid: p,
     });
 
+
+    // Counts by year — T1/T2/T3 only (T4 has no metadata value)
+    let counts_by_year: Vec<OaCountByYear> = if tier <= Tier::T3 {
+        raw.counts_by_year
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|c| {
+                let year = c.year?;
+                if year <= 0 {
+                    return None;
+                }
+                Some(OaCountByYear {
+                    work_id: Arc::clone(&work_id),
+                    year,
+                    cited_by_count: c.cited_by_count.unwrap_or(0),
+                    updated_date: updated_date.clone(),
+                })
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     Ok(Some(OaLineResult {
         work,
         authors,
         topics,
         citations,
         crosswalk,
+        counts_by_year,
     }))
 }
 
@@ -447,6 +489,10 @@ mod tests {
                  "domain": {"display_name": "Physical Sciences"}, "score": 0.80}
             ],
             "referenced_works": ["https://openalex.org/W111", "https://openalex.org/W222"],
+            "counts_by_year": [
+                {"year": 2024, "cited_by_count": 5},
+                {"year": 2023, "cited_by_count": 3}
+            ],
             "updated_date": "2024-07-01"
         }"#;
 
@@ -465,6 +511,11 @@ mod tests {
         assert!((w.citation_normalized_percentile.unwrap() - 0.984).abs() < 0.001);
         assert_eq!(w.cited_by_percentile_year_min, Some(98));
         assert_eq!(w.cited_by_percentile_year_max, Some(100));
+
+        assert_eq!(result.counts_by_year.len(), 2);
+        assert_eq!(result.counts_by_year[0].year, 2024);
+        assert_eq!(result.counts_by_year[0].cited_by_count, 5);
+        assert_eq!(&*result.counts_by_year[1].work_id, "W12345");
 
         assert_eq!(result.authors.len(), 1);
         assert_eq!(result.authors[0].display_name.as_deref(), Some("Alice"));
@@ -690,6 +741,37 @@ mod tests {
         assert!(w.citation_normalized_percentile.is_none());
         assert!(w.cited_by_percentile_year_min.is_none());
         assert!(w.cited_by_percentile_year_max.is_none());
+    }
+
+    #[test]
+    fn test_counts_by_year_empty_when_missing() {
+        let json = r#"{
+            "id": "https://openalex.org/W10004",
+            "title": "No counts"
+        }"#;
+        let result = parse_line(json).unwrap().unwrap();
+        assert!(result.counts_by_year.is_empty());
+    }
+
+    #[test]
+    fn test_counts_by_year_skips_null_year() {
+        let json = r#"{
+            "id": "https://openalex.org/W10005",
+            "ids": {"pmid": "https://pubmed.ncbi.nlm.nih.gov/11111"},
+            "title": "Partial counts",
+            "abstract_inverted_index": {"x": [0]},
+            "counts_by_year": [
+                {"year": 2024, "cited_by_count": 3},
+                {"cited_by_count": 1},
+                {"year": 2022}
+            ]
+        }"#;
+        let result = parse_line(json).unwrap().unwrap();
+        // null year entry skipped, null cited_by_count defaults to 0
+        assert_eq!(result.counts_by_year.len(), 2);
+        assert_eq!(result.counts_by_year[0].cited_by_count, 3);
+        assert_eq!(result.counts_by_year[1].year, 2022);
+        assert_eq!(result.counts_by_year[1].cited_by_count, 0);
     }
 
     #[test]
