@@ -72,17 +72,10 @@ fn parse_byte_range(data: &[u8], range_start: usize, range_end: usize) -> (Vec<i
     (srcs, dsts)
 }
 
-/// Build CSR via parallel sort.
-fn build_csr(node_ids: &[u32], neighbor_ids: &[u32], num_nodes: usize) -> (Vec<u64>, Vec<u32>) {
-    let mut pairs: Vec<(u32, u32)> = node_ids
-        .par_iter()
-        .zip(neighbor_ids.par_iter())
-        .map(|(&n, &nb)| (n, nb))
-        .collect();
-    pairs.par_sort_unstable_by_key(|&(n, _)| n);
-
+/// Extract CSR (indptr + indices) from sorted pairs. Does NOT sort — caller must sort first.
+fn extract_csr(pairs: &[(u32, u32)], num_nodes: usize) -> (Vec<u64>, Vec<u32>) {
     let mut counts = vec![0u64; num_nodes];
-    for &(n, _) in &pairs {
+    for &(n, _) in pairs {
         counts[n as usize] += 1;
     }
     let mut indptr = Vec::with_capacity(num_nodes + 1);
@@ -92,8 +85,7 @@ fn build_csr(node_ids: &[u32], neighbor_ids: &[u32], num_nodes: usize) -> (Vec<u
         cumsum += c;
         indptr.push(cumsum);
     }
-
-    let indices: Vec<u32> = pairs.into_iter().map(|(_, nb)| nb).collect();
+    let indices: Vec<u32> = pairs.iter().map(|&(_, nb)| nb).collect();
     (indptr, indices)
 }
 
@@ -222,17 +214,22 @@ fn build_core(csv_path: &Path, graph_dir: &Path) -> Result<(usize, usize), Strin
 
     // Pass 1: collect all unique IDs → sorted Vec<i64> → HashMap<i64, u32>
     // (C) Use num_edges/10 as capacity — actual unique ratio is ~6%
-    let mut id_set: HashMap<i64, ()> = HashMap::with_capacity(num_edges / 10);
+    let mut id_set = std::collections::HashSet::with_capacity(num_edges / 10);
     for &id in &src_raw {
-        id_set.entry(id).or_insert(());
+        id_set.insert(id);
     }
     for &id in &dst_raw {
-        id_set.entry(id).or_insert(());
+        id_set.insert(id);
     }
-    let mut sorted_ids: Vec<i64> = id_set.into_keys().collect();
+    let mut sorted_ids: Vec<i64> = id_set.into_iter().collect();
     sorted_ids.par_sort_unstable();
     let num_nodes = sorted_ids.len();
 
+    assert!(
+        num_nodes <= u32::MAX as usize,
+        "node count {} exceeds u32::MAX — graph too large for u32 indices",
+        num_nodes
+    );
     let id_to_idx: HashMap<i64, u32> = sorted_ids
         .iter()
         .enumerate()
@@ -240,27 +237,47 @@ fn build_core(csv_path: &Path, graph_dir: &Path) -> Result<(usize, usize), Strin
         .collect();
 
     // Pass 2: map edges (i64, i64) → (u32, u32)
-    let src_idx: Vec<u32> = src_raw.par_iter().map(|&p| id_to_idx[&p]).collect();
-    drop(src_raw); // free before dst_idx allocation (~24 GB)
-    let dst_idx: Vec<u32> = dst_raw.par_iter().map(|&p| id_to_idx[&p]).collect();
+    let src_idx: Vec<u32> = src_raw
+        .par_iter()
+        .map(|&p| *id_to_idx.get(&p).expect("unmapped source ID in edge list"))
+        .collect();
+    drop(src_raw);
+    let dst_idx: Vec<u32> = dst_raw
+        .par_iter()
+        .map(|&p| *id_to_idx.get(&p).expect("unmapped target ID in edge list"))
+        .collect();
     drop(dst_raw);
     drop(id_to_idx);
 
-    // (D) Scope fwd CSR: drop indptr+indices before reverse build (-13.5GB)
+    // Single pairs Vec: build forward CSR, swap src↔dst in-place, build reverse.
+    // No clone needed — saves ~28GB peak memory.
+    let mut pairs: Vec<(u32, u32)> = src_idx
+        .into_par_iter()
+        .zip(dst_idx.into_par_iter())
+        .collect();
+
+    // Forward CSR
     {
         let fwd_dir = graph_dir.join("forward");
         fs::create_dir_all(&fwd_dir).map_err(|e| e.to_string())?;
-        let (fwd_indptr, fwd_indices) = build_csr(&src_idx, &dst_idx, num_nodes);
+        eprintln!("  building forward CSR ({} edges)...", num_edges);
+        pairs.par_sort_unstable_by_key(|&(n, _)| n);
+        let (fwd_indptr, fwd_indices) = extract_csr(&pairs, num_nodes);
         write_bin(&fwd_dir.join("indptr.bin"), &fwd_indptr).map_err(|e| e.to_string())?;
         write_bin(&fwd_dir.join("indices.bin"), &fwd_indices).map_err(|e| e.to_string())?;
-    } // fwd_indptr, fwd_indices dropped here
+    }
 
-    // Reverse CSR
-    let rev_dir = graph_dir.join("reverse");
-    fs::create_dir_all(&rev_dir).map_err(|e| e.to_string())?;
-    let (rev_indptr, rev_indices) = build_csr(&dst_idx, &src_idx, num_nodes);
-    write_bin(&rev_dir.join("indptr.bin"), &rev_indptr).map_err(|e| e.to_string())?;
-    write_bin(&rev_dir.join("indices.bin"), &rev_indices).map_err(|e| e.to_string())?;
+    // Reverse CSR: swap src↔dst in-place, re-sort, extract
+    {
+        let rev_dir = graph_dir.join("reverse");
+        fs::create_dir_all(&rev_dir).map_err(|e| e.to_string())?;
+        eprintln!("  building reverse CSR ({} edges)...", num_edges);
+        pairs.par_iter_mut().for_each(|(a, b)| std::mem::swap(a, b));
+        pairs.par_sort_unstable_by_key(|&(n, _)| n);
+        let (rev_indptr, rev_indices) = extract_csr(&pairs, num_nodes);
+        write_bin(&rev_dir.join("indptr.bin"), &rev_indptr).map_err(|e| e.to_string())?;
+        write_bin(&rev_dir.join("indices.bin"), &rev_indices).map_err(|e| e.to_string())?;
+    }
 
     // id_map.bin: one i64 per line (text format, sorted, binary-search ready)
     {
