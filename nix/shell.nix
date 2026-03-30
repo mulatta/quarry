@@ -17,6 +17,8 @@ let
       clickhouse
       duckdb
       awscli2
+      cudaPackages.cuda_cudart
+      cudaPackages.cuda_nvcc
     ];
 
   shellEnv = {
@@ -88,12 +90,12 @@ in
             pkgs.stdenv.cc.cc.lib
             "${pkgs.addDriverRunpath.driverLink}"
           ];
+          TRITON_LIBCUDA_PATH = "${pkgs.addDriverRunpath.driverLink}/lib";
         };
         shellHook = ''
           uv sync --all-extras --quiet
           ${activateVenv}
-          local root="$(git rev-parse --show-toplevel)"
-          export DAGSTER_HOME="$root/.dg-home"
+          export DAGSTER_HOME="$(git rev-parse --show-toplevel)/.dg-home"
           export DAGSTER_PG_URL="postgresql:///dagster?host=${pgSocketDir}"
           mkdir -p "$DAGSTER_HOME"
         '';
