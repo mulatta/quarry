@@ -120,7 +120,19 @@ CREATE TABLE IF NOT EXISTS works (
     pm_pub_type        TEXT[],
     pm_created_date    DATE,
     pm_revised_date    DATE,
-    pm_indexed_date    DATE
+    pm_indexed_date    DATE,
+    language           TEXT,
+    fwci               REAL,
+    citation_normalized_percentile REAL,
+    cited_by_percentile_year_min   SMALLINT,
+    cited_by_percentile_year_max   SMALLINT
+);
+
+CREATE TABLE IF NOT EXISTS work_counts_by_year (
+    work_id        TEXT NOT NULL,
+    year           SMALLINT NOT NULL,
+    cited_by_count INTEGER NOT NULL,
+    PRIMARY KEY (work_id, year)
 );
 
 CREATE TABLE IF NOT EXISTS work_authors (
