@@ -13,7 +13,7 @@ use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
 
-use crate::build::oa_json::{OaAuthor, OaCitation, OaCrosswalk, OaTopic, OaWork};
+use crate::build::oa_json::{OaAuthor, OaCitation, OaCountByYear, OaCrosswalk, OaTopic, OaWork};
 use crate::parse::mesh::MeshEntry;
 use crate::parse::xml::{Author, Chemical, Grant, MeshHeading, Paper};
 
@@ -117,6 +117,11 @@ pub fn write_oa_works(works: &[OaWork], path: &Path) -> Result<usize, Box<dyn st
         Field::new("oa_url", DataType::Utf8, true),
         Field::new("is_retracted", DataType::Boolean, false),
         Field::new("updated_date", DataType::Date32, true),
+        Field::new("language", DataType::Utf8, true),
+        Field::new("fwci", DataType::Float32, true),
+        Field::new("citation_normalized_percentile", DataType::Float32, true),
+        Field::new("cited_by_percentile_year_min", DataType::UInt16, true),
+        Field::new("cited_by_percentile_year_max", DataType::UInt16, true),
     ]));
 
     let batch = RecordBatch::try_new(schema, vec![
@@ -136,6 +141,11 @@ pub fn write_oa_works(works: &[OaWork], path: &Path) -> Result<usize, Box<dyn st
         Arc::new(StringArray::from_iter(works.iter().map(|w| w.oa_url.as_deref()))),
         Arc::new(BooleanArray::from_iter(works.iter().map(|w| Some(w.is_retracted)))),
         Arc::new(Date32Array::from_iter(works.iter().map(|w| w.updated_date.as_deref().and_then(date_str_to_days)))),
+        Arc::new(StringArray::from_iter(works.iter().map(|w| w.language.as_deref()))),
+        Arc::new(Float32Array::from_iter(works.iter().map(|w| w.fwci))),
+        Arc::new(Float32Array::from_iter(works.iter().map(|w| w.citation_normalized_percentile))),
+        Arc::new(UInt16Array::from_iter(works.iter().map(|w| w.cited_by_percentile_year_min.and_then(i16_to_u16)))),
+        Arc::new(UInt16Array::from_iter(works.iter().map(|w| w.cited_by_percentile_year_max.and_then(i16_to_u16)))),
     ])?;
 
     write_batch(path, &batch)
@@ -230,6 +240,29 @@ pub fn write_oa_id_crosswalk(crosswalk: &[OaCrosswalk], path: &Path) -> Result<u
     let batch = RecordBatch::try_new(schema, vec![
         Arc::new(StringArray::from_iter_values(crosswalk.iter().map(|c| &*c.work_id))),
         Arc::new(UInt32Array::from_iter_values(crosswalk.iter().map(|c| i32_to_u32(c.pmid).unwrap_or(0)))),
+    ])?;
+
+    write_batch(path, &batch)
+}
+
+pub fn write_oa_counts_by_year(counts: &[OaCountByYear], path: &Path) -> Result<usize, Box<dyn std::error::Error>> {
+    if counts.is_empty() {
+        return Ok(0);
+    }
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("work_id", DataType::Utf8, false),
+        Field::new("year", DataType::UInt16, false),
+        Field::new("cited_by_count", DataType::UInt32, false),
+        Field::new("updated_date", DataType::Date32, true),
+    ]));
+
+    let batch = RecordBatch::try_new(schema, vec![
+        Arc::new(StringArray::from_iter_values(counts.iter().map(|c| &*c.work_id))),
+        // year validated > 0 in parser
+        Arc::new(UInt16Array::from_iter_values(counts.iter().map(|c| i16_to_u16(c.year).unwrap()))),
+        Arc::new(UInt32Array::from_iter_values(counts.iter().map(|c| i32_to_u32(c.cited_by_count).unwrap_or(0)))),
+        Arc::new(Date32Array::from_iter(counts.iter().map(|c| c.updated_date.as_deref().and_then(date_str_to_days)))),
     ])?;
 
     write_batch(path, &batch)
