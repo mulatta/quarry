@@ -212,6 +212,19 @@ fn build_core(csv_path: &Path, graph_dir: &Path) -> Result<(usize, usize), Strin
     build_from_raw_edges(src_raw, dst_raw, graph_dir)
 }
 
+/// Ensure rayon thread pool has sufficient stack for large sorts.
+/// 3.77B elements require deep recursion in par_sort_unstable.
+fn ensure_rayon_stack() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        rayon::ThreadPoolBuilder::new()
+            .stack_size(64 * 1024 * 1024) // 64MB per thread (default 8MB)
+            .build_global()
+            .ok(); // ignore if already initialized
+    });
+}
+
 /// Shared build pipeline: raw i64 edge vecs → unique IDs → CSR files.
 fn build_from_raw_edges(
     src_raw: Vec<i64>,
@@ -219,6 +232,7 @@ fn build_from_raw_edges(
     graph_dir: &Path,
 ) -> Result<(usize, usize), String> {
     let num_edges = src_raw.len();
+    ensure_rayon_stack();
 
     eprintln!("  collecting unique node IDs...");
     let mut id_set = std::collections::HashSet::with_capacity(num_edges / 10);
