@@ -116,7 +116,40 @@ SELECT
 FROM pm_mesh_headings m
 INNER JOIN oa_id_crosswalk c ON m.pmid = c.pmid;
 
-/* 5. cited_by_clin_export: iCite clinical citation expansion */
+/* 5. merged_citations: OA citations + iCite-derived citations (deduped).
+      iCite references field contains space-separated PMIDs.
+      Convert PMID → work_id_int via works_export (which has pmid column).
+      ReplacingMergeTree deduplicates overlapping edges. */
+
+CREATE OR REPLACE TABLE icite_citations
+ENGINE = MergeTree()
+ORDER BY (citing_id, cited_id)
+AS
+SELECT
+    w_citing.work_id_int AS citing_id,
+    w_cited.work_id_int  AS cited_id
+FROM (
+    SELECT pmid AS citing_pmid, toUInt32(ref) AS cited_pmid
+    FROM icite_raw
+    ARRAY JOIN splitByChar(' ', assumeNotNull(toString(`references`))) AS ref
+    WHERE `references` IS NOT NULL AND `references` != ''
+      AND ref != '' AND match(ref, '^\d+$')
+) parsed
+INNER JOIN works_export w_citing ON parsed.citing_pmid = w_citing.pmid
+INNER JOIN works_export w_cited  ON parsed.cited_pmid  = w_cited.pmid
+WHERE w_citing.work_id_int != w_cited.work_id_int;
+
+CREATE OR REPLACE TABLE merged_citations
+ENGINE = ReplacingMergeTree()
+ORDER BY (citing_id, cited_id)
+AS
+SELECT citing_id, cited_id FROM oa_work_citations
+UNION ALL
+SELECT citing_id, cited_id FROM icite_citations;
+
+OPTIMIZE TABLE merged_citations FINAL;
+
+/* 6. cited_by_clin_export: iCite clinical citation expansion */
 
 CREATE OR REPLACE TABLE cited_by_clin_export
 ENGINE = MergeTree()
