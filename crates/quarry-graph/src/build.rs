@@ -214,6 +214,9 @@ fn build_core(csv_path: &Path, graph_dir: &Path) -> Result<(usize, usize), Strin
 
     // Pass 1: collect all unique IDs → sorted Vec<i64> → HashMap<i64, u32>
     // (C) Use num_edges/10 as capacity — actual unique ratio is ~6%
+    // Collect unique IDs using HashSet, then sort.
+    // HashSet peak ~11GB, freed before id mapping.
+    eprintln!("  collecting unique node IDs...");
     let mut id_set = std::collections::HashSet::with_capacity(num_edges / 10);
     for &id in &src_raw {
         id_set.insert(id);
@@ -230,24 +233,26 @@ fn build_core(csv_path: &Path, graph_dir: &Path) -> Result<(usize, usize), Strin
         "node count {} exceeds u32::MAX — graph too large for u32 indices",
         num_nodes
     );
-    let id_to_idx: HashMap<i64, u32> = sorted_ids
-        .iter()
-        .enumerate()
-        .map(|(i, &id)| (id, i as u32))
-        .collect();
+    // Use binary search on sorted_ids instead of HashMap — saves ~20GB.
+    // sorted_ids is already sorted, so binary_search is O(log N) per lookup.
+    eprintln!("  mapping {} edges to u32 indices ({} nodes)...", num_edges, num_nodes);
 
-    // Pass 2: map edges (i64, i64) → (u32, u32)
     let src_idx: Vec<u32> = src_raw
         .par_iter()
-        .map(|&p| *id_to_idx.get(&p).expect("unmapped source ID in edge list"))
+        .map(|&p| {
+            sorted_ids.binary_search(&p)
+                .expect("unmapped source ID in edge list") as u32
+        })
         .collect();
     drop(src_raw);
     let dst_idx: Vec<u32> = dst_raw
         .par_iter()
-        .map(|&p| *id_to_idx.get(&p).expect("unmapped target ID in edge list"))
+        .map(|&p| {
+            sorted_ids.binary_search(&p)
+                .expect("unmapped target ID in edge list") as u32
+        })
         .collect();
     drop(dst_raw);
-    drop(id_to_idx);
 
     // Single pairs Vec: build forward CSR, swap src↔dst in-place, build reverse.
     // No clone needed — saves ~28GB peak memory.
