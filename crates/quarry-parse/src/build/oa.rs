@@ -22,7 +22,7 @@ use rayon::prelude::*;
 use serde::Serialize;
 
 use crate::build::config::ParseConfig;
-use crate::build::oa_json::{self, OaAuthor, OaCitation, OaCrosswalk, OaTopic, OaWork};
+use crate::build::oa_json::{self, OaAuthor, OaCitation, OaCountByYear, OaCrosswalk, OaTopic, OaWork};
 use crate::build::parquet_writer;
 
 /// Lines per chunk before flushing to Parquet.
@@ -37,6 +37,7 @@ pub struct OaParseStats {
     pub num_topics: usize,
     pub num_citations: usize,
     pub num_crosswalk: usize,
+    pub num_counts_by_year: usize,
     pub num_files_total: usize,
     pub num_files_new: usize,
     pub num_files_skipped: usize,
@@ -53,6 +54,7 @@ struct ChunkBuf {
     topics: Vec<OaTopic>,
     citations: Vec<OaCitation>,
     crosswalk: Vec<OaCrosswalk>,
+    counts_by_year: Vec<OaCountByYear>,
 }
 
 impl ChunkBuf {
@@ -62,6 +64,7 @@ impl ChunkBuf {
         self.topics.clear();
         self.citations.clear();
         self.crosswalk.clear();
+        self.counts_by_year.clear();
     }
 
     fn is_empty(&self) -> bool {
@@ -77,6 +80,7 @@ struct FileStats {
     topics: usize,
     citations: usize,
     crosswalk: usize,
+    counts_by_year: usize,
     failed_lines: usize,
 }
 
@@ -87,6 +91,7 @@ impl FileStats {
         self.topics += buf.topics.len();
         self.citations += buf.citations.len();
         self.crosswalk += buf.crosswalk.len();
+        self.counts_by_year += buf.counts_by_year.len();
     }
 }
 
@@ -146,6 +151,12 @@ fn flush_chunk(
             &output_dir.join(format!("id_crosswalk/{partition}/{suffix}.parquet")),
         )?;
     }
+    if !buf.counts_by_year.is_empty() {
+        parquet_writer::write_oa_counts_by_year(
+            &buf.counts_by_year,
+            &output_dir.join(format!("counts_by_year/{partition}/{suffix}.parquet")),
+        )?;
+    }
     Ok(())
 }
 
@@ -186,6 +197,7 @@ fn process_gz_chunked(
                 buf.authors.extend(parsed.authors);
                 buf.topics.extend(parsed.topics);
                 buf.citations.extend(parsed.citations);
+                buf.counts_by_year.extend(parsed.counts_by_year);
                 if let Some(cw) = parsed.crosswalk {
                     buf.crosswalk.push(cw);
                 }
@@ -296,6 +308,7 @@ pub fn parse_oa(
     let topics_count = Arc::new(AtomicUsize::new(0));
     let citations_count = Arc::new(AtomicUsize::new(0));
     let crosswalk_count = Arc::new(AtomicUsize::new(0));
+    let counts_by_year_count = Arc::new(AtomicUsize::new(0));
     let failed_lines_count = Arc::new(AtomicUsize::new(0));
     let failed_files_count = Arc::new(AtomicUsize::new(0));
     let files_done = Arc::new(AtomicUsize::new(0));
@@ -317,6 +330,7 @@ pub fn parse_oa(
             topics_count.fetch_add(stats.topics, Ordering::Relaxed);
             citations_count.fetch_add(stats.citations, Ordering::Relaxed);
             crosswalk_count.fetch_add(stats.crosswalk, Ordering::Relaxed);
+            counts_by_year_count.fetch_add(stats.counts_by_year, Ordering::Relaxed);
             failed_lines_count.fetch_add(stats.failed_lines, Ordering::Relaxed);
 
             let done = files_done.fetch_add(1, Ordering::Relaxed) + 1;
@@ -339,6 +353,7 @@ pub fn parse_oa(
         num_topics: topics_count.load(Ordering::Relaxed),
         num_citations: total_citations,
         num_crosswalk: crosswalk_count.load(Ordering::Relaxed),
+        num_counts_by_year: counts_by_year_count.load(Ordering::Relaxed),
         num_files_total: num_files,
         num_files_new: num_todo,
         num_files_skipped: num_skipped,
