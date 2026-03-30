@@ -210,12 +210,17 @@ fn build_core(csv_path: &Path, graph_dir: &Path) -> Result<(usize, usize), Strin
     }
     drop(mmap);
 
+    build_from_raw_edges(src_raw, dst_raw, graph_dir)
+}
+
+/// Shared build pipeline: raw i64 edge vecs → unique IDs → CSR files.
+fn build_from_raw_edges(
+    src_raw: Vec<i64>,
+    dst_raw: Vec<i64>,
+    graph_dir: &Path,
+) -> Result<(usize, usize), String> {
     let num_edges = src_raw.len();
 
-    // Pass 1: collect all unique IDs → sorted Vec<i64> → HashMap<i64, u32>
-    // (C) Use num_edges/10 as capacity — actual unique ratio is ~6%
-    // Collect unique IDs using HashSet, then sort.
-    // HashSet peak ~11GB, freed before id mapping.
     eprintln!("  collecting unique node IDs...");
     let mut id_set = std::collections::HashSet::with_capacity(num_edges / 10);
     for &id in &src_raw {
@@ -233,14 +238,16 @@ fn build_core(csv_path: &Path, graph_dir: &Path) -> Result<(usize, usize), Strin
         "node count {} exceeds u32::MAX — graph too large for u32 indices",
         num_nodes
     );
-    // Use binary search on sorted_ids instead of HashMap — saves ~20GB.
-    // sorted_ids is already sorted, so binary_search is O(log N) per lookup.
-    eprintln!("  mapping {} edges to u32 indices ({} nodes)...", num_edges, num_nodes);
+    eprintln!(
+        "  mapping {} edges to u32 indices ({} nodes)...",
+        num_edges, num_nodes
+    );
 
     let src_idx: Vec<u32> = src_raw
         .par_iter()
         .map(|&p| {
-            sorted_ids.binary_search(&p)
+            sorted_ids
+                .binary_search(&p)
                 .expect("unmapped source ID in edge list") as u32
         })
         .collect();
@@ -248,14 +255,13 @@ fn build_core(csv_path: &Path, graph_dir: &Path) -> Result<(usize, usize), Strin
     let dst_idx: Vec<u32> = dst_raw
         .par_iter()
         .map(|&p| {
-            sorted_ids.binary_search(&p)
+            sorted_ids
+                .binary_search(&p)
                 .expect("unmapped target ID in edge list") as u32
         })
         .collect();
     drop(dst_raw);
 
-    // Single pairs Vec: build forward CSR, swap src↔dst in-place, build reverse.
-    // No clone needed — saves ~28GB peak memory.
     let mut pairs: Vec<(u32, u32)> = src_idx
         .into_par_iter()
         .zip(dst_idx.into_par_iter())
@@ -277,14 +283,16 @@ fn build_core(csv_path: &Path, graph_dir: &Path) -> Result<(usize, usize), Strin
         let rev_dir = graph_dir.join("reverse");
         fs::create_dir_all(&rev_dir).map_err(|e| e.to_string())?;
         eprintln!("  building reverse CSR ({} edges)...", num_edges);
-        pairs.par_iter_mut().for_each(|(a, b)| std::mem::swap(a, b));
+        pairs
+            .par_iter_mut()
+            .for_each(|(a, b)| std::mem::swap(a, b));
         pairs.par_sort_unstable_by_key(|&(n, _)| n);
         let (rev_indptr, rev_indices) = extract_csr(&pairs, num_nodes);
         write_bin(&rev_dir.join("indptr.bin"), &rev_indptr).map_err(|e| e.to_string())?;
         write_bin(&rev_dir.join("indices.bin"), &rev_indices).map_err(|e| e.to_string())?;
     }
 
-    // id_map.bin: one i64 per line (text format, sorted, binary-search ready)
+    // id_map.bin
     {
         let mut w = BufWriter::new(
             File::create(graph_dir.join("id_map.bin")).map_err(|e| e.to_string())?,
@@ -300,7 +308,6 @@ fn build_core(csv_path: &Path, graph_dir: &Path) -> Result<(usize, usize), Strin
         "num_nodes": num_nodes,
         "num_edges": num_edges,
         "build_date": build_date,
-        "source": csv_path.to_string_lossy(),
     });
     fs::write(
         graph_dir.join("meta.json"),
@@ -344,6 +351,73 @@ pub fn build_from_csv(py: Python<'_>, csv_path: &str, graph_dir: &str) -> PyResu
         meta["build_date"].as_str().unwrap_or(""),
     )?;
     dict.set_item("source", &csv_path)?;
+    Ok(dict.into())
+}
+
+/// Build CSR from Parquet file directly (no intermediate CSV).
+/// Expects two i64 columns: citing_id, cited_id.
+fn build_from_parquet_core(pq_path: &Path, graph_dir: &Path) -> Result<(usize, usize), String> {
+    use arrow::array::AsArray;
+    use arrow::datatypes::Int64Type;
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+    fs::create_dir_all(graph_dir).map_err(|e| e.to_string())?;
+
+    let file = File::open(pq_path).map_err(|e| e.to_string())?;
+    let reader = ParquetRecordBatchReaderBuilder::try_new(file)
+        .map_err(|e| e.to_string())?
+        .with_batch_size(1_000_000)
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    eprintln!("  reading parquet...");
+    let mut src_raw: Vec<i64> = Vec::new();
+    let mut dst_raw: Vec<i64> = Vec::new();
+
+    for batch in reader {
+        let batch = batch.map_err(|e| e.to_string())?;
+        let src_col = batch.column(0).as_primitive::<Int64Type>();
+        let dst_col = batch.column(1).as_primitive::<Int64Type>();
+        src_raw.extend(src_col.values().iter());
+        dst_raw.extend(dst_col.values().iter());
+    }
+
+    let num_edges = src_raw.len();
+    eprintln!("  {} edges read from parquet", num_edges);
+
+    // Reuse the same build pipeline: unique IDs → binary_search mapping → CSR
+    build_from_raw_edges(src_raw, dst_raw, graph_dir)
+}
+
+#[pyfunction]
+pub fn build_from_parquet(py: Python<'_>, pq_path: &str, graph_dir: &str) -> PyResult<PyObject> {
+    let pq_path = pq_path.to_owned();
+    let graph_dir = graph_dir.to_owned();
+
+    let t0 = Instant::now();
+    eprintln!("Building CSR from parquet: {}", pq_path);
+
+    let (num_nodes, num_edges) = py.allow_threads(|| {
+        build_from_parquet_core(Path::new(&pq_path), Path::new(&graph_dir))
+            .map_err(pyo3::exceptions::PyIOError::new_err)
+    })?;
+
+    let elapsed = t0.elapsed().as_secs_f64();
+    eprintln!(
+        "CSR done in {:.0}s: {} nodes, {} edges",
+        elapsed, num_nodes, num_edges
+    );
+
+    let meta_str = std::fs::read_to_string(Path::new(&graph_dir).join("meta.json"))
+        .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+    let meta: serde_json::Value = serde_json::from_str(&meta_str)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+
+    let dict = pyo3::types::PyDict::new(py);
+    dict.set_item("num_nodes", num_nodes)?;
+    dict.set_item("num_edges", num_edges)?;
+    dict.set_item("build_date", meta["build_date"].as_str().unwrap_or(""))?;
+    dict.set_item("source", &pq_path)?;
     Ok(dict.into())
 }
 

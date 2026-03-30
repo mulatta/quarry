@@ -20,28 +20,19 @@ from quarry.config import settings
 @asset(
     group_name="citations",
     deps=[parquet_export],
-    description="Build CSR mmap citation graph from Parquet → DuckDB CSV → Rust.",
-    kinds={"python", "rust"},
+    description="Build CSR mmap citation graph directly from Parquet (no intermediate CSV).",
+    kinds={"parquet", "rust"},
 )
 def csr_graph(
     context: AssetExecutionContext,
 ) -> MaterializeResult:
-    import duckdb
     import quarry_graph
 
-    csv_path = settings.csr_dir / "edges.csv"
     settings.csr_dir.mkdir(parents=True, exist_ok=True)
 
-    # Parquet → CSV via DuckDB Python binding (no CH dependency)
     pq_path = Path(settings.parquet_dir) / "work_citations.parquet"
-    context.log.info(f"[CSR] exporting edges from {pq_path} → {csv_path}")
-    duckdb.sql(
-        f"COPY (SELECT citing_id AS src, cited_id AS dst "
-        f"FROM read_parquet('{pq_path}')) TO '{csv_path}' (HEADER true)"
-    )
-
-    context.log.info(f"[CSR] building CSR from {csv_path}")
-    stats = quarry_graph.build_from_csv(str(csv_path), str(settings.csr_dir))
+    context.log.info(f"[CSR] building CSR from {pq_path}")
+    stats = quarry_graph.build_from_parquet(str(pq_path), str(settings.csr_dir))
 
     return MaterializeResult(
         metadata={
