@@ -79,13 +79,18 @@ pub fn compute(graph: &Graph, alpha: f64, max_iter: usize, tol: f64) -> Vec<(i64
     result
 }
 
-/// PageRank on an induced subgraph. All parameters exposed.
+/// PageRank on an induced subgraph.
+///
+/// If `restart_node` is Some, runs Personalized PageRank: teleport mass goes
+/// entirely to the restart node instead of being distributed uniformly.
+/// This suppresses hub nodes and focuses scores around the seed.
 pub fn subgraph(
     graph: &Graph,
     ids: &[i64],
     alpha: f64,
     max_iter: usize,
     tol: f64,
+    restart_node: Option<i64>,
 ) -> Vec<(i64, f64)> {
     let mut idx_set = std::collections::HashSet::new();
     let mut local_nodes = Vec::new();
@@ -123,14 +128,32 @@ pub fn subgraph(
     let init = 1.0 / n as f64;
     let mut rank = vec![init; n];
     let mut new_rank = vec![0.0f64; n];
-    let teleport = (1.0 - alpha) / n as f64;
+
+    // PPR: teleport vector concentrates on restart node.
+    // Standard PR: uniform teleport across all nodes.
+    let teleport: Vec<f64> = match restart_node {
+        Some(seed_id) => {
+            let seed_idx = graph.resolve(seed_id).and_then(|gi| global_to_local.get(&gi).copied());
+            let mut t = vec![0.0; n];
+            if let Some(si) = seed_idx {
+                t[si] = 1.0 - alpha;
+            } else {
+                // seed not in subgraph — fall back to uniform
+                let uniform = (1.0 - alpha) / n as f64;
+                t.fill(uniform);
+            }
+            t
+        }
+        None => vec![(1.0 - alpha) / n as f64; n],
+    };
 
     for _ in 0..max_iter {
         let dangling_sum: f64 = (0..n)
             .filter(|&i| out_degree[i] == 0.0)
             .map(|i| rank[i])
             .sum();
-        let dangling_contrib = alpha * dangling_sum / n as f64;
+        // Dangling mass goes to restart node (PPR) or uniform (PR)
+        let dangling_factor = alpha * dangling_sum;
 
         for i in 0..n {
             let mut sum = 0.0;
@@ -139,7 +162,14 @@ pub fn subgraph(
                     sum += rank[j] / out_degree[j];
                 }
             }
-            new_rank[i] = teleport + alpha * sum + dangling_contrib;
+            // teleport[i] is (1-α) for seed (PPR) or (1-α)/n (PR)
+            // dangling redistribution follows same teleport distribution
+            let dangling_contrib = if restart_node.is_some() {
+                dangling_factor * teleport[i] / (1.0 - alpha)
+            } else {
+                dangling_factor / n as f64
+            };
+            new_rank[i] = teleport[i] + alpha * sum + dangling_contrib;
         }
 
         let diff: f64 = rank
