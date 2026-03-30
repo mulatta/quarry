@@ -407,7 +407,7 @@ _BUCKETS = 256  # work_id_int % 256 → uniform file sizes per tier
 
 _EXPORT_TABLES: list[tuple[str, str, str]] = [
     # (ch_table, pg_table, columns)
-    ("oa_work_citations", "work_citations", "citing_id, cited_id"),
+    ("merged_citations", "work_citations", "citing_id, cited_id"),
     (
         "papers_export",
         "papers",
