@@ -11,6 +11,7 @@ OPTIMIZE TABLE oa_work_authors FINAL;
 OPTIMIZE TABLE oa_work_topics FINAL;
 OPTIMIZE TABLE oa_work_citations FINAL;
 OPTIMIZE TABLE oa_id_crosswalk FINAL;
+OPTIMIZE TABLE oa_counts_by_year FINAL;
 OPTIMIZE TABLE pm_papers FINAL;
 OPTIMIZE TABLE pm_authors FINAL;
 OPTIMIZE TABLE pm_mesh_headings FINAL;
@@ -42,6 +43,11 @@ SELECT
     w.oa_url        AS oa_url,
     w.is_retracted  AS is_retracted,
     w.updated_date  AS updated_date,
+    w.language      AS language,
+    w.fwci          AS fwci,
+    w.citation_normalized_percentile AS citation_normalized_percentile,
+    w.cited_by_percentile_year_min   AS cited_by_percentile_year_min,
+    w.cited_by_percentile_year_max   AS cited_by_percentile_year_max,
     /* PubMed enrichment */
     p.journal_abbr  AS pm_journal_abbr,
     p.country       AS pm_country,

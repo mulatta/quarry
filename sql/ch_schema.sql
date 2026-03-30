@@ -24,9 +24,23 @@ CREATE TABLE IF NOT EXISTS oa_works (
     oa_status      Nullable(String),
     oa_url         Nullable(String),
     is_retracted   Bool DEFAULT false,
-    updated_date   Date
+    updated_date   Date,
+    language       Nullable(String),
+    fwci           Nullable(Float32),
+    citation_normalized_percentile Nullable(Float32),
+    cited_by_percentile_year_min   Nullable(UInt16),
+    cited_by_percentile_year_max   Nullable(UInt16)
 ) ENGINE = ReplacingMergeTree(updated_date)
 ORDER BY (work_id)
+PARTITION BY toYear(updated_date);
+
+CREATE TABLE IF NOT EXISTS oa_work_counts_by_year (
+    work_id        String,
+    year           UInt16,
+    cited_by_count UInt32,
+    updated_date   Date
+) ENGINE = ReplacingMergeTree(updated_date)
+ORDER BY (work_id, year)
 PARTITION BY toYear(updated_date);
 
 CREATE TABLE IF NOT EXISTS oa_work_authors (
