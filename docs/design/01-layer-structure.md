@@ -62,9 +62,43 @@ structure_score(paper) = ppr_score + λ·norm(coupling) + μ·norm(cocite)
 
 **Decision**: TBD. Prototype both, evaluate on test cases.
 
-## Known Issues
+## Current State
+
+- [x] PPR implemented and verified (Rust, `restart_node` parameter)
+- [x] CSR: 182M nodes, 3.77B edges (OA + iCite merged)
+- [x] Bib coupling + co-citation: Rust code exists, not yet wired into pipeline
+- [ ] Iterative expansion: designed, not implemented
+- [ ] L1 aggregation: TBD
+
+### Verified PPR Results (N-glycosylation test paper)
+
+PPR (α=0.2) on 2-hop pool (5000 nodes):
+- Hub suppression: Laemmli 1970 (c:250K) dropped from PR #8 to PPR outside top 20
+- Topic relevance: IL6, glycosylation, SRC-YAP-SOX2 papers surfaced in top 20
+- Off-topic: GSEA (#3), PGC-1α (#6) — need coupling/MeSH to filter
+
+### Open Issues for Discussion
+
+1. **α tuning**: α=0.2 gives seed=0.805, #2=0.003 (268× ratio). Too concentrated?
+   - Lower α (0.1) = even more concentrated on seed
+   - Higher α (0.5) = wider exploration, but hub papers return
+   - Adaptive α based on seed's citation structure?
+
+2. **Seed exclusion**: Should seed be excluded from ranking? It's always #1 by far.
+   Showing it wastes a slot. But omitting changes score distribution.
+
+3. **Off-topic via structure alone**: GSEA/PGC-1α are highly cited → many paths pass
+   through them. PPR alone can't distinguish "methodological tool" from "topically related".
+   Coupling/cocite may help: seed doesn't share references with GSEA.
+
+4. **Pool boundary effects**: Fixed 2-hop, max 5000 → arbitrary cutoff.
+   Papers at 3-hop that are highly relevant may be missed.
+   Iterative expansion addresses this but adds complexity.
+
+## Known Data Issues
 
 - 75% of works have no reference data (zero out-degree)
 - OA citation graph is all-discipline, not bio-specific → non-bio hubs
 - Self-citations (1.07M) — minor but could inflate seed neighbor scores
 - CSR is static snapshot — new citations not reflected until rebuild
+- iCite merge added 746M edges but only for PubMed papers
