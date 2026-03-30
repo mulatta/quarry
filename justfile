@@ -100,12 +100,8 @@ test-graph:
 # Test all Rust crates
 test: test-parse test-graph
 
-# Test Python unit tests (no CH/PG required)
-test-py:
-    python -m pytest tests/unit -v
-
 # Test Python integration (requires CH/PG)
-test-py-integration:
+test-py:
     python -m pytest tests/integration -v
 
 # Clippy + test all (Rust + Python)

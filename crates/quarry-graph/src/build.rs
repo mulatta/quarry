@@ -2,7 +2,6 @@
 //!
 //! Supports i64 node IDs (OpenAlex work_id_int, range ~10^10).
 
-use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::Path;
@@ -358,7 +357,7 @@ pub fn build_from_csv(py: Python<'_>, csv_path: &str, graph_dir: &str) -> PyResu
 /// Expects two i64 columns: citing_id, cited_id.
 fn build_from_parquet_core(pq_path: &Path, graph_dir: &Path) -> Result<(usize, usize), String> {
     use arrow::array::AsArray;
-    use arrow::datatypes::Int64Type;
+    use arrow::datatypes::UInt64Type;
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
     fs::create_dir_all(graph_dir).map_err(|e| e.to_string())?;
@@ -376,10 +375,11 @@ fn build_from_parquet_core(pq_path: &Path, graph_dir: &Path) -> Result<(usize, u
 
     for batch in reader {
         let batch = batch.map_err(|e| e.to_string())?;
-        let src_col = batch.column(0).as_primitive::<Int64Type>();
-        let dst_col = batch.column(1).as_primitive::<Int64Type>();
-        src_raw.extend(src_col.values().iter());
-        dst_raw.extend(dst_col.values().iter());
+        let src_col = batch.column(0).as_primitive::<UInt64Type>();
+        let dst_col = batch.column(1).as_primitive::<UInt64Type>();
+        // CSR pipeline uses i64 internally; u64 values fit since max work_id_int < i64::MAX
+        src_raw.extend(src_col.values().iter().map(|&v| v as i64));
+        dst_raw.extend(dst_col.values().iter().map(|&v| v as i64));
     }
 
     let num_edges = src_raw.len();
