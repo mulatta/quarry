@@ -181,7 +181,7 @@ fn process_gz_chunked(
             continue;
         }
         match oa_json::parse_line(&line) {
-            Ok(parsed) => {
+            Ok(Some(parsed)) => {
                 buf.works.push(parsed.work);
                 buf.authors.extend(parsed.authors);
                 buf.topics.extend(parsed.topics);
@@ -191,6 +191,7 @@ fn process_gz_chunked(
                 }
                 line_count += 1;
             }
+            Ok(None) => {} // intentionally skipped (paratext)
             Err(_) => {
                 stats.failed_lines += 1;
             }
