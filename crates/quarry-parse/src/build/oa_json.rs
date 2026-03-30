@@ -4,6 +4,8 @@
 //! into intermediate Rust structs. Transformation logic mirrors
 //! `quarry/assets/load.py:494-530`.
 
+use std::sync::Arc;
+
 use serde::Deserialize;
 
 use quarry_core::{abstract_recon, normalize};
@@ -42,7 +44,7 @@ impl Tier {
 }
 
 pub struct OaWork {
-    pub work_id: String,
+    pub work_id: Arc<str>,
     pub work_id_int: i64,
     pub tier: Tier,
     pub pmid: Option<i32>,
@@ -58,10 +60,15 @@ pub struct OaWork {
     pub oa_url: Option<String>,
     pub is_retracted: bool,
     pub updated_date: Option<String>,
+    pub language: Option<String>,
+    pub fwci: Option<f32>,
+    pub citation_normalized_percentile: Option<f32>,
+    pub cited_by_percentile_year_min: Option<i16>,
+    pub cited_by_percentile_year_max: Option<i16>,
 }
 
 pub struct OaAuthor {
-    pub work_id: String,
+    pub work_id: Arc<str>,
     pub author_position: i16,
     pub display_name: Option<String>,
     pub orcid: Option<String>,
@@ -71,7 +78,7 @@ pub struct OaAuthor {
 }
 
 pub struct OaTopic {
-    pub work_id: String,
+    pub work_id: Arc<str>,
     pub topic_id: String,
     pub topic_name: Option<String>,
     pub subfield: Option<String>,
@@ -87,7 +94,7 @@ pub struct OaCitation {
 }
 
 pub struct OaCrosswalk {
-    pub work_id: String,
+    pub work_id: Arc<str>,
     pub pmid: i32,
 }
 
@@ -115,12 +122,30 @@ struct RawWork {
     work_type: Option<String>,
     cited_by_count: Option<i32>,
     is_retracted: Option<bool>,
+    is_paratext: Option<bool>,
+    language: Option<String>,
+    fwci: Option<f32>,
+    citation_normalized_percentile: Option<RawCitationPercentile>,
+    cited_by_percentile_year: Option<RawCitedByPercentileYear>,
     primary_location: Option<RawPrimaryLocation>,
     open_access: Option<RawOpenAccess>,
     authorships: Option<Vec<RawAuthorship>>,
     topics: Option<Vec<RawTopic>>,
     referenced_works: Option<Vec<String>>,
     updated_date: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct RawCitationPercentile {
+    value: Option<f32>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct RawCitedByPercentileYear {
+    min: Option<i16>,
+    max: Option<i16>,
 }
 
 #[derive(Deserialize, Default)]
@@ -187,19 +212,24 @@ struct RawTopic {
 
 /// Parse a single OA JSON line into structured data.
 ///
-/// Mirrors the SQL transformations in `load.py:494-530` (works),
-/// `537-551` (authors), `558-572` (topics), `579-586` (citations).
+/// Returns `Ok(None)` for intentionally skipped records (paratext).
+/// Returns `Err` for actual parse failures.
 pub fn parse_line(
     line: &str,
-) -> Result<OaLineResult, Box<dyn std::error::Error>> {
+) -> Result<Option<OaLineResult>, Box<dyn std::error::Error>> {
     let raw: RawWork = sonic_rs::from_str(line)?;
 
     if raw.id.is_empty() {
         return Err("work missing id".into());
     }
 
+    // Skip paratext (ToC, errata, ads) — no scholarly value
+    if raw.is_paratext.unwrap_or(false) {
+        return Ok(None);
+    }
+
     // work_id: strip "https://openalex.org/" prefix
-    let work_id = raw.id.strip_prefix(OA_PREFIX).unwrap_or(&raw.id).to_string();
+    let work_id: Arc<str> = Arc::from(raw.id.strip_prefix(OA_PREFIX).unwrap_or(&raw.id));
 
     // work_id_int: strip "https://openalex.org/W" and parse as i64
     let work_id_int: i64 = raw
@@ -257,8 +287,16 @@ pub fn parse_line(
         None => (None, None),
     };
 
+    let citation_normalized_percentile = raw
+        .citation_normalized_percentile
+        .and_then(|c| c.value);
+    let (cited_by_pct_min, cited_by_pct_max) = match raw.cited_by_percentile_year {
+        Some(p) => (p.min, p.max),
+        None => (None, None),
+    };
+
     let work = OaWork {
-        work_id: work_id.clone(),
+        work_id: Arc::clone(&work_id),
         work_id_int,
         tier,
         pmid,
@@ -274,6 +312,11 @@ pub fn parse_line(
         oa_url,
         is_retracted: raw.is_retracted.unwrap_or(false),
         updated_date: raw.updated_date,
+        language: raw.language,
+        fwci: raw.fwci,
+        citation_normalized_percentile,
+        cited_by_percentile_year_min: cited_by_pct_min,
+        cited_by_percentile_year_max: cited_by_pct_max,
     };
 
     // Authors — T1/T2/T3 (skip T4 only)
@@ -294,7 +337,7 @@ pub fn parse_line(
                     .unwrap_or((None, None));
 
                 OaAuthor {
-                    work_id: work_id.clone(),
+                    work_id: Arc::clone(&work_id),
                     author_position: i16::try_from(i + 1).unwrap_or(i16::MAX),
                     display_name,
                     orcid,
@@ -324,7 +367,7 @@ pub fn parse_line(
                 let primary = is_first;
                 is_first = false;
                 Some(OaTopic {
-                    work_id: work_id.clone(),
+                    work_id: Arc::clone(&work_id),
                     topic_id,
                     topic_name: t.display_name,
                     subfield: t.subfield.and_then(|s| s.display_name),
@@ -355,17 +398,17 @@ pub fn parse_line(
 
     // Crosswalk — only if PMID exists
     let crosswalk = pmid.map(|p| OaCrosswalk {
-        work_id: work_id.clone(),
+        work_id: Arc::clone(&work_id),
         pmid: p,
     });
 
-    Ok(OaLineResult {
+    Ok(Some(OaLineResult {
         work,
         authors,
         topics,
         citations,
         crosswalk,
-    })
+    }))
 }
 
 #[cfg(test)]
@@ -384,6 +427,10 @@ mod tests {
             "type": "article",
             "cited_by_count": 10,
             "is_retracted": false,
+            "language": "en",
+            "fwci": 8.02,
+            "citation_normalized_percentile": {"value": 0.984, "is_in_top_1_percent": false, "is_in_top_10_percent": true},
+            "cited_by_percentile_year": {"min": 98, "max": 100},
             "primary_location": {"source": {"display_name": "Nature"}},
             "open_access": {"oa_status": "gold", "oa_url": "https://example.com"},
             "authorships": [
@@ -403,9 +450,9 @@ mod tests {
             "updated_date": "2024-07-01"
         }"#;
 
-        let result = parse_line(json).unwrap();
+        let result = parse_line(json).unwrap().unwrap();
         let w = &result.work;
-        assert_eq!(w.work_id, "W12345");
+        assert_eq!(&*w.work_id, "W12345");
         assert_eq!(w.work_id_int, 12345);
         assert_eq!(w.tier, Tier::T1);
         assert_eq!(w.pmid, Some(99999));
@@ -413,6 +460,11 @@ mod tests {
         assert_eq!(w.abstract_text.as_deref(), Some("hello world"));
         assert_eq!(w.host_venue.as_deref(), Some("Nature"));
         assert_eq!(w.oa_status.as_deref(), Some("gold"));
+        assert_eq!(w.language.as_deref(), Some("en"));
+        assert!((w.fwci.unwrap() - 8.02).abs() < 0.01);
+        assert!((w.citation_normalized_percentile.unwrap() - 0.984).abs() < 0.001);
+        assert_eq!(w.cited_by_percentile_year_min, Some(98));
+        assert_eq!(w.cited_by_percentile_year_max, Some(100));
 
         assert_eq!(result.authors.len(), 1);
         assert_eq!(result.authors[0].display_name.as_deref(), Some("Alice"));
@@ -441,7 +493,7 @@ mod tests {
             "abstract_inverted_index": {"the": [0], "<em>important</em>": [1], "result": [2], "(p": [3], "<": [4], "0.05)": [5]}
         }"#;
 
-        let result = parse_line(json).unwrap();
+        let result = parse_line(json).unwrap().unwrap();
         let abs = result.work.abstract_text.as_deref().unwrap();
         // HTML tags stripped, math inequality preserved
         assert_eq!(abs, "the important result (p < 0.05)");
@@ -455,7 +507,7 @@ mod tests {
             "abstract_inverted_index": {"hello": [0], "world": [2]}
         }"#;
 
-        let result = parse_line(json).unwrap();
+        let result = parse_line(json).unwrap().unwrap();
         let abs = result.work.abstract_text.as_deref().unwrap();
         // Gap at position 1 produces extra space, collapsed to single space
         assert!(!abs.contains("  "), "should not have double spaces: {abs}");
@@ -472,7 +524,7 @@ mod tests {
             ]
         }"#;
 
-        let result = parse_line(json).unwrap();
+        let result = parse_line(json).unwrap().unwrap();
         assert_eq!(result.work.tier, Tier::T2);
         assert_eq!(result.work.abstract_text.as_deref(), Some("some text"));
         assert!(result.work.pmid.is_none());
@@ -491,7 +543,7 @@ mod tests {
             "referenced_works": ["https://openalex.org/W333"]
         }"#;
 
-        let result = parse_line(json).unwrap();
+        let result = parse_line(json).unwrap().unwrap();
         assert_eq!(result.work.tier, Tier::T3);
         assert!(result.work.abstract_text.is_none());
         assert_eq!(result.work.pmid, Some(22222));
@@ -510,7 +562,7 @@ mod tests {
             "referenced_works": ["https://openalex.org/W333"]
         }"#;
 
-        let result = parse_line(json).unwrap();
+        let result = parse_line(json).unwrap().unwrap();
         assert_eq!(result.work.tier, Tier::T4);
         assert!(result.work.abstract_text.is_none());
         assert!(result.authors.is_empty());  // T4 skips authors
@@ -537,7 +589,7 @@ mod tests {
             "ids": {"pmid": "urn:pmid:12345"},
             "title": "No PMID"
         }"#;
-        let result = parse_line(json).unwrap();
+        let result = parse_line(json).unwrap().unwrap();
         assert!(result.work.pmid.is_none());
         assert!(result.crosswalk.is_none());
     }
@@ -554,7 +606,7 @@ mod tests {
                 {"id": "https://openalex.org/T999", "display_name": "Has ID", "score": 0.8}
             ]
         }"#;
-        let result = parse_line(json).unwrap();
+        let result = parse_line(json).unwrap().unwrap();
         // Topic without id is filtered out, but is_primary tracks original position
         assert_eq!(result.topics.len(), 1);
         assert_eq!(result.topics[0].topic_id, "T999");
@@ -573,7 +625,7 @@ mod tests {
                 "https://openalex.org/W222"
             ]
         }"#;
-        let result = parse_line(json).unwrap();
+        let result = parse_line(json).unwrap().unwrap();
         assert_eq!(result.citations.len(), 2);
     }
 
@@ -585,7 +637,7 @@ mod tests {
             "title": "Empty abstract map",
             "abstract_inverted_index": {}
         }"#;
-        let result = parse_line(json).unwrap();
+        let result = parse_line(json).unwrap().unwrap();
         // Empty inverted index reconstructs to "" → filtered to None
         assert!(result.work.abstract_text.is_none());
     }
@@ -597,7 +649,7 @@ mod tests {
             "title": "HTML-only abstract",
             "abstract_inverted_index": {"<br/>": [0]}
         }"#;
-        let result = parse_line(json).unwrap();
+        let result = parse_line(json).unwrap().unwrap();
         // HTML tag stripped → empty string → None
         assert!(result.work.abstract_text.is_none());
     }
@@ -609,8 +661,48 @@ mod tests {
             "title": "",
             "abstract_inverted_index": {"some": [0], "text": [1]}
         }"#;
-        let result = parse_line(json).unwrap();
+        let result = parse_line(json).unwrap().unwrap();
         assert_eq!(result.work.title, "");
         assert_eq!(result.work.abstract_text.as_deref(), Some("some text"));
+    }
+
+    #[test]
+    fn test_paratext_skipped() {
+        let json = r#"{
+            "id": "https://openalex.org/W10001",
+            "title": "Table of Contents",
+            "is_paratext": true
+        }"#;
+        // Paratext returns Ok(None), not Err
+        assert!(parse_line(json).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_new_fields_null_when_missing() {
+        let json = r#"{
+            "id": "https://openalex.org/W10002",
+            "title": "Minimal work"
+        }"#;
+        let result = parse_line(json).unwrap().unwrap();
+        let w = &result.work;
+        assert!(w.language.is_none());
+        assert!(w.fwci.is_none());
+        assert!(w.citation_normalized_percentile.is_none());
+        assert!(w.cited_by_percentile_year_min.is_none());
+        assert!(w.cited_by_percentile_year_max.is_none());
+    }
+
+    #[test]
+    fn test_citation_percentile_flatten() {
+        let json = r#"{
+            "id": "https://openalex.org/W10003",
+            "title": "Percentile test",
+            "citation_normalized_percentile": {"value": 0.75, "is_in_top_1_percent": false, "is_in_top_10_percent": true},
+            "cited_by_percentile_year": {"min": 50, "max": 60}
+        }"#;
+        let w = &parse_line(json).unwrap().unwrap().work;
+        assert!((w.citation_normalized_percentile.unwrap() - 0.75).abs() < 0.001);
+        assert_eq!(w.cited_by_percentile_year_min, Some(50));
+        assert_eq!(w.cited_by_percentile_year_max, Some(60));
     }
 }

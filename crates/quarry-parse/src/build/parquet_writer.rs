@@ -28,8 +28,14 @@ fn date_str_to_days(s: &str) -> Option<i32> {
     let m: u32 = parts[1].parse().ok()?;
     let d: u32 = parts[2].parse().ok()?;
 
-    // Reject obviously invalid dates
-    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
+    // Reject invalid dates (month-aware day limit, no leap-year pedantry)
+    let max_day = match m {
+        2 => 29,
+        4 | 6 | 9 | 11 => 30,
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        _ => return None,
+    };
+    if d < 1 || d > max_day {
         return None;
     }
 
@@ -114,7 +120,7 @@ pub fn write_oa_works(works: &[OaWork], path: &Path) -> Result<usize, Box<dyn st
     ]));
 
     let batch = RecordBatch::try_new(schema, vec![
-        Arc::new(StringArray::from_iter_values(works.iter().map(|w| w.work_id.as_str()))),
+        Arc::new(StringArray::from_iter_values(works.iter().map(|w| &*w.work_id))),
         Arc::new(UInt64Array::from_iter_values(works.iter().map(|w| i64_to_u64(w.work_id_int)))),
         Arc::new(StringArray::from_iter_values(works.iter().map(|w| w.tier.as_str()))),
         Arc::new(UInt32Array::from_iter(works.iter().map(|w| w.pmid.and_then(i32_to_u32)))),
@@ -128,7 +134,7 @@ pub fn write_oa_works(works: &[OaWork], path: &Path) -> Result<usize, Box<dyn st
         Arc::new(StringArray::from_iter(works.iter().map(|w| w.host_venue.as_deref()))),
         Arc::new(StringArray::from_iter(works.iter().map(|w| w.oa_status.as_deref()))),
         Arc::new(StringArray::from_iter(works.iter().map(|w| w.oa_url.as_deref()))),
-        Arc::new(BooleanArray::from(works.iter().map(|w| w.is_retracted).collect::<Vec<_>>())),
+        Arc::new(BooleanArray::from_iter(works.iter().map(|w| Some(w.is_retracted)))),
         Arc::new(Date32Array::from_iter(works.iter().map(|w| w.updated_date.as_deref().and_then(date_str_to_days)))),
     ])?;
 
@@ -151,8 +157,8 @@ pub fn write_oa_work_authors(authors: &[OaAuthor], path: &Path) -> Result<usize,
     ]));
 
     let batch = RecordBatch::try_new(schema, vec![
-        Arc::new(StringArray::from_iter_values(authors.iter().map(|a| a.work_id.as_str()))),
-        Arc::new(UInt16Array::from_iter(authors.iter().map(|a| i16_to_u16(a.author_position)))),
+        Arc::new(StringArray::from_iter_values(authors.iter().map(|a| &*a.work_id))),
+        Arc::new(UInt16Array::from_iter_values(authors.iter().map(|a| i16_to_u16(a.author_position).unwrap_or(0)))),
         Arc::new(StringArray::from_iter(authors.iter().map(|a| a.display_name.as_deref()))),
         Arc::new(StringArray::from_iter(authors.iter().map(|a| a.orcid.as_deref()))),
         Arc::new(StringArray::from_iter(authors.iter().map(|a| a.institution_name.as_deref()))),
@@ -180,14 +186,14 @@ pub fn write_oa_work_topics(topics: &[OaTopic], path: &Path) -> Result<usize, Bo
     ]));
 
     let batch = RecordBatch::try_new(schema, vec![
-        Arc::new(StringArray::from_iter_values(topics.iter().map(|t| t.work_id.as_str()))),
+        Arc::new(StringArray::from_iter_values(topics.iter().map(|t| &*t.work_id))),
         Arc::new(StringArray::from_iter_values(topics.iter().map(|t| t.topic_id.as_str()))),
         Arc::new(StringArray::from_iter(topics.iter().map(|t| t.topic_name.as_deref()))),
         Arc::new(StringArray::from_iter(topics.iter().map(|t| t.subfield.as_deref()))),
         Arc::new(StringArray::from_iter(topics.iter().map(|t| t.field.as_deref()))),
         Arc::new(StringArray::from_iter(topics.iter().map(|t| t.domain.as_deref()))),
         Arc::new(Float32Array::from_iter(topics.iter().map(|t| t.score))),
-        Arc::new(BooleanArray::from(topics.iter().map(|t| t.is_primary).collect::<Vec<_>>())),
+        Arc::new(BooleanArray::from_iter(topics.iter().map(|t| Some(t.is_primary)))),
     ])?;
 
     write_batch(path, &batch)
@@ -222,7 +228,7 @@ pub fn write_oa_id_crosswalk(crosswalk: &[OaCrosswalk], path: &Path) -> Result<u
     ]));
 
     let batch = RecordBatch::try_new(schema, vec![
-        Arc::new(StringArray::from_iter_values(crosswalk.iter().map(|c| c.work_id.as_str()))),
+        Arc::new(StringArray::from_iter_values(crosswalk.iter().map(|c| &*c.work_id))),
         Arc::new(UInt32Array::from_iter_values(crosswalk.iter().map(|c| i32_to_u32(c.pmid).unwrap_or(0)))),
     ])?;
 
@@ -319,7 +325,7 @@ pub fn write_pm_authors(authors: &[Author], path: &Path) -> Result<usize, Box<dy
         Arc::new(StringArray::from_iter(authors.iter().map(|a| a.initials.as_deref()))),
         Arc::new(StringArray::from_iter(authors.iter().map(|a| a.orcid.as_deref()))),
         Arc::new(StringArray::from_iter(authors.iter().map(|a| a.affiliation.as_deref()))),
-        Arc::new(BooleanArray::from(authors.iter().map(|a| a.is_collective).collect::<Vec<_>>())),
+        Arc::new(BooleanArray::from_iter(authors.iter().map(|a| Some(a.is_collective)))),
     ])?;
 
     write_batch(path, &batch)
@@ -345,7 +351,7 @@ pub fn write_pm_mesh_headings(headings: &[MeshHeading], path: &Path) -> Result<u
         Arc::new(StringArray::from_iter_values(headings.iter().map(|m| m.descriptor_name.as_str()))),
         Arc::new(StringArray::from_iter(headings.iter().map(|m| m.qualifier_ui.as_deref()))),
         Arc::new(StringArray::from_iter(headings.iter().map(|m| m.qualifier_name.as_deref()))),
-        Arc::new(BooleanArray::from(headings.iter().map(|m| m.is_major_topic).collect::<Vec<_>>())),
+        Arc::new(BooleanArray::from_iter(headings.iter().map(|m| Some(m.is_major_topic)))),
     ])?;
 
     write_batch(path, &batch)
