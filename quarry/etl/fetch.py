@@ -34,6 +34,10 @@ def sync_ftp_dir(
     """
     local_dir.mkdir(parents=True, exist_ok=True)
 
+    # Clean up stale .tmp files from interrupted downloads
+    for tmp in local_dir.glob("*.tmp"):
+        tmp.unlink()
+
     # List remote files via MLSD (machine-readable)
     # remote_files: {name: size} for DataVersion fingerprint
     # remote_mtimes: {name: "YYYYMMDDHHMMSS"} for change detection
@@ -233,7 +237,11 @@ def download_and_extract_zip(
     expected_file: str,
     max_age_days: int = 35,
 ) -> dict[str, str | int]:
-    """Download a zip, extract contents. Skips if expected_file is fresh."""
+    """Download a zip, extract target file atomically.
+
+    Extract to temp file, then rename — crash mid-extract won't leave
+    a partial target that max_age_days would treat as fresh.
+    """
     local_dir.mkdir(parents=True, exist_ok=True)
     target = local_dir / expected_file
 
@@ -249,12 +257,17 @@ def download_and_extract_zip(
     zip_path = local_dir / f"_{expected_file}.zip"
     download_http(url, zip_path)
 
+    tmp_target = target.with_suffix(target.suffix + ".tmp")
     with zipfile.ZipFile(zip_path) as zf:
-        zf.extractall(local_dir)
+        # Extract only the expected file to a temp path
+        with zf.open(expected_file) as src, open(tmp_target, "wb") as dst:
+            while chunk := src.read(65536):
+                dst.write(chunk)
+    tmp_target.rename(target)
     zip_path.unlink()
 
     return {
         "status": "extracted",
         "path": str(target),
-        "bytes": target.stat().st_size if target.exists() else 0,
+        "bytes": target.stat().st_size,
     }
