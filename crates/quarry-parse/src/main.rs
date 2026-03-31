@@ -36,6 +36,10 @@ enum Cmd {
         #[arg(long, env = "QUARRY_OA_OUTPUT_DIR")]
         output_dir: PathBuf,
 
+        /// Filter to a single Hive partition (e.g. updated_date=2025-01-01)
+        #[arg(long)]
+        partition: Option<String>,
+
         /// Parse thread count (0 = auto from available memory)
         #[arg(long, env = "QUARRY_PARSE_THREADS")]
         threads: Option<usize>,
@@ -85,10 +89,11 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         Cmd::Oa {
             input_dir,
             output_dir,
+            partition,
             threads,
         } => {
             let config = make_config(threads);
-            let stats = oa::parse_oa(&config, input_dir, output_dir)?;
+            let stats = oa::parse_oa(&config, input_dir, output_dir, partition.as_deref())?;
             println!("{}", serde_json::to_string(&stats)?);
         }
 
