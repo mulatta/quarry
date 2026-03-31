@@ -36,7 +36,7 @@ fn test_pubmed_parse() {
 }
 
 #[test]
-fn test_pubmed_progress_skip() {
+fn test_pubmed_idempotent_reparse() {
     let config = ParseConfig::default();
     let pubmed_fixtures = fixtures_dir().join("pubmed");
     let output_dir = tempfile::tempdir().unwrap();
@@ -51,7 +51,7 @@ fn test_pubmed_progress_skip() {
     .unwrap();
     assert_eq!(stats1.num_papers, 2);
 
-    // Second parse — Parquet output exists → skip
+    // Second parse — idempotent overwrite, same result
     let stats2 = quarry_parse::build::pubmed::parse_pubmed(
         &config,
         &pubmed_fixtures,
@@ -59,7 +59,7 @@ fn test_pubmed_progress_skip() {
         output_dir.path(),
     )
     .unwrap();
-    assert_eq!(stats2.num_papers, 0);
+    assert_eq!(stats2.num_papers, 2);
 }
 
 // ── OA parse ──

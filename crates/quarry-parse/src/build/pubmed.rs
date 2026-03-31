@@ -60,21 +60,9 @@ pub fn parse_pubmed(
         );
         xml_files.extend(update_files);
     }
-    let num_files = xml_files.len();
-
-    // Skip files whose Parquet output already exists
-    let todo: Vec<_> = xml_files
-        .into_iter()
-        .filter(|path| {
-            let part_name = part_name_from_path(path);
-            let pq_path = output_dir.join(format!("papers/{part_name}.parquet"));
-            !pq_path.exists()
-        })
-        .collect();
-
+    let todo = xml_files;
     let num_todo = todo.len();
-    let num_skipped = num_files - num_todo;
-    eprintln!("pubmed: {num_skipped} already done, {num_todo} to process");
+    eprintln!("pubmed: {num_todo} files to process");
 
     let n_threads = config.effective_parse_threads();
     let pool = rayon::ThreadPoolBuilder::new()
@@ -141,7 +129,7 @@ pub fn parse_pubmed(
         num_mesh: mesh_count.load(Ordering::Relaxed),
         num_grants: grants_count.load(Ordering::Relaxed),
         num_chemicals: chemicals_count.load(Ordering::Relaxed),
-        num_files_processed: num_files,
+        num_files_processed: num_todo,
         num_failed_files: failed_count.load(Ordering::Relaxed),
         elapsed_secs: elapsed,
     })
