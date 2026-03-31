@@ -215,6 +215,7 @@ def ch_load(context: AssetExecutionContext) -> MaterializeResult:
         "work_topics",
         "work_citations",
         "id_crosswalk",
+        "counts_by_year",
     ]
     pm_tables = ["papers", "authors", "mesh_headings", "grants", "chemicals"]
 
@@ -327,6 +328,7 @@ def ch_transform(context: AssetExecutionContext) -> MaterializeResult:
         "oa_work_topics",
         "oa_work_citations",
         "oa_id_crosswalk",
+        "oa_counts_by_year",
         "pm_papers",
         "pm_authors",
         "pm_mesh_headings",
@@ -392,7 +394,9 @@ _WORKS_COLUMNS = (
     "pub_year, pub_date, type, cited_by_count, host_venue, oa_status, oa_url, "
     "is_retracted, updated_date, pm_journal_abbr, pm_country, pm_medline_status, "
     "pm_pub_type, pm_created_date, pm_revised_date, pm_indexed_date, "
-    "rcr, nih_percentile, apt, is_clinical"
+    "rcr, nih_percentile, apt, is_clinical, "
+    "language, fwci, citation_normalized_percentile, "
+    "cited_by_percentile_year_min, cited_by_percentile_year_max"
 )
 # Parquet export columns: tier excluded (derived from hive directory tier=t1/).
 _WORKS_EXPORT_COLUMNS = (
@@ -400,7 +404,9 @@ _WORKS_EXPORT_COLUMNS = (
     "pub_year, pub_date, type, cited_by_count, host_venue, oa_status, oa_url, "
     "is_retracted, updated_date, pm_journal_abbr, pm_country, pm_medline_status, "
     "pm_pub_type, pm_created_date, pm_revised_date, pm_indexed_date, "
-    "rcr, nih_percentile, apt, is_clinical"
+    "rcr, nih_percentile, apt, is_clinical, "
+    "language, fwci, citation_normalized_percentile, "
+    "cited_by_percentile_year_min, cited_by_percentile_year_max"
 )
 _TIERS = ["t1", "t2", "t3", "t4"]
 _BUCKETS = 256  # work_id_int % 256 → uniform file sizes per tier
@@ -455,6 +461,7 @@ _EXPORT_TABLES: list[tuple[str, str, str]] = [
         "qualifier_name, is_major_topic",
     ),
     ("cited_by_clin_export", "cited_by_clin", "pmid, citing_pmid"),
+    ("oa_counts_by_year", "work_counts_by_year", "work_id, year, cited_by_count"),
 ]
 
 
@@ -713,6 +720,7 @@ _ALL_PG_TABLES = [
     "id_crosswalk",
     "mesh_tree",
     "cited_by_clin",
+    "work_counts_by_year",
 ]
 
 
@@ -732,7 +740,7 @@ def pg_load(context: AssetExecutionContext) -> MaterializeResult:
     _psql(
         "TRUNCATE papers, authors, mesh_headings, grants, chemicals, "
         "cited_by_clin, works, work_authors, work_topics, work_mesh, "
-        "work_citations, id_crosswalk, mesh_tree CASCADE",
+        "work_citations, work_counts_by_year, id_crosswalk, mesh_tree CASCADE",
         context,
         label="[PG] truncating all tables",
     )
