@@ -28,7 +28,10 @@ _build = AssetSelection.assets(
     "mesh_stage",
     # CH
     "ch_init",
-    "ch_load",
+    "ch_load_oa",
+    "ch_load_pm",
+    "ch_load_mesh",
+    "ch_load_icite",
     "ch_transform",
     # export
     "parquet_export",

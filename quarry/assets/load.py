@@ -202,85 +202,24 @@ def _ch_insert_async(
     )
 
 
-@asset(
-    group_name="load",
-    deps=[ch_init, oa_parse, pm_parse, mesh_stage, icite_metadata_sync],
-    description="Parquet + CSV → CH: parallel INSERT across all tables.",
-    kinds={"clickhouse"},
-)
-def ch_load(context: AssetExecutionContext) -> MaterializeResult:
-    oa_tables = [
-        "works",
-        "work_authors",
-        "work_topics",
-        "work_citations",
-        "id_crosswalk",
-        "counts_by_year",
-    ]
-    pm_tables = ["papers", "authors", "mesh_headings", "grants", "chemicals"]
+def _ch_load_tables(
+    ch_tables: list[str],
+    infile_specs: list[tuple[str, str, str]],
+    context: AssetExecutionContext,
+) -> None:
+    """TRUNCATE + parallel INSERT for a set of CH tables.
 
-    # TRUNCATE all tables
-    for table in oa_tables:
-        _ch_query(
-            f"TRUNCATE TABLE oa_{table}", context, label=f"[CH] TRUNCATE oa_{table}"
-        )
-    for table in pm_tables:
-        _ch_query(
-            f"TRUNCATE TABLE pm_{table}", context, label=f"[CH] TRUNCATE pm_{table}"
-        )
-    _ch_query(
-        "TRUNCATE TABLE pm_mesh_tree", context, label="[CH] TRUNCATE pm_mesh_tree"
-    )
-    _ch_query("TRUNCATE TABLE icite_raw", context, label="[CH] TRUNCATE icite_raw")
+    Args:
+        ch_tables: table names to TRUNCATE.
+        infile_specs: [(ch_table, infile_glob, format), ...] for INSERT.
+    """
+    for table in ch_tables:
+        _ch_query(f"TRUNCATE TABLE {table}", context, label=f"[CH] TRUNCATE {table}")
 
-    # Parallel INSERT — launch all at once, wait for all
     procs: list[tuple[str, subprocess.Popen]] = []
+    for ch_table, infile_glob, fmt in infile_specs:
+        procs.append((ch_table, _ch_insert_async(ch_table, infile_glob, fmt, context)))
 
-    oa_dir = str(settings.oa_parquet_dir)
-    for table in oa_tables:
-        procs.append(
-            (
-                f"oa_{table}",
-                _ch_insert_async(
-                    f"oa_{table}", f"{oa_dir}/{table}/**/*.parquet", "Parquet", context
-                ),
-            )
-        )
-
-    pm_dir = str(settings.pm_parquet_dir)
-    for table in pm_tables:
-        procs.append(
-            (
-                f"pm_{table}",
-                _ch_insert_async(
-                    f"pm_{table}", f"{pm_dir}/{table}/**/*.parquet", "Parquet", context
-                ),
-            )
-        )
-
-    mesh_parquet = settings.mesh_parquet_dir / "mesh_tree.parquet"
-    if mesh_parquet.exists():
-        procs.append(
-            (
-                "pm_mesh_tree",
-                _ch_insert_async("pm_mesh_tree", str(mesh_parquet), "Parquet", context),
-            )
-        )
-    else:
-        context.log.warning(f"MeSH Parquet not found: {mesh_parquet}, skipping")
-
-    csv_path = settings.icite_dir / "icite_metadata.csv"
-    if csv_path.exists():
-        procs.append(
-            (
-                "icite_raw",
-                _ch_insert_async("icite_raw", str(csv_path), "CSVWithNames", context),
-            )
-        )
-    else:
-        context.log.warning(f"iCite CSV not found: {csv_path}, skipping")
-
-    # Wait for INSERTs — log in completion order
     n = len(procs)
     done = 0
     failed: list[str] = []
@@ -306,9 +245,86 @@ def ch_load(context: AssetExecutionContext) -> MaterializeResult:
     if failed:
         raise RuntimeError(f"CH load failed for: {', '.join(failed)}")
 
-    return MaterializeResult(
-        metadata={"status": MetadataValue.text("ok")},
+
+_OA_TABLES = [
+    "works",
+    "work_authors",
+    "work_topics",
+    "work_citations",
+    "id_crosswalk",
+    "counts_by_year",
+]
+_PM_TABLES = ["papers", "authors", "mesh_headings", "grants", "chemicals"]
+
+
+@asset(
+    group_name="load",
+    deps=[ch_init, oa_parse],
+    description="OA Parquet → CH: oa_works + related tables.",
+    kinds={"clickhouse"},
+)
+def ch_load_oa(context: AssetExecutionContext) -> MaterializeResult:
+    oa_dir = str(settings.oa_parquet_dir)
+    _ch_load_tables(
+        [f"oa_{t}" for t in _OA_TABLES],
+        [(f"oa_{t}", f"{oa_dir}/{t}/**/*.parquet", "Parquet") for t in _OA_TABLES],
+        context,
     )
+    return MaterializeResult(metadata={"status": MetadataValue.text("ok")})
+
+
+@asset(
+    group_name="load",
+    deps=[ch_init, pm_parse],
+    description="PubMed Parquet → CH: pm_papers + related tables.",
+    kinds={"clickhouse"},
+)
+def ch_load_pm(context: AssetExecutionContext) -> MaterializeResult:
+    pm_dir = str(settings.pm_parquet_dir)
+    _ch_load_tables(
+        [f"pm_{t}" for t in _PM_TABLES],
+        [(f"pm_{t}", f"{pm_dir}/{t}/**/*.parquet", "Parquet") for t in _PM_TABLES],
+        context,
+    )
+    return MaterializeResult(metadata={"status": MetadataValue.text("ok")})
+
+
+@asset(
+    group_name="load",
+    deps=[ch_init, mesh_stage],
+    description="MeSH Parquet → CH: pm_mesh_tree.",
+    kinds={"clickhouse"},
+)
+def ch_load_mesh(context: AssetExecutionContext) -> MaterializeResult:
+    mesh_parquet = settings.mesh_parquet_dir / "mesh_tree.parquet"
+    if not mesh_parquet.exists():
+        context.log.warning(f"MeSH Parquet not found: {mesh_parquet}, skipping")
+        return MaterializeResult(metadata={"status": MetadataValue.text("skipped")})
+    _ch_load_tables(
+        ["pm_mesh_tree"],
+        [("pm_mesh_tree", str(mesh_parquet), "Parquet")],
+        context,
+    )
+    return MaterializeResult(metadata={"status": MetadataValue.text("ok")})
+
+
+@asset(
+    group_name="load",
+    deps=[ch_init, icite_metadata_sync],
+    description="iCite CSV → CH: icite_raw.",
+    kinds={"clickhouse"},
+)
+def ch_load_icite(context: AssetExecutionContext) -> MaterializeResult:
+    csv_path = settings.icite_dir / "icite_metadata.csv"
+    if not csv_path.exists():
+        context.log.warning(f"iCite CSV not found: {csv_path}, skipping")
+        return MaterializeResult(metadata={"status": MetadataValue.text("skipped")})
+    _ch_load_tables(
+        ["icite_raw"],
+        [("icite_raw", str(csv_path), "CSVWithNames")],
+        context,
+    )
+    return MaterializeResult(metadata={"status": MetadataValue.text("ok")})
 
 
 # ── Transform asset ──
@@ -316,7 +332,7 @@ def ch_load(context: AssetExecutionContext) -> MaterializeResult:
 
 @asset(
     group_name="transform",
-    deps=[ch_load],
+    deps=[ch_load_oa, ch_load_pm, ch_load_mesh, ch_load_icite],
     description="CH: OPTIMIZE FINAL + enriched export tables.",
     kinds={"clickhouse"},
 )
