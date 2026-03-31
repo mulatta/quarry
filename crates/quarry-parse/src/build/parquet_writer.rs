@@ -483,6 +483,83 @@ mod tests {
     }
 
     #[test]
+    fn test_write_oa_works_new_fields_roundtrip() {
+        use crate::build::oa_json::{OaWork, Tier};
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("works.parquet");
+        let works = vec![OaWork {
+            work_id: Arc::from("W1"),
+            work_id_int: 1,
+            tier: Tier::T1,
+            pmid: Some(99999),
+            doi: None,
+            title: "Test".to_string(),
+            abstract_text: Some("Abstract".to_string()),
+            pub_year: Some(2024),
+            pub_date: Some("2024-06-15".to_string()),
+            work_type: Some("article".to_string()),
+            cited_by_count: Some(10),
+            host_venue: None,
+            oa_status: None,
+            oa_url: None,
+            is_retracted: false,
+            updated_date: Some("2024-07-01".to_string()),
+            language: Some("en".to_string()),
+            fwci: Some(8.02),
+            citation_normalized_percentile: Some(0.984),
+            cited_by_percentile_year_min: Some(98),
+            cited_by_percentile_year_max: Some(100),
+        }];
+        let n = write_oa_works(&works, &path).unwrap();
+        assert_eq!(n, 1);
+
+        // Read back and verify schema
+        let file = std::fs::File::open(&path).unwrap();
+        let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReader::try_new(file, 1024).unwrap();
+        let schema = reader.schema();
+        let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert!(names.contains(&"language"));
+        assert!(names.contains(&"fwci"));
+        assert!(names.contains(&"citation_normalized_percentile"));
+        assert!(names.contains(&"cited_by_percentile_year_min"));
+        assert!(names.contains(&"cited_by_percentile_year_max"));
+        assert!(!names.contains(&"is_paratext")); // removed
+    }
+
+    #[test]
+    fn test_write_oa_counts_by_year_roundtrip() {
+        use crate::build::oa_json::OaCountByYear;
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("counts.parquet");
+        let counts = vec![
+            OaCountByYear {
+                work_id: Arc::from("W1"),
+                year: 2024,
+                cited_by_count: 5,
+                updated_date: Some("2024-07-01".to_string()),
+            },
+            OaCountByYear {
+                work_id: Arc::from("W1"),
+                year: 2023,
+                cited_by_count: 3,
+                updated_date: Some("2024-07-01".to_string()),
+            },
+        ];
+        let n = write_oa_counts_by_year(&counts, &path).unwrap();
+        assert_eq!(n, 2);
+
+        let file = std::fs::File::open(&path).unwrap();
+        let reader = parquet::arrow::arrow_reader::ParquetRecordBatchReader::try_new(file, 1024).unwrap();
+        let schema = reader.schema();
+        let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert_eq!(names, vec!["work_id", "year", "cited_by_count", "updated_date"]);
+    }
+
+    #[test]
     fn test_write_mesh_tree_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("mesh.parquet");
