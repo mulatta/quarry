@@ -59,6 +59,11 @@ def _ch_client_cmd() -> list[str]:
         # the column already exists in the file — disable auto-detection.
         "--use_hive_partitioning",
         "0",
+        # Performance: parallel INSERT + large memory for JOINs
+        "--max_insert_threads",
+        "8",
+        "--max_memory_usage",
+        "64000000000",
     ]
 
 
