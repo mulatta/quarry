@@ -39,8 +39,6 @@ pub struct OaParseStats {
     pub num_crosswalk: usize,
     pub num_counts_by_year: usize,
     pub num_files_total: usize,
-    pub num_files_new: usize,
-    pub num_files_skipped: usize,
     pub num_failed_files: usize,
     pub num_failed_lines: usize,
     pub elapsed_secs: f64,
@@ -223,15 +221,6 @@ fn process_gz_chunked(
         flush_chunk(&partition, &part_name, chunk_idx, &buf, output_dir)?;
     }
 
-    // Write sentinel file to mark this input as fully processed.
-    // Without this, a crash mid-file would leave partial chunks that get
-    // skipped on retry, causing silent data loss.
-    let sentinel = output_dir.join(format!("works/{partition}/{part_name}.done"));
-    if let Some(parent) = sentinel.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&sentinel, [])?;
-
     Ok(stats)
 }
 
@@ -278,25 +267,9 @@ pub fn parse_oa(
 ) -> Result<OaParseStats, Box<dyn std::error::Error>> {
     let t0 = Instant::now();
 
-    let gz_files = collect_gz_files(input_dir)?;
-    let num_files = gz_files.len();
-    eprintln!("oa: found {num_files} .gz files in {}", input_dir.display());
-
-    // Skip files whose .done sentinel exists (written after all chunks complete).
-    // Partial chunks from a crashed run are ignored and overwritten on retry.
-    let todo: Vec<_> = gz_files
-        .into_iter()
-        .filter(|(_, rel)| {
-            let part = extract_partition(rel);
-            let name = extract_part_name(rel);
-            let done = output_dir.join(format!("works/{part}/{name}.done"));
-            !done.exists()
-        })
-        .collect();
-
+    let todo = collect_gz_files(input_dir)?;
     let num_todo = todo.len();
-    let num_skipped = num_files - num_todo;
-    eprintln!("oa: {num_skipped} already done, {num_todo} to process");
+    eprintln!("oa: found {num_todo} .gz files in {}", input_dir.display());
 
     let n_threads = config.effective_parse_threads();
     let pool = rayon::ThreadPoolBuilder::new()
@@ -354,9 +327,7 @@ pub fn parse_oa(
         num_citations: total_citations,
         num_crosswalk: crosswalk_count.load(Ordering::Relaxed),
         num_counts_by_year: counts_by_year_count.load(Ordering::Relaxed),
-        num_files_total: num_files,
-        num_files_new: num_todo,
-        num_files_skipped: num_skipped,
+        num_files_total: num_todo,
         num_failed_files: failed_files_count.load(Ordering::Relaxed),
         num_failed_lines: failed_lines_count.load(Ordering::Relaxed),
         elapsed_secs: elapsed,
