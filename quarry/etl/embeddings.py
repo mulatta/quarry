@@ -50,15 +50,21 @@ def _parquet_batches(batch_size: int = 5000):
     """
     works_dir = Path(settings.parquet_dir) / "works"
     dataset = ds.dataset(works_dir, format="parquet", partitioning="hive")
+    has_language = "language" in dataset.schema.names
+    base_filter = (
+        ds.field("tier").isin(["t1", "t2"])
+        & ds.field("type").isin(settings.embed_allowed_types)
+        & ds.field("abstract").is_valid()
+        & ds.field("title").is_valid()
+        & (ds.field("is_retracted") == False)  # noqa: E712
+    )
+    if has_language:
+        base_filter &= (
+            ds.field("language").isin(["en"]) | ~ds.field("language").is_valid()
+        )
     scanner = dataset.scanner(
         columns=["work_id", "title", "abstract"],
-        filter=(
-            ds.field("tier").isin(["t1", "t2"])
-            & ds.field("type").isin(settings.embed_allowed_types)
-            & (ds.field("language").isin(["en"]) | ~ds.field("language").is_valid())
-            & ds.field("abstract").is_valid()
-            & ds.field("title").is_valid()
-        ),
+        filter=base_filter,
         batch_size=batch_size,
     )
     for batch in scanner.to_batches():
