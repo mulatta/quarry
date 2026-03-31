@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS oa_works (
 ORDER BY (work_id)
 PARTITION BY toYear(updated_date);
 
-CREATE TABLE IF NOT EXISTS oa_work_counts_by_year (
+CREATE TABLE IF NOT EXISTS oa_counts_by_year (
     work_id        String,
     year           UInt16,
     cited_by_count UInt32,
