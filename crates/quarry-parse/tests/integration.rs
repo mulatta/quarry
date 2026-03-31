@@ -74,6 +74,7 @@ fn test_oa_parse() {
         &config,
         &oa_fixtures,
         output_dir.path(),
+        None,
     )
     .unwrap();
 

@@ -264,12 +264,24 @@ pub fn parse_oa(
     config: &ParseConfig,
     input_dir: &Path,
     output_dir: &Path,
+    partition_filter: Option<&str>,
 ) -> Result<OaParseStats, Box<dyn std::error::Error>> {
     let t0 = Instant::now();
 
-    let todo = collect_gz_files(input_dir)?;
+    let all_files = collect_gz_files(input_dir)?;
+    let todo: Vec<_> = match partition_filter {
+        Some(pf) => all_files
+            .into_iter()
+            .filter(|(_, rel)| rel.starts_with(pf))
+            .collect(),
+        None => all_files,
+    };
     let num_todo = todo.len();
-    eprintln!("oa: found {num_todo} .gz files in {}", input_dir.display());
+    if let Some(pf) = partition_filter {
+        eprintln!("oa: {num_todo} .gz files for partition {pf}");
+    } else {
+        eprintln!("oa: {num_todo} .gz files in {}", input_dir.display());
+    }
 
     let n_threads = config.effective_parse_threads();
     let pool = rayon::ThreadPoolBuilder::new()
