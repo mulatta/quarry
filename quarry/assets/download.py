@@ -232,10 +232,18 @@ def oa_sync(
         text=True,
     )
     pending = dry.stdout.count("\n") if dry.returncode == 0 else 0
+
+    def _local_version() -> DataVersion:
+        """Hash of local .gz file listing for DataVersion."""
+        files = sorted(str(p) for p in local_dir.rglob("*.gz"))
+        digest = hashlib.sha256("\n".join(files).encode()).hexdigest()[:16]
+        return DataVersion(digest)
+
     if pending == 0:
         gz_count = sum(1 for _ in local_dir.rglob("*.gz"))
         context.log.info(f"[OpenAlex] sync: all cached ({gz_count} .gz)")
         return MaterializeResult(
+            data_version=_local_version(),
             metadata={
                 "gz_files": MetadataValue.int(gz_count),
                 "dir": MetadataValue.path(str(local_dir)),
@@ -263,6 +271,7 @@ def oa_sync(
     gz_count = sum(1 for _ in local_dir.rglob("*.gz"))
     context.log.info(f"[OpenAlex] sync: done — {done} processed, {gz_count} .gz")
     return MaterializeResult(
+        data_version=_local_version(),
         metadata={
             "gz_files": MetadataValue.int(gz_count),
             "dir": MetadataValue.path(str(local_dir)),
