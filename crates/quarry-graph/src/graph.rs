@@ -12,9 +12,6 @@ use pyo3::prelude::*;
 use crate::algo;
 use crate::pattern;
 
-/// Return type for expand(): (papers, stats).
-type ExpandReturn = (Vec<(i64, f64)>, HashMap<String, u64>);
-
 /// Validate direction string, returning an error for invalid values.
 fn validate_direction(direction: &str) -> PyResult<()> {
     match direction {
@@ -468,7 +465,7 @@ impl Graph {
 
     /// Subgraph expansion: APPR + AA coupling + AA cocitation.
     /// mode: "fused" (wRRF, focused) or "separated" (APPR + lateral slots, broad).
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     #[pyo3(signature = (seed, alpha=0.15, epsilon=1e-6, mode="fused", weights=(0.7, 0.15, 0.15), rrf_k=60, lateral_pct=25, limit=200))]
     fn expand(
         &self,
@@ -481,7 +478,7 @@ impl Graph {
         rrf_k: usize,
         lateral_pct: usize,
         limit: usize,
-    ) -> PyResult<ExpandReturn> {
+    ) -> PyResult<(Vec<HashMap<String, PyObject>>, HashMap<String, u64>)> {
         let m = match mode {
             "fused" => algo::expand::Mode::Fused,
             "separated" => algo::expand::Mode::Separated,
@@ -494,15 +491,41 @@ impl Graph {
             weights: [weights.0, weights.1, weights.2],
             rrf_k, lateral_pct, limit,
         };
-        py.allow_threads(|| {
-            let result = algo::expand::compute(self, seed, &params);
-            let mut stats = HashMap::new();
-            stats.insert("appr_candidates".into(), result.stats.appr_candidates as u64);
-            stats.insert("coupling_candidates".into(), result.stats.coupling_candidates as u64);
-            stats.insert("cocitation_candidates".into(), result.stats.cocitation_candidates as u64);
-            stats.insert("elapsed_ms".into(), result.stats.elapsed_ms);
-            Ok((result.papers, stats))
-        })
+        let result = py.allow_threads(|| algo::expand::compute(self, seed, &params));
+
+        // Convert ExpandPaper structs to Python dicts
+        let papers: Vec<HashMap<String, PyObject>> = result
+            .papers
+            .iter()
+            .map(|p| {
+                let mut d: HashMap<String, PyObject> = HashMap::new();
+                d.insert("work_id".into(), p.work_id.into_pyobject(py).unwrap().into_any().unbind());
+                d.insert("fused_score".into(), p.fused_score.into_pyobject(py).unwrap().into_any().unbind());
+                d.insert("appr_score".into(), p.appr_score.into_pyobject(py).unwrap().into_any().unbind());
+
+                // Bridges: list of dicts
+                let bridges: Vec<HashMap<String, PyObject>> = p.bridges.iter().map(|b| {
+                    let mut bd: HashMap<String, PyObject> = HashMap::new();
+                    bd.insert("work_id".into(), b.work_id.into_pyobject(py).unwrap().into_any().unbind());
+                    bd.insert("type".into(), match b.bridge_type {
+                        algo::expand::BridgeType::SharedRef => "shared_ref",
+                        algo::expand::BridgeType::SharedCiter => "shared_citer",
+                    }.into_pyobject(py).unwrap().into_any().unbind());
+                    bd.insert("weight".into(), b.weight.into_pyobject(py).unwrap().into_any().unbind());
+                    bd
+                }).collect();
+                d.insert("bridges".into(), bridges.into_pyobject(py).unwrap().into_any().unbind());
+                d
+            })
+            .collect();
+
+        let mut stats = HashMap::new();
+        stats.insert("appr_candidates".into(), result.stats.appr_candidates as u64);
+        stats.insert("coupling_candidates".into(), result.stats.coupling_candidates as u64);
+        stats.insert("cocitation_candidates".into(), result.stats.cocitation_candidates as u64);
+        stats.insert("elapsed_ms".into(), result.stats.elapsed_ms);
+
+        Ok((papers, stats))
     }
 
     /// Weakly connected components via atomic union-find.

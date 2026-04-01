@@ -31,10 +31,34 @@ pub struct ExpandParams {
     pub limit: usize,
 }
 
+/// Bridge type: how a lateral paper is connected to seed.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum BridgeType {
+    /// Seed and lateral paper both cite this bridge paper.
+    SharedRef,
+    /// A third paper cites both seed and this lateral paper.
+    SharedCiter,
+}
+
+/// A bridge paper connecting seed to a lateral result.
+#[derive(Clone)]
+pub struct Bridge {
+    pub work_id: i64,
+    pub bridge_type: BridgeType,
+    pub weight: f64, // AA weight: 1/log(degree)
+}
+
+/// A paper in expand results.
+pub struct ExpandPaper {
+    pub work_id: i64,
+    pub fused_score: f64,
+    pub appr_score: Option<f64>,
+    pub bridges: Vec<Bridge>, // non-empty for lateral, empty otherwise
+}
+
 /// Result of expand operation.
 pub struct ExpandResult {
-    /// (work_id, score) sorted descending.
-    pub papers: Vec<(i64, f64)>,
+    pub papers: Vec<ExpandPaper>,
     pub stats: ExpandStats,
 }
 
@@ -66,8 +90,8 @@ pub fn compute(graph: &Graph, seed: i64, params: &ExpandParams) -> ExpandResult 
     let cocitation_results = cocitation_aa(graph, seed_idx);
     let cocitation_count = cocitation_results.len();
 
-    // 4. Fuse based on mode
-    let papers = match mode {
+    // 4. Fuse based on mode → Vec<(work_id, fused_score)>
+    let ranked: Vec<(i64, f64)> = match mode {
         Mode::Fused => {
             let fused = wrrf_fuse(
                 &appr_results,
@@ -94,6 +118,34 @@ pub fn compute(graph: &Graph, seed: i64, params: &ExpandParams) -> ExpandResult 
         ),
     };
 
+    // 5. APPR score map for per-paper lookup
+    let appr_map: HashMap<i64, f64> = appr_results.iter().copied().collect();
+
+    // 6. Classify relations + collect bridges for laterals (pass 2)
+    let refs: HashSet<u32> = graph.fwd_neighbors(seed_idx).iter().copied().collect();
+    let citers: HashSet<u32> = graph.rev_neighbors(seed_idx).iter().copied().collect();
+
+    let lateral_ids: HashSet<i64> = ranked
+        .iter()
+        .filter(|&&(id, _)| {
+            graph.resolve(id).is_none_or(|idx| !refs.contains(&idx) && !citers.contains(&idx))
+        })
+        .map(|&(id, _)| id)
+        .collect();
+
+    let bridges = collect_bridges(graph, &lateral_ids, &refs, &citers);
+
+    // 7. Assemble ExpandPaper
+    let papers = ranked
+        .into_iter()
+        .map(|(id, score)| ExpandPaper {
+            work_id: id,
+            fused_score: score,
+            appr_score: appr_map.get(&id).copied(),
+            bridges: bridges.get(&id).cloned().unwrap_or_default(),
+        })
+        .collect();
+
     let elapsed_ms = start.elapsed().as_millis() as u64;
 
     ExpandResult {
@@ -109,7 +161,7 @@ pub fn compute(graph: &Graph, seed: i64, params: &ExpandParams) -> ExpandResult 
 
 fn empty_result() -> ExpandResult {
     ExpandResult {
-        papers: vec![],
+        papers: Vec::new(),
         stats: ExpandStats {
             appr_candidates: 0,
             coupling_candidates: 0,
@@ -175,6 +227,76 @@ fn separated_fuse(
 
     structural.extend(laterals);
     structural
+}
+
+/// Pass 2: collect bridges for lateral papers only.
+///
+/// For each lateral paper, find shared references (coupling bridges)
+/// and shared citers (cocitation bridges). All bridges returned, sorted
+/// by AA weight descending.
+fn collect_bridges(
+    graph: &Graph,
+    lateral_ids: &HashSet<i64>,
+    refs: &HashSet<u32>,
+    citers: &HashSet<u32>,
+) -> HashMap<i64, Vec<Bridge>> {
+    if lateral_ids.is_empty() {
+        return HashMap::new();
+    }
+
+    // Resolve lateral external IDs to internal indices
+    let lateral_idx_to_id: HashMap<u32, i64> = lateral_ids
+        .iter()
+        .filter_map(|&id| graph.resolve(id).map(|idx| (idx, id)))
+        .collect();
+    let lateral_indices: HashSet<u32> = lateral_idx_to_id.keys().copied().collect();
+
+    let mut result: HashMap<i64, Vec<Bridge>> = HashMap::new();
+
+    // SharedRef: seed's references → for each ref, check if lateral also cites it
+    for &ref_idx in refs {
+        let indegree = graph.rev_neighbors(ref_idx).len();
+        let weight = if indegree > 1 { 1.0 / (indegree as f64).ln() } else { 1.0 };
+        let ref_id = graph.id_of(ref_idx);
+
+        for &citer_of_ref in graph.rev_neighbors(ref_idx) {
+            if lateral_indices.contains(&citer_of_ref) {
+                let lateral_id = lateral_idx_to_id[&citer_of_ref];
+                result.entry(lateral_id).or_default().push(Bridge {
+                    work_id: ref_id,
+                    bridge_type: BridgeType::SharedRef,
+                    weight,
+                });
+            }
+        }
+    }
+
+    // SharedCiter: seed's citers → for each citer, check if it also cites lateral
+    for &citer_idx in citers {
+        let outdegree = graph.fwd_neighbors(citer_idx).len();
+        let weight = if outdegree > 1 { 1.0 / (outdegree as f64).ln() } else { 1.0 };
+        let citer_id = graph.id_of(citer_idx);
+
+        for &cited_by_citer in graph.fwd_neighbors(citer_idx) {
+            if lateral_indices.contains(&cited_by_citer) {
+                let lateral_id = lateral_idx_to_id[&cited_by_citer];
+                result.entry(lateral_id).or_default().push(Bridge {
+                    work_id: citer_id,
+                    bridge_type: BridgeType::SharedCiter,
+                    weight,
+                });
+            }
+        }
+    }
+
+    // Sort each lateral's bridges by weight descending
+    for bridges in result.values_mut() {
+        bridges.sort_unstable_by(|a, b| {
+            b.weight.partial_cmp(&a.weight).unwrap_or(std::cmp::Ordering::Equal)
+        });
+    }
+
+    result
 }
 
 /// Adamic-Adar weighted bibliographic coupling with cosine normalization.
@@ -486,7 +608,7 @@ mod tests {
         let (_dir, graph) = test_expand_graph();
         let result = compute(&graph, 100, &params(Mode::Fused, 100));
         assert!(
-            result.papers.iter().all(|&(id, _)| id != 100),
+            result.papers.iter().all(|p| p.work_id != 100),
             "seed should not appear in results"
         );
     }
@@ -512,10 +634,10 @@ mod tests {
         let result = compute(&graph, 100, &params(Mode::Fused, 100));
         for w in result.papers.windows(2) {
             assert!(
-                w[0].1 >= w[1].1,
+                w[0].fused_score >= w[1].fused_score,
                 "results should be sorted descending: {} >= {}",
-                w[0].1,
-                w[1].1
+                w[0].fused_score,
+                w[1].fused_score
             );
         }
     }
@@ -525,7 +647,7 @@ mod tests {
         let (_dir, graph) = test_expand_graph();
         let result = compute(&graph, 100, &params(Mode::Separated, 100));
         assert!(
-            result.papers.iter().all(|&(id, _)| id != 100),
+            result.papers.iter().all(|p| p.work_id != 100),
             "seed should not appear in separated results"
         );
     }
