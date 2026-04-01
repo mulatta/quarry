@@ -161,57 +161,79 @@ def expand(
         }
         typer.echo(json.dumps(output, indent=2, ensure_ascii=False))
     else:
-        typer.echo(f"Seed: W{seed_id}  ({elapsed:.2f}s, {len(results)} results)")
-        typer.echo(
-            f"Stats: appr={stats['appr_candidates']} coupling={stats['coupling_candidates']} cocite={stats['cocitation_candidates']}"
+        from rich.console import Console
+        from rich.table import Table
+
+        from rich.text import Text
+
+        console = Console()
+        console.print(
+            f"Seed: W{seed_id}  ({elapsed:.2f}s, {len(results)} results)  "
+            f"[dim]appr={stats['appr_candidates']} coup={stats['coupling_candidates']} cocite={stats['cocitation_candidates']}[/dim]"
         )
-        typer.echo()
+
+        table = Table(show_edge=False, pad_edge=False, box=None, expand=True)
+        table.add_column("#", justify="right", style="dim", width=4, no_wrap=True)
+        table.add_column("rel", width=10, no_wrap=True)
+        table.add_column("year", justify="right", width=4, no_wrap=True)
+        table.add_column("score", justify="right", width=8, no_wrap=True)
+        table.add_column("work_id", width=13, no_wrap=True)
+        table.add_column("title", ratio=1, overflow="ellipsis", no_wrap=True)
+
         for i, r in enumerate(results[:limit]):
-            rel = r["relation"][:8].ljust(8)
-            year = r["year"] or "?"
-            title = (r["title"] or "")[:70]
-            typer.echo(
-                f"  {i + 1:3d}. [{rel}] {year}  {r['fused_score']:.6f}  W{r['work_id']}  {title}"
+            rel = r["relation"]
+            year = str(r["year"]) if r["year"] else "-"
+            title = r["title"] or "-"
+            table.add_row(
+                str(i + 1),
+                rel,
+                year,
+                f"{r['fused_score']:.6f}",
+                f"W{r['work_id']}",
+                Text(title),
             )
+
+        console.print(table)
 
 
 def _resolve_seed(seed: str) -> int:
-    """Resolve seed string to work_id_int."""
-    # Direct integer
+    """Resolve seed string to work_id_int.
+
+    Accepts: work_id_int, W<id>, DOI, https://doi.org/DOI, --pmid <pmid>.
+    """
+    # Strip W prefix (OpenAlex format)
+    if seed.upper().startswith("W") and seed[1:].isdigit():
+        return int(seed[1:])
+
+    # Direct integer → work_id_int
     try:
         return int(seed)
     except ValueError:
         pass
 
-    # DOI or PMID — resolve via PG
-    from quarry.store.pg import PGStore
-    from quarry.config import settings
-
-    db = PGStore(settings.pg_conninfo)
-
+    # DOI — normalize to OA format (https://doi.org/ + lowercase) for exact match
     if seed.startswith("10.") or seed.startswith("https://doi.org/"):
-        doi = seed.removeprefix("https://doi.org/")
-        rows = db.query(
-            "SELECT work_id_int FROM works WHERE doi = %s OR doi = %s LIMIT 1",
-            (doi, f"https://doi.org/{doi}"),
+        doi = "https://doi.org/" + seed.removeprefix("https://doi.org/").lower()
+        return _pg_lookup(
+            "SELECT work_id_int FROM works WHERE doi = %s LIMIT 1",
+            (doi,),
+            f"DOI not found: {doi}",
         )
-        if rows:
-            return rows[0][0]
-        raise typer.Exit(f"DOI not found: {doi}")
-
-    # Try PMID
-    try:
-        pmid = int(seed)
-        rows = db.query(
-            "SELECT work_id_int FROM id_crosswalk WHERE pmid = %s LIMIT 1",
-            (pmid,),
-        )
-        if rows:
-            return rows[0][0]
-    except ValueError:
-        pass
 
     raise typer.Exit(f"Cannot resolve seed: {seed}")
+
+
+def _pg_lookup(sql: str, params: tuple, err_msg: str) -> int:
+    """Execute parameterized PG query, return first column of first row."""
+    import psycopg
+    from quarry.config import settings
+
+    with psycopg.connect(settings.pg_conninfo) as conn, conn.cursor() as cur:
+        cur.execute(sql, params)
+        row = cur.fetchone()
+        if row:
+            return row[0]
+    raise typer.Exit(err_msg)
 
 
 def _enrich_metadata(work_ids: list[int], *, include_abstract: bool = False) -> dict:
@@ -220,25 +242,24 @@ def _enrich_metadata(work_ids: list[int], *, include_abstract: bool = False) -> 
         return {}
 
     try:
-        from quarry.store.pg import PGStore
+        import psycopg
         from quarry.config import settings
 
-        db = PGStore(settings.pg_conninfo)
-        placeholders = ",".join(["%s"] * len(work_ids))
         cols = "work_id_int, title, pub_year, cited_by_count"
         if include_abstract:
             cols += ", abstract"
-        rows = db.query(
-            f"SELECT {cols} FROM works WHERE work_id_int IN ({placeholders})",
-            tuple(work_ids),
-        )
-        result = {}
-        for row in rows:
-            entry = {"title": row[1], "pub_year": row[2], "cited_by_count": row[3]}
-            if include_abstract:
-                entry["abstract"] = row[4] or ""
-            result[row[0]] = entry
-        return result
+        with psycopg.connect(settings.pg_conninfo) as conn, conn.cursor() as cur:
+            cur.execute(
+                f"SELECT {cols} FROM works WHERE work_id_int = ANY(%s)",
+                (list(work_ids),),
+            )
+            result = {}
+            for row in cur.fetchall():
+                entry = {"title": row[1], "pub_year": row[2], "cited_by_count": row[3]}
+                if include_abstract:
+                    entry["abstract"] = row[4] or ""
+                result[row[0]] = entry
+            return result
     except Exception:
         return {}
 
