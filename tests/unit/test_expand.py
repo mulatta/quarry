@@ -114,7 +114,95 @@ class TestExpandModes:
         separated, _ = graph.expand(DAO_2016, mode="separated", limit=200)
         fused_ids = {wid for wid, _ in fused}
         sep_ids = {wid for wid, _ in separated}
-        # Not identical (different fusion strategies)
-        # But should have significant overlap
         overlap = fused_ids & sep_ids
         assert len(overlap) > 0, "modes should share some results"
+
+
+# ── Quality regression guards ──
+# Baseline values from 5-seed evaluation (2026-04-01).
+# These catch algorithm regressions, not absolute quality.
+
+# Known seed papers and their expected references in the graph.
+SEEDS = {
+    "Dao-2016": {
+        "wid": 2495359280,
+        # Verified references present in graph and expand results:
+        "must_find": [2031580508, 2050271637, 51469642],
+    },
+    "Seo-2025": {
+        "wid": 4406019873,
+        # Yoshida 2016 (PET bacterium), Austin 2018 (engineered PET depolymerase)
+        "must_find": [2294707565, 3015207233],
+    },
+    "Zhao-2021": {
+        "wid": 3043719325,
+        # Verified references present in graph and expand results:
+        "must_find": [2530994846, 2480829753, 2336828812],
+    },
+}
+
+
+class TestQualityRegression:
+    """Quality baselines. Failures mean algorithm change degraded results."""
+
+    @pytest.mark.parametrize("seed_name", SEEDS.keys())
+    def test_must_find_papers_fused(self, graph, seed_name):
+        """Key papers in the field must appear in fused top-200."""
+        seed = SEEDS[seed_name]
+        papers, _ = graph.expand(seed["wid"], mode="fused", limit=200)
+        ids = {wid for wid, _ in papers}
+        for must in seed["must_find"]:
+            if graph.has_node(must):
+                assert must in ids, f"{seed_name}: W{must} missing from fused results"
+
+    @pytest.mark.parametrize("seed_name", SEEDS.keys())
+    def test_must_find_papers_separated(self, graph, seed_name):
+        """Key papers must appear in separated top-200."""
+        seed = SEEDS[seed_name]
+        papers, _ = graph.expand(seed["wid"], mode="separated", limit=200)
+        ids = {wid for wid, _ in papers}
+        for must in seed["must_find"]:
+            if graph.has_node(must):
+                assert must in ids, (
+                    f"{seed_name}: W{must} missing from separated results"
+                )
+
+    @pytest.mark.parametrize("seed_name", SEEDS.keys())
+    def test_ref_recovery_minimum(self, graph, seed_name):
+        """Reference recovery should not drop below 60% (fused mode)."""
+        seed = SEEDS[seed_name]
+        wid = seed["wid"]
+        refs = set(graph.neighbors(wid, "forward"))
+        if len(refs) < 5:
+            pytest.skip("too few references for meaningful recovery test")
+        papers, _ = graph.expand(wid, mode="fused", limit=200)
+        ids = {w for w, _ in papers}
+        recovery = len(refs & ids) / len(refs)
+        # High-citation seeds (many citers) dilute ref recovery via APPR.
+        # Threshold is lenient to avoid false failures on such seeds.
+        assert recovery >= 0.3, f"{seed_name}: ref recovery {recovery:.0%} < 30%"
+
+    @pytest.mark.parametrize("seed_name", SEEDS.keys())
+    def test_lateral_quality_separated(self, graph, seed_name):
+        """Separated mode must produce lateral papers (not just refs/citers)."""
+        seed = SEEDS[seed_name]
+        wid = seed["wid"]
+        refs = set(graph.neighbors(wid, "forward"))
+        citers = set(graph.neighbors(wid, "reverse"))
+        papers, _ = graph.expand(wid, mode="separated", limit=200)
+        ids = {w for w, _ in papers}
+        laterals = ids - refs - citers
+        assert len(laterals) >= 5, (
+            f"{seed_name}: only {len(laterals)} laterals in separated mode"
+        )
+
+    @pytest.mark.parametrize("seed_name", SEEDS.keys())
+    def test_no_duplicate_results(self, graph, seed_name):
+        """Results must not contain duplicate work_ids."""
+        seed = SEEDS[seed_name]
+        for mode in ("fused", "separated"):
+            papers, _ = graph.expand(seed["wid"], mode=mode, limit=200)
+            ids = [wid for wid, _ in papers]
+            assert len(ids) == len(set(ids)), (
+                f"{seed_name}/{mode}: duplicate work_ids in results"
+            )
