@@ -39,7 +39,7 @@ Only modifies ordering, does not add/remove candidates.
 ```
 ┌──────────────────────────────────────────────────────────────────┐
 │                     L2: Fusion (RRF)                             │
-│  Input: 4 ranked lists → Output: final ranked subgraph          │
+│  Input: 4 ranked lists → Output: final ranked subgraph           │
 └─────┬──────────┬──────────────┬──────────────┬───────────────────┘
       │          │              │              │
  ┌────┴────┐ ┌───┴─────┐ ┌─────┴─────┐ ┌──────┴──────┐
@@ -104,6 +104,16 @@ See: [05-candidate-generation.md](05-candidate-generation.md)
 
 See: [06-fusion.md](06-fusion.md)
 
+## expand Command
+
+CLI entry point for subgraph mining. Single/multi-seed, direction filtering,
+relation tagging, RRF fusion. See: [08-expand-command.md](08-expand-command.md)
+
+## Evaluation
+
+Quality assessment without ground truth labels. Reference recovery,
+leave-one-out, symmetry, expert judgment. See: [09-evaluation.md](09-evaluation.md)
+
 ## Open Questions
 
 - [ ] Missing data fairness: how to weight signals with partial coverage
@@ -116,30 +126,33 @@ See: [06-fusion.md](06-fusion.md)
 
 ## Implementation Roadmap
 
-| Phase | Layers | Fusion | Status |
-|-------|--------|--------|--------|
-| 1 | Structure (PPR + coupling) | RRF(2 signals) | **In progress** — PPR verified, coupling/cocite next |
-| 2 | + Quality (RCR rerank) + MeSH | RRF(4 signals) + rerank | |
-| 3 | + Content (embedding, BM25) | RRF(6+ signals) | After embeddings |
-| 4 | + Temporal + Adamic-Adar | Full RRF + learned weights | Long-term |
+| Phase | Layers                        | Fusion                     | Status                                               |
+| ----- | ----------------------------- | -------------------------- | ---------------------------------------------------- |
+| 1     | Structure (PPR + coupling)    | RRF(2 signals)             | **In progress** — PPR verified, coupling/cocite next |
+| 2     | + Quality (RCR rerank) + MeSH | RRF(4 signals) + rerank    |                                                      |
+| 3     | + Content (embedding, BM25)   | RRF(6+ signals)            | After embeddings                                     |
+| 4     | + Temporal + Adamic-Adar      | Full RRF + learned weights | Long-term                                            |
 
 Each phase is additive — previous interfaces are stable.
 
 ## Current State (Phase 1 Progress)
 
 Implemented:
+
 - [x] PPR in Rust (`subgraph_pagerank` with `restart_node`)
 - [x] iCite citation merge (OA ∪ iCite, +746M edges)
 - [x] CSR build from Parquet (no CSV, peak ~77GB, 182M nodes / 3.77B edges)
 - [x] PPR verified: hub suppression (Laemmli dropped), topic relevance (IL6/glycosylation surfaced)
 
 Verified issues to address:
+
 - [ ] Fixed 2-hop pool (5000 cap) → iterative expansion
 - [ ] Seed score dominance (0.805 vs 0.003 for #2) → α tuning or seed exclusion
 - [ ] Off-topic papers (GSEA #3, PGC-1α #6) → coupling/MeSH filter
 - [ ] Single signal (PPR only) → RRF(PPR + coupling + cocite)
 
 Baseline performance (N-glycosylation test paper, 2-hop pool=5000):
+
 - k_hop: <0.1s
 - subgraph_pagerank: <0.1s
 - PG enrichment: <0.01s
