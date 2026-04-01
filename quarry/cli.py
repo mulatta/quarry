@@ -71,11 +71,19 @@ def expand(
         ..., help="Seed paper: work_id_int, DOI (--doi), or PMID (--pmid)"
     ),
     limit: int = typer.Option(200, "--limit", "-n", help="Max results"),
+    mode: str = typer.Option(
+        "fused", "--mode", "-m", help="fused (focused) | separated (broad)"
+    ),
     fmt: str = typer.Option("table", "--format", "-f", help="table|json"),
     alpha: float = typer.Option(0.15, "--alpha", help="APPR teleport probability"),
     epsilon: float = typer.Option(1e-6, "--epsilon", help="APPR precision threshold"),
 ):
-    """Expand seed paper into a ranked subgraph of related papers."""
+    """Expand seed paper into a ranked subgraph of related papers.
+
+    Modes:
+      fused     — wRRF fusion, all candidates compete (focused exploration)
+      separated — APPR + guaranteed lateral slots (broad survey)
+    """
     import json
     import time
 
@@ -95,7 +103,9 @@ def expand(
 
     # Run expand
     t0 = time.perf_counter()
-    papers, stats = g.expand(seed_id, alpha=alpha, epsilon=epsilon, limit=limit)
+    papers, stats = g.expand(
+        seed_id, alpha=alpha, epsilon=epsilon, mode=mode, limit=limit
+    )
     elapsed = time.perf_counter() - t0
 
     # Enrich with metadata from PG
