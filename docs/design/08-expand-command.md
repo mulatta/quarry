@@ -1,15 +1,42 @@
 # quarry expand — Command Design
 
-> Status: Phase 1b implementation next.
+> Status: Phase 1b implemented. Dual modes (fused + separated).
 
 ## Definition
 
-`quarry expand` takes one or more seed papers and returns a ranked subgraph
-of related papers from the citation graph. All operations are deterministic.
+`quarry expand` takes a seed paper and returns a ranked subgraph of related
+papers from the citation graph. All operations are deterministic.
+
+## Two Modes
+
+| Mode | Use case | How it works |
+|------|----------|-------------|
+| `fused` | Focused exploration (experiment design) | wRRF merges all candidates into single ranked list |
+| `separated` | Broad survey (review writing) | APPR fills structural slots + guaranteed lateral slots |
+
+### Fused Mode (default)
+
+All candidates (APPR + coupling + cocitation) compete in a single pool via
+weighted Reciprocal Rank Fusion. Best for finding the most directly relevant
+papers when you know what you're looking for.
+
+```
+score(paper) = w_appr/(k + rank_appr) + w_coup/(k + rank_coup) + w_cocite/(k + rank_cocite)
+defaults: w = [0.7, 0.15, 0.15], k = 60
+```
+
+### Separated Mode
+
+APPR top-(limit × 75%) fills structural slots (refs, citers, indirect).
+Coupling/cocitation lateral top-(limit × 25%) fills guaranteed lateral slots.
+Lateral = papers NOT in seed's direct references or citers AND not in APPR top.
+
+Best for discovering related work you might not know about — lateral papers
+share methodology or community context but have no direct citation path to seed.
 
 ## Architecture
 
-Core logic in Rust (`expand` function). Python CLI is a thin wrapper.
+Core logic in Rust. Python CLI is a thin wrapper.
 
 ```
 Python CLI          Rust expand()                    Python CLI
@@ -17,36 +44,26 @@ Python CLI          Rust expand()                    Python CLI
 DOI/PMID input  →  APPR(seed, α, ε)             →  PG metadata enrichment
   ↓ PG lookup      coupling_aa(seed)                  (title, year, etc.)
 work_id_int     →  cocitation_aa(seed)           →  format + output
-                   wRRF fusion
+                   fused: wRRF / separated: slot fill
                    seed exclusion
                    top-k truncation
-                → Vec<(work_id, fused_score)>
+                → Vec<(work_id, score)>
 ```
 
 ## Rust API
 
 ```rust
-pub struct ExpandResult {
-    pub papers: Vec<(i64, f64)>,  // (work_id, fused_score) sorted desc
-    pub stats: ExpandStats,
+pub struct ExpandParams {
+    pub alpha: f64,           // APPR teleport (default 0.15)
+    pub epsilon: f64,         // APPR precision (default 1e-6)
+    pub mode: Mode,           // Fused or Separated
+    pub weights: [f64; 3],    // [appr, coupling, cocitation] wRRF weights
+    pub rrf_k: usize,         // RRF smoothing constant (default 60)
+    pub lateral_pct: usize,   // % of limit for laterals in separated mode (default 25)
+    pub limit: usize,         // max results (default 200)
 }
 
-pub struct ExpandStats {
-    pub appr_candidates: usize,
-    pub coupling_candidates: usize,
-    pub cocitation_candidates: usize,
-    pub elapsed_ms: u64,
-}
-
-pub fn expand(
-    graph: &Graph,
-    seed: i64,
-    alpha: f64,           // APPR teleport (default 0.15)
-    epsilon: f64,         // APPR precision (default 1e-6)
-    weights: [f64; 3],    // [appr, coupling, cocitation] wRRF weights
-    rrf_k: usize,         // RRF smoothing constant (default 60)
-    limit: usize,         // max results (default 200)
-) -> ExpandResult
+pub fn compute(graph: &Graph, seed: i64, params: &ExpandParams) -> ExpandResult
 ```
 
 Python binding:
@@ -55,117 +72,83 @@ graph.expand(
     seed: int,
     alpha: float = 0.15,
     epsilon: float = 1e-6,
-    weights: tuple[float, float, float] = (0.5, 0.25, 0.25),
+    mode: str = "fused",           # "fused" | "separated"
+    weights: tuple = (0.7, 0.15, 0.15),
     rrf_k: int = 60,
+    lateral_pct: int = 25,
     limit: int = 200,
-) -> tuple[list[tuple[int, float]], dict]  # (papers, stats)
+) -> tuple[list[tuple[int, float]], dict]
 ```
-
-### Internals
-
-1. APPR(seed, α, ε) → structural scores
-2. coupling_aa(seed) → AA-weighted cosine-normalized coupling scores
-3. cocitation_aa(seed) → AA-weighted cosine-normalized cocitation scores
-4. Union all candidates from 3 signals
-5. Rank each candidate per signal
-6. wRRF: `score = Σ w_i / (k + rank_i)` (missing signal → 0 contribution)
-7. Exclude seed from output
-8. Sort by fused score, truncate to limit
 
 ## CLI Interface
 
 ```bash
-# Single seed (work_id, DOI, or PMID)
-quarry expand W4406019873
-quarry expand --doi 10.1126/science.adp5637
-quarry expand --pmid 39251588
+# Fused mode (default — focused exploration)
+quarry expand <work_id>
+quarry expand <work_id> --mode fused
+
+# Separated mode (broad survey)
+quarry expand <work_id> --mode separated
 
 # Options
 quarry expand <work_id> \
   --limit 200 \
-  --sort fused|structural|coupling|cocitation \
+  --mode fused|separated \
   --format json|table
 
-# Future (Phase 2+)
-quarry expand <work_id> --direction both|forward|backward
-quarry expand <id1> <id2> <id3>  # multi-seed
+# Resolve by DOI or PMID
+quarry expand --doi 10.1126/science.adp5637
+quarry expand --pmid 39251588
 ```
 
-### Default Behavior
+## Signals
 
-```bash
-quarry expand W4406019873
-# limit=200, sort=fused, format=table
-```
+### APPR (structural proximity)
+Push-based Approximate PPR on full CSR graph. O(1/ε), ~1-2s.
 
-## Output Structure
+### Coupling (AA-weighted, cosine-normalized)
+Bibliographic coupling: papers sharing references with seed.
+Adamic-Adar weighting: niche shared references score higher.
+Cosine normalization: reference list size bias removed.
 
-```json
-{
-  "seeds": ["W4406019873"],
-  "params": { "limit": 200, "alpha": 0.15, "epsilon": 1e-6, "weights": [0.5, 0.25, 0.25] },
-  "papers": [
-    {
-      "work_id": "W...",
-      "title": "...",
-      "year": 2016,
-      "cited_by": 3111,
-      "relation": "foundation",
-      "scores": {
-        "structural": 0.045,
-        "coupling": 0.82,
-        "cocitation": 0.63,
-        "fused": 0.087
-      }
-    }
-  ],
-  "stats": {
-    "appr_candidates": 2366,
-    "coupling_candidates": 450,
-    "cocitation_candidates": 380,
-    "returned": 200,
-    "elapsed_ms": 1800
-  }
-}
-```
+### Co-citation (AA-weighted, cosine-normalized)
+Papers co-cited with seed by third papers.
+Adamic-Adar weighting: niche citers count more.
+Cosine normalization applied.
 
 ## Relation Tagging
 
 Deterministic classification based on edge existence:
 
-| seed → paper | paper → seed | Relation                                            |
-| :----------: | :----------: | --------------------------------------------------- |
-|     yes      |      no      | `foundation` — seed cites this paper                |
-|      no      |     yes      | `follow-up` — this paper cites seed                 |
-|     yes      |     yes      | `mutual`                                            |
-|      no      |      no      | `lateral` — discovered via coupling/cocitation only |
+| seed → paper | paper → seed | Relation |
+| :----------: | :----------: | -------- |
+| yes | no | `foundation` — seed cites this paper |
+| no | yes | `follow-up` — this paper cites seed |
+| yes | yes | `mutual` |
+| no | no | `lateral` — discovered via coupling/cocitation |
 
-## Multi-seed Behavior (Phase 3)
+## Evaluation Results (5 seeds)
 
-| Mode              | Semantics                   | Algorithm                                                 |
-| ----------------- | --------------------------- | --------------------------------------------------------- |
-| `union` (default) | Papers related to ANY seed  | Multi-seed APPR: `residual = {s: w/sum for s,w in seeds}` |
-| `intersection`    | Papers related to ALL seeds | Individual APPR per seed → min score                      |
-| `bridge`          | Papers connecting seeds     | Pairwise shortest paths → union                           |
+| Metric | Fused (0.7/0.15/0.15) | Separated (75/25) | APPR-only |
+|--------|----------------------|-------------------|-----------|
+| avg ref recovery | 78.6% | 78.9% | 80.9% |
+| avg citer recovery | 78-80% | 77.9% | 86.3% |
+| avg lateral count | 60-62 | 67 | 47 |
+| lateral quality | all on-topic (5/5 seeds) | all on-topic | 7/10 good laterals |
 
-### Seed Weights (Phase 3)
+Key finding: APPR alone misses 3 high-quality lateral papers that
+coupling/cocitation discovers. Both fused and separated modes recover them.
+Separated mode guarantees more lateral slots.
 
-- Default: equal (`1/N` each)
-- `--primary W...`: named seed gets `2×` weight
-- `--weights 0.6,0.2,0.2`: explicit (must sum to ~1.0)
+## Future Phases
 
-## Implementation Phases
-
-| Phase | Scope | Status |
-|-------|-------|--------|
-| 1a | APPR only | **Done** |
-| 1b | expand() in Rust + CLI + AA coupling/cocitation + wRRF | **Next** |
-| 2 | + direction filtering + HKPR + Quality rerank | |
-| 3 | + multi-seed + search→expand pipeline | |
+| Phase | Addition |
+|-------|---------|
+| 2 | Direction filtering (`--direction forward|reverse|both`) + HKPR |
+| 3 | Multi-seed (`quarry expand <id1> <id2>`) |
 
 ## Open Questions
 
-- [ ] wRRF weight tuning: eval protocol needed
+- [ ] wRRF weight tuning across more diverse seeds
 - [ ] `technique` relation: requires MeSH qualifier (22M coverage)
-- [ ] Multi-seed weight determination: user, agent, or heuristic?
-- [ ] How many search results become expand seeds?
+- [ ] Multi-seed weight determination

@@ -28,7 +28,7 @@ residual = {seed: 1.0}  // all mass starts at seed
 estimate = {}           // accumulated PPR scores
 
 while any node v has residual[v] / degree(v) > ε:
-    pick such v
+    pick such v (FIFO queue)
     // retain α fraction as PPR score
     estimate[v] += α * residual[v]
     // push (1-α) fraction to neighbors
@@ -60,15 +60,12 @@ Key properties:
 ## Rust API
 
 ```rust
-/// Push-based Approximate Personalized PageRank on full CSR graph.
-/// Returns (node_id, score) pairs sorted by score descending.
-/// Only nodes with score > 0 are returned (sparse result).
 pub fn appr(
     graph: &Graph,
     seed: i64,
     alpha: f64,
     epsilon: f64,
-    top_k: Option<usize>,  // None = return all
+    top_k: Option<usize>,
 ) -> Vec<(i64, f64)>
 ```
 
@@ -79,15 +76,25 @@ graph.appr(seed, alpha=0.15, epsilon=1e-6, top_k=None) -> list[tuple[int, float]
 ```
 
 Phase 2: add `direction: Direction` parameter for directional filtering.
-```rust
-pub enum Direction { Forward, Reverse, Both }
-```
+
+## Verified Results
+
+PET depolymerase paper (Seo 2025, α=0.15, ε=1e-6):
+- 2,366 nodes scored in 1.45s
+- Top 20: all PET enzyme papers, no off-topic
+- Seed score: 44.1% of total mass
+- Hub suppression working (no generic high-citation papers)
+
+5-seed evaluation (PET, base editing, PLM evolution, glycosylase BE, aptamer):
+- All seeds produce on-topic results
+- APPR alone recovers 81-97% of seed references in top 200
+- Lateral papers (via coupling/cocitation fusion) are all on-topic across all seeds
 
 ## Replaces
 
-- `pagerank::compute` — full-graph PR, no use case → **delete**
-- `pagerank::subgraph` — subgraph PPR via power iteration → **delete**
-- Python `subgraph_pagerank` binding → **delete**, replaced by `appr`
+- `pagerank::compute` — full-graph PR → **deleted**
+- `pagerank::subgraph` — subgraph PPR via power iteration → **deleted**
+- Python `subgraph_pagerank` binding → **deleted**, replaced by `appr`
 
 ## Retained
 
@@ -99,19 +106,9 @@ pub enum Direction { Forward, Reverse, Both }
 HKPR (Heat Kernel PageRank) uses Poisson decay instead of geometric.
 Structurally resolves seed score dominance (seed contribution ~0.7% vs PPR ~20%).
 Planned as Phase 2 addition — same push framework, different decay function.
-APPR implementation provides the foundation for HKPR.
-
-## Expected Behavior
-
-On the N-glycosylation test paper (seed, α=0.15, ε=1e-6):
-- Result: sparse set of ~thousands of nodes with PPR scores
-- Seed neighbors with high relevance: high scores
-- Hub papers (Laemmli, RECIST): low scores (mass diluted across many edges)
-- Off-topic but structurally close: low scores (teleport pulls back to seed)
-- Time: sub-second (local computation, not proportional to graph size)
 
 ## Open Questions
 
 - [ ] Optimal α for citation networks — empirical tuning via eval protocol
 - [ ] Whether ε=1e-6 gives sufficient coverage or needs adjustment
-- [ ] Direction filtering semantics for expand command (Phase 1c)
+- [ ] Direction filtering semantics for expand command (Phase 2)
