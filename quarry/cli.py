@@ -74,7 +74,7 @@ def expand(
     mode: str = typer.Option(
         "fused", "--mode", "-m", help="fused (focused) | separated (broad)"
     ),
-    fmt: str = typer.Option("table", "--format", "-f", help="table|json"),
+    fmt: str = typer.Option("table", "--format", "-f", help="table|json|detail"),
     alpha: float = typer.Option(0.15, "--alpha", help="APPR teleport probability"),
     epsilon: float = typer.Option(1e-6, "--epsilon", help="APPR precision threshold"),
 ):
@@ -109,7 +109,10 @@ def expand(
     elapsed = time.perf_counter() - t0
 
     # Enrich with metadata from PG
-    metadata = _enrich_metadata([wid for wid, _ in papers])
+    include_abstract = fmt == "detail"
+    metadata = _enrich_metadata(
+        [wid for wid, _ in papers], include_abstract=include_abstract
+    )
 
     # Relation tagging
     seed_fwd = set(g.neighbors(seed_id, "forward"))
@@ -128,21 +131,27 @@ def expand(
             relation = "follow-up"
         else:
             relation = "lateral"
-        results.append(
-            {
-                "work_id": wid,
-                "title": meta.get("title", ""),
-                "year": meta.get("pub_year"),
-                "cited_by": meta.get("cited_by_count"),
-                "relation": relation,
-                "fused_score": round(score, 6),
-            }
-        )
+        entry = {
+            "work_id": wid,
+            "title": meta.get("title", ""),
+            "year": meta.get("pub_year"),
+            "cited_by": meta.get("cited_by_count"),
+            "relation": relation,
+            "fused_score": round(score, 6),
+        }
+        if include_abstract:
+            entry["abstract"] = meta.get("abstract", "")
+        results.append(entry)
 
-    if fmt == "json":
+    if fmt in ("json", "detail"):
         output = {
             "seed": seed_id,
-            "params": {"alpha": alpha, "epsilon": epsilon, "limit": limit},
+            "params": {
+                "alpha": alpha,
+                "epsilon": epsilon,
+                "mode": mode,
+                "limit": limit,
+            },
             "papers": results,
             "stats": {
                 **stats,
@@ -205,8 +214,8 @@ def _resolve_seed(seed: str) -> int:
     raise typer.Exit(f"Cannot resolve seed: {seed}")
 
 
-def _enrich_metadata(work_ids: list[int]) -> dict:
-    """Fetch title, year, cited_by from PG for a batch of work_ids."""
+def _enrich_metadata(work_ids: list[int], *, include_abstract: bool = False) -> dict:
+    """Fetch metadata from PG for a batch of work_ids."""
     if not work_ids:
         return {}
 
@@ -216,17 +225,21 @@ def _enrich_metadata(work_ids: list[int]) -> dict:
 
         db = PGStore(settings.pg_conninfo)
         placeholders = ",".join(["%s"] * len(work_ids))
+        cols = "work_id_int, title, pub_year, cited_by_count"
+        if include_abstract:
+            cols += ", abstract"
         rows = db.query(
-            f"SELECT work_id_int, title, pub_year, cited_by_count "
-            f"FROM works WHERE work_id_int IN ({placeholders})",
+            f"SELECT {cols} FROM works WHERE work_id_int IN ({placeholders})",
             tuple(work_ids),
         )
-        return {
-            row[0]: {"title": row[1], "pub_year": row[2], "cited_by_count": row[3]}
-            for row in rows
-        }
+        result = {}
+        for row in rows:
+            entry = {"title": row[1], "pub_year": row[2], "cited_by_count": row[3]}
+            if include_abstract:
+                entry["abstract"] = row[4] or ""
+            result[row[0]] = entry
+        return result
     except Exception:
-        # PG unavailable — return empty metadata
         return {}
 
 

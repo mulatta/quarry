@@ -126,8 +126,8 @@ class TestExpandModes:
 SEEDS = {
     "Dao-2016": {
         "wid": 2495359280,
-        # Verified references present in graph and expand results:
-        "must_find": [2031580508, 2050271637, 51469642],
+        # AptaCluster (Hoinka 2014), FASTAptamer (Alam 2015), APTANI (Caroli 2015)
+        "must_find": [51469642, 2050271637, 2252393116],
     },
     "Seo-2025": {
         "wid": 4406019873,
@@ -136,8 +136,8 @@ SEEDS = {
     },
     "Zhao-2021": {
         "wid": 3043719325,
-        # Verified references present in graph and expand results:
-        "must_find": [2530994846, 2480829753, 2336828812],
+        # Komor 2016 (first CBE), Gaudelli 2017 (first ABE)
+        "must_find": [2336828812, 2766599608],
     },
 }
 
