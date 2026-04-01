@@ -1,6 +1,6 @@
 # Subgraph Mining Architecture
 
-> Status: Phase 1 in progress. PPR + merged CSR verified.
+> Status: Phase 1a next. APPR implementation pending. CSR + merged citations verified.
 
 ## Problem
 
@@ -77,26 +77,20 @@ Signal: time-dependent patterns.
 Data: pub_year, cited_by_count, iCite citation_count.
 See: [04-layer-temporal.md](04-layer-temporal.md)
 
-## Candidate Generation: Iterative PPR-guided Expansion
+## Candidate Generation: APPR (Approximate Personalized PageRank)
 
-NOT fixed k-hop BFS. Score-guided iterative expansion:
+Push-based local computation on full CSR graph. Single pass replaces
+the previous iterative BFS + subgraph PPR design.
 
 ```
-seen = {seed}
-frontier = {seed}
-
-for i in 1..max_iter:
-    new = BFS_1hop(frontier) - seen
-    ppr = PPR(seen ∪ new, seed)
-    worthy = {n ∈ new | ppr[n] >= threshold}
-    if not worthy: break
-    seen |= worthy
-    frontier = worthy
-    if |seen| >= max_nodes: break
+APPR(graph, seed, α=0.15, ε=1e-6):
+    push mass from seed through neighbors
+    stop pushing when residual/degree < ε
+    → sparse result: only relevant nodes have scores
 ```
 
-Hop count is dynamic — expands deeper into relevant clusters,
-stops early in noisy/hub-dominated directions.
+No BFS boundary, no iteration loop. APPR handles both candidate
+discovery and scoring in one operation. O(1/ε) regardless of graph size.
 
 See: [05-candidate-generation.md](05-candidate-generation.md)
 
@@ -119,41 +113,42 @@ leave-one-out, symmetry, expert judgment. See: [09-evaluation.md](09-evaluation.
 - [ ] Missing data fairness: how to weight signals with partial coverage
       (e.g., RCR available for 74% of PubMed papers, 0% of non-PubMed)
       See: [07-missing-data.md](07-missing-data.md)
-- [ ] Optimal PPR α for citation networks
+- [ ] Optimal APPR α for citation networks (start with 0.15, tune via eval)
 - [ ] Whether L3 (Quality) should be reranking-only or participate in fusion
 - [ ] Embedding model choice for Layer 2 (jina-v5 nano currently)
 - [ ] Evaluation methodology (no ground truth labels)
 
 ## Implementation Roadmap
 
-| Phase | Layers                        | Fusion                     | Status                                               |
-| ----- | ----------------------------- | -------------------------- | ---------------------------------------------------- |
-| 1     | Structure (PPR + coupling)    | RRF(2 signals)             | **In progress** — PPR verified, coupling/cocite next |
-| 2     | + Quality (RCR rerank) + MeSH | RRF(4 signals) + rerank    |                                                      |
-| 3     | + Content (embedding, BM25)   | RRF(6+ signals)            | After embeddings                                     |
-| 4     | + Temporal + Adamic-Adar      | Full RRF + learned weights | Long-term                                            |
+| Phase | Layers                        | Fusion                          | Status                                                |
+| ----- | ----------------------------- | ------------------------------- | ----------------------------------------------------- |
+| 1a    | Structure (APPR)              | —                               | **Next** — APPR replaces power iteration PPR          |
+| 1b    | + coupling + cocite           | RRF(3 signals)                  | After APPR                                            |
+| 1c    | expand CLI command            | RRF + direction filtering       | After fusion                                          |
+| 2     | + Quality (RCR rerank) + HKPR | RRF(4+ signals) + rerank        | HKPR builds on APPR push framework                    |
+| 3     | + Content (embedding, BM25)   | RRF(6+ signals)                 | After embeddings                                      |
+| 4     | + Temporal + Adamic-Adar      | Full RRF + empirical param tune | Long-term                                             |
 
 Each phase is additive — previous interfaces are stable.
 
-## Current State (Phase 1 Progress)
+## Current State
 
 Implemented:
 
-- [x] PPR in Rust (`subgraph_pagerank` with `restart_node`)
 - [x] iCite citation merge (OA ∪ iCite, +746M edges)
 - [x] CSR build from Parquet (no CSV, peak ~77GB, 182M nodes / 3.77B edges)
-- [x] PPR verified: hub suppression (Laemmli dropped), topic relevance (IL6/glycosylation surfaced)
+- [x] PPR prototype verified: hub suppression, topic relevance confirmed
+- [x] k_hop for simple neighbor lookup
 
-Verified issues to address:
+To be replaced:
 
-- [ ] Fixed 2-hop pool (5000 cap) → iterative expansion
-- [ ] Seed score dominance (0.805 vs 0.003 for #2) → α tuning or seed exclusion
-- [ ] Off-topic papers (GSEA #3, PGC-1α #6) → coupling/MeSH filter
-- [ ] Single signal (PPR only) → RRF(PPR + coupling + cocite)
+- [ ] Power iteration PPR (`subgraph_pagerank`) → APPR (Phase 1a)
+- [ ] Fixed 2-hop BFS pool → APPR natural boundary (Phase 1a)
 
-Baseline performance (N-glycosylation test paper, 2-hop pool=5000):
+Issues APPR addresses:
 
-- k_hop: <0.1s
-- subgraph_pagerank: <0.1s
-- PG enrichment: <0.01s
-- total: <0.2s
+- Seed score dominance → APPR's local push distributes mass more naturally
+- Off-topic via hub edges → APPR dilutes hub mass across many neighbors
+- Single signal → RRF fusion (Phase 1b, after APPR)
+
+Next: implement `appr()` in Rust, delete `pagerank::compute` and `pagerank::subgraph`.

@@ -1,68 +1,117 @@
-# Candidate Generation: Iterative PPR-guided Expansion
+# Candidate Generation: APPR (Approximate Personalized PageRank)
 
-> How the candidate pool is built before scoring.
+> Core algorithm for subgraph extraction. Replaces k-hop BFS + power iteration PPR.
 
-## Problem with Fixed k-hop
+## Why APPR over Previous Approach
 
-- k=1: too narrow (~100 papers)
-- k=2: too wide (5,000+ papers, hub noise)
-- k=3: explodes (100K+, mostly irrelevant)
+Previous design: iterative BFS expansion + subgraph PPR (power iteration).
 
-All edges treated equally — hub papers (Laemmli, RECIST) pull in
-unrelated literature.
+| | BFS + subgraph PPR | APPR (push-based) |
+|--|--------------------|--------------------|
+| Expansion | BFS decides boundary, PPR scores within | APPR does both — score-guided boundary |
+| Computation | Re-runs PPR each iteration on growing subgraph | Single pass, O(1/ε) |
+| Boundary | Arbitrary (BFS hop limit) — can miss relevant paths | Natural (score-based) — no missed paths |
+| Direction filtering | Incomplete — BFS filters direction but PPR uses all edges in subgraph | Complete — push follows only chosen edges |
 
-## Solution: Score-guided Iterative Expansion
+BFS imposes an arbitrary boundary that PPR cannot recover from. APPR's push
+operation naturally forms the boundary based on score, which is both faster and
+more accurate for our use case.
+
+## Algorithm
+
+Push-based local computation on full CSR graph (Andersen et al. 2006).
 
 ```
-Input:  seed, max_nodes=500, max_iter=5, threshold=0.001, α=0.2
+Input:  graph (CSR), seed, α=0.15, ε=1e-6
 
-seen = {seed}
-frontier = {seed}
+residual = {seed: 1.0}  // all mass starts at seed
+estimate = {}           // accumulated PPR scores
 
-for i in 1..max_iter:
-    # Expand: 1-hop neighbors of frontier only
-    new = neighbors(frontier) - seen
-    if not new: break
-    
-    # Score: PPR on entire accumulated set
-    pool = seen ∪ new
-    ppr = PersonalizedPageRank(pool, seed, α)
-    
-    # Prune: only keep new nodes above threshold
-    worthy = {n ∈ new | ppr[n] >= threshold}
-    if not worthy: break
-    
-    seen |= worthy
-    frontier = worthy
-    if |seen| >= max_nodes: break
+while any node v has residual[v] / degree(v) > ε:
+    pick such v
+    // retain α fraction as PPR score
+    estimate[v] += α * residual[v]
+    // push (1-α) fraction to neighbors
+    for u in neighbors(v):
+        residual[u] += (1-α) * residual[v] / degree(v)
+    residual[v] = 0
 
-return seen
+return estimate  // sparse: only touched nodes have entries
 ```
 
-## Properties
-
-- **Dynamic depth**: expands deeper into relevant clusters, shallow in noisy directions
-- **Deterministic**: same seed → same result (PPR converges, threshold is fixed)
-- **Hub suppression**: PPR restart probability + threshold prunes hub-connected noise
-- **Bounded**: max_nodes and max_iter prevent runaway expansion
+Key properties:
+- **Local**: only visits nodes reachable from seed with significant score
+- **Deterministic**: same seed → same result
+- **Bounded**: O(1/ε) total work regardless of graph size (182M nodes irrelevant)
+- **Natural boundary**: expansion stops where score drops below ε — no arbitrary hop limit
+- **Hub suppression**: high-degree nodes dilute push mass across many neighbors
 
 ## Parameters
 
 | Parameter | Default | Effect |
 |-----------|---------|--------|
-| max_nodes | 500 | Hard cap on subgraph size |
-| max_iter | 5 | Max expansion rounds |
-| threshold | 0.001 | Min PPR score to keep a node |
-| α | 0.2 | PPR teleport probability (lower = wider exploration) |
+| α | 0.15 | Teleport probability. Higher = tighter around seed |
+| ε | 1e-6 | Precision threshold. Lower = more nodes discovered, slower |
 
-## Implementation Plan
+- α=0.15: Andersen 2006 default, validated on citation networks
+- ε=1e-6: standard default, good precision/speed tradeoff
+- Both configurable via CLI for empirical tuning
 
-- Phase 1: Python prototype using existing `quarry_graph.k_hop` + `subgraph_pagerank`
-- Phase 2: Rust native `iterative_ppr_expand` for performance
-- PPR on subgraph (not full 181M graph) — bounded by candidate pool size
+## Rust API
+
+Phase 1a (current):
+```rust
+/// Push-based Approximate Personalized PageRank on full CSR graph.
+/// Returns (node_id, score) pairs sorted by score descending.
+/// Only nodes with score > 0 are returned (sparse result).
+pub fn appr(
+    graph: &Graph,
+    seed: i64,
+    alpha: f64,
+    epsilon: f64,
+    top_k: Option<usize>,  // None = return all
+) -> Vec<(i64, f64)>
+```
+
+Python binding:
+```python
+quarry_graph.appr(seed: int, alpha: float = 0.15, epsilon: float = 1e-6) -> list[tuple[int, float]]
+```
+
+Phase 1c (expand command): add `direction: Direction` parameter.
+```rust
+pub enum Direction { Forward, Reverse, Both }
+```
+
+## Replaces
+
+- `pagerank::compute` — full-graph PR, no use case → **delete**
+- `pagerank::subgraph` — subgraph PPR via power iteration → **delete**
+- Python `subgraph_pagerank` binding → **delete**, replaced by `appr`
+
+## Retained
+
+- `k_hop` — kept for simple neighbor lookup (e.g., "show direct citations").
+  NOT used in expansion logic. APPR handles expansion independently.
+
+## vs HKPR (Phase 2)
+
+HKPR (Heat Kernel PageRank) uses Poisson decay instead of geometric.
+Structurally resolves seed score dominance (seed contribution ~0.7% vs PPR ~20%).
+Planned as Phase 2 addition — same push framework, different decay function.
+APPR implementation provides the foundation for HKPR.
+
+## Expected Behavior
+
+On the N-glycosylation test paper (seed, α=0.15, ε=1e-6):
+- Result: sparse set of ~thousands of nodes with PPR scores
+- Seed neighbors with high relevance: high scores
+- Hub papers (Laemmli, RECIST): low scores (mass diluted across many edges)
+- Off-topic but structurally close: low scores (teleport pulls back to seed)
+- Time: sub-second (local computation, not proportional to graph size)
 
 ## Open Questions
 
-- [ ] Optimal threshold and α — empirical tuning on test papers
-- [ ] Whether to use forward-only, reverse-only, or both directions per iteration
-- [ ] Memory budget for pool size during iteration
+- [ ] Optimal α for citation networks — empirical tuning via eval protocol
+- [ ] Whether ε=1e-6 gives sufficient coverage or needs adjustment
+- [ ] Direction filtering semantics for expand command (Phase 1c)
