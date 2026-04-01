@@ -10,7 +10,7 @@ Three signals fused in Rust `expand()` function:
 fused_score(paper) = Σ  w_i / (k + rank_i(paper))
 
 signals: APPR, coupling (AA-cosine), cocitation (AA-cosine)
-defaults: w = [0.5, 0.25, 0.25], k = 60
+defaults: w = [0.7, 0.15, 0.15], k = 60
 ```
 
 ### Why wRRF over alternatives
@@ -24,11 +24,13 @@ defaults: w = [0.5, 0.25, 0.25], k = 60
 
 ### Weight Rationale
 
-- APPR (0.5): global graph proximity, captures multi-hop relevance
-- Coupling (0.25): methodology similarity via shared references
-- Co-citation (0.25): community signal via shared citers
+- APPR (0.7): dominates to preserve ref/citer recovery (~80%+ across seeds)
+- Coupling (0.15): methodology similarity via shared references
+- Co-citation (0.15): community signal via shared citers
 
-These are starting defaults. Tuning via eval protocol (reference recovery, LOO).
+Validated via 5-seed parameter sweep: w=0.7/0.15/0.15 matches APPR-only
+ref/citer recovery while adding lateral papers. Lower APPR weight (0.5)
+causes 10-20% ref recovery loss as coupling candidates flood the results.
 
 ### Handling Missing Signals
 
@@ -42,24 +44,31 @@ Papers appearing in coupling/cocitation but NOT in APPR:
 
 ## Future Phases
 
-### Phase 2: Cross-Layer Fusion
+### Phase 2: Quality as Metadata (Not Fusion)
 
-When Quality layer (RCR, APT) is added:
+Quality signals (cnp, fwci, rcr) are exposed as metadata in output.
+NOT used in fusion scoring — "field importance" ≠ "relevance to seed".
+See: [03-layer-quality.md](03-layer-quality.md) for evaluation rationale.
 
-```
-final_score(paper) = wRRF(structure_score, quality_score)
-```
+### Phase 3: Content Layer Fusion
 
-Or: quality as L3 reranking (reorder without adding/removing candidates).
-
-### Phase 3+: Full Multi-Layer
+When embedding layer is available:
 
 ```
-final_score(paper) = wRRF(structure, content, quality, temporal)
+fused_score(paper) = wRRF(structure_score, content_score)
 ```
 
-Each layer produces its own ranked list via internal aggregation,
-then cross-layer wRRF produces the final output.
+Content (embedding similarity) is the first signal that measures
+**semantic relevance** independent of citation structure. This is
+qualitatively different from quality signals (which measure impact).
+
+### Phase 4: Full Multi-Layer (if justified by eval)
+
+```
+fused_score(paper) = wRRF(structure, content, temporal)
+```
+
+Temporal layer only if eval shows recency weighting improves results.
 
 ## Computation Levels (Full Architecture)
 

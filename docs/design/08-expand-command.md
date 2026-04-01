@@ -1,131 +1,210 @@
 # quarry expand — Command Design
 
-> Status: Phase 1b implemented. Dual modes (fused + separated).
+> Status: Phase 1b implemented. Schema finalization in progress.
 
 ## Definition
 
 `quarry expand` takes a seed paper and returns a ranked subgraph of related
-papers from the citation graph. All operations are deterministic.
+papers with full metadata from the citation graph. All operations are
+deterministic. quarry returns **complete data** — filtering/sorting is left
+to downstream consumers (jq, SQL, agents).
+
+## Design Principle
+
+quarry is a **data pipeline**, not a query engine. It computes structural
+signals (APPR, coupling, cocitation) in Rust, enriches with PG metadata,
+and outputs complete JSON. No `--sort`, `--filter`, or `--rel` options —
+use `jq`, DuckDB, or pandas downstream.
+
+```bash
+# quarry outputs data
+quarry expand W4406019873 --format json > results.json
+
+# downstream filters
+jq '.papers[] | select(.relation == "lateral")' results.json
+jq '.papers | sort_by(-.quality.cnp)' results.json
+```
 
 ## Two Modes
 
 | Mode | Use case | How it works |
 |------|----------|-------------|
-| `fused` | Focused exploration (experiment design) | wRRF merges all candidates into single ranked list |
-| `separated` | Broad survey (review writing) | APPR fills structural slots + guaranteed lateral slots |
-
-### Fused Mode (default)
-
-All candidates (APPR + coupling + cocitation) compete in a single pool via
-weighted Reciprocal Rank Fusion. Best for finding the most directly relevant
-papers when you know what you're looking for.
-
-```
-score(paper) = w_appr/(k + rank_appr) + w_coup/(k + rank_coup) + w_cocite/(k + rank_cocite)
-defaults: w = [0.7, 0.15, 0.15], k = 60
-```
-
-### Separated Mode
-
-APPR top-(limit × 75%) fills structural slots (refs, citers, indirect).
-Coupling/cocitation lateral top-(limit × 25%) fills guaranteed lateral slots.
-Lateral = papers NOT in seed's direct references or citers AND not in APPR top.
-
-Best for discovering related work you might not know about — lateral papers
-share methodology or community context but have no direct citation path to seed.
-
-## Architecture
-
-Core logic in Rust. Python CLI is a thin wrapper.
-
-```
-Python CLI          Rust expand()                    Python CLI
-──────────         ──────────────                   ──────────
-DOI/PMID input  →  APPR(seed, α, ε)             →  PG metadata enrichment
-  ↓ PG lookup      coupling_aa(seed)                  (title, year, etc.)
-work_id_int     →  cocitation_aa(seed)           →  format + output
-                   fused: wRRF / separated: slot fill
-                   seed exclusion
-                   top-k truncation
-                → Vec<(work_id, score)>
-```
-
-## Rust API
-
-```rust
-pub struct ExpandParams {
-    pub alpha: f64,           // APPR teleport (default 0.15)
-    pub epsilon: f64,         // APPR precision (default 1e-6)
-    pub mode: Mode,           // Fused or Separated
-    pub weights: [f64; 3],    // [appr, coupling, cocitation] wRRF weights
-    pub rrf_k: usize,         // RRF smoothing constant (default 60)
-    pub lateral_pct: usize,   // % of limit for laterals in separated mode (default 25)
-    pub limit: usize,         // max results (default 200)
-}
-
-pub fn compute(graph: &Graph, seed: i64, params: &ExpandParams) -> ExpandResult
-```
-
-Python binding:
-```python
-graph.expand(
-    seed: int,
-    alpha: float = 0.15,
-    epsilon: float = 1e-6,
-    mode: str = "fused",           # "fused" | "separated"
-    weights: tuple = (0.7, 0.15, 0.15),
-    rrf_k: int = 60,
-    lateral_pct: int = 25,
-    limit: int = 200,
-) -> tuple[list[tuple[int, float]], dict]
-```
+| `fused` (default) | Focused exploration | wRRF merges all candidates into single ranked list |
+| `separated` | Broad survey | APPR top-75% + guaranteed lateral top-25% |
 
 ## CLI Interface
 
 ```bash
-# Fused mode (default — focused exploration)
-quarry expand <work_id>
-quarry expand <work_id> --mode fused
+quarry expand <seed>                              # work_id_int
+quarry expand W4406019873                         # W-prefix
+quarry expand 10.1126/science.adp5637             # DOI
+quarry expand https://doi.org/10.1126/science.adp5637  # full DOI
 
-# Separated mode (broad survey)
-quarry expand <work_id> --mode separated
-
-# Options
-quarry expand <work_id> \
-  --limit 200 \
-  --mode fused|separated \
-  --format json|table
-
-# Resolve by DOI or PMID
-quarry expand --doi 10.1126/science.adp5637
-quarry expand --pmid 39251588
+# Options (algorithm parameters only — no sort/filter)
+quarry expand <seed> \
+  --mode fused|separated \       # default: fused
+  --limit 200 \                  # default: 200
+  --format table|json|detail \   # default: table
+  --alpha 0.15 \                 # APPR teleport
+  --epsilon 1e-6                 # APPR precision
 ```
 
-## Signals
+## Output Schema
 
-### APPR (structural proximity)
-Push-based Approximate PPR on full CSR graph. O(1/ε), ~1-2s.
+### JSON (`--format json` or `--format detail`)
 
-### Coupling (AA-weighted, cosine-normalized)
-Bibliographic coupling: papers sharing references with seed.
-Adamic-Adar weighting: niche shared references score higher.
-Cosine normalization: reference list size bias removed.
+`detail` includes `abstract` field; `json` omits it.
 
-### Co-citation (AA-weighted, cosine-normalized)
-Papers co-cited with seed by third papers.
-Adamic-Adar weighting: niche citers count more.
-Cosine normalization applied.
+```json
+{
+  "meta": {
+    "quarry_version": "0.2.0",
+    "graph": {
+      "num_nodes": 182810383,
+      "num_edges": 3781541110,
+      "build_date": "2026-03-31T18:14:08Z"
+    }
+  },
+  "seed": {
+    "work_id": 4406019873,
+    "title": "Landscape profiling of PET depolymerases...",
+    "doi": "https://doi.org/10.1126/science.adp5637",
+    "year": 2025
+  },
+  "params": {
+    "mode": "fused",
+    "alpha": 0.15,
+    "epsilon": 1e-6,
+    "weights": [0.7, 0.15, 0.15],
+    "limit": 200
+  },
+  "papers": [
+    {
+      "rank": 1,
+      "work_id": 4385342215,
+      "doi": "https://doi.org/10.1002/...",
+      "title": "Discovery and rational engineering of PET hydrolase...",
+      "abstract": "...",
+      "year": 2023,
+      "relation": "foundation",
+      "scores": {
+        "fused": 0.014714,
+        "appr": 0.001646
+      },
+      "quality": {
+        "cited_by": 106,
+        "cnp": 0.99,
+        "fwci": 7.7,
+        "rcr": 8.0
+      },
+      "bridges": null
+    },
+    {
+      "rank": 42,
+      "work_id": 4412048048,
+      "doi": "https://doi.org/10.1021/...",
+      "title": "Harnessing protein language model for PET hydrolases",
+      "abstract": "...",
+      "year": 2025,
+      "relation": "lateral",
+      "scores": {
+        "fused": 0.007717,
+        "appr": null
+      },
+      "quality": {
+        "cited_by": 10,
+        "cnp": 0.96,
+        "fwci": 5.0,
+        "rcr": null
+      },
+      "bridges": [
+        {
+          "work_id": 2294707565,
+          "type": "shared_ref",
+          "title": "A bacterium that degrades and assimilates PET",
+          "weight": 0.12
+        },
+        {
+          "work_id": 4224988655,
+          "type": "shared_ref",
+          "title": "ML-aided engineering of hydrolases for PET",
+          "weight": 0.45
+        }
+      ]
+    }
+  ],
+  "stats": {
+    "appr_candidates": 2366,
+    "coupling_candidates": 137427,
+    "cocitation_candidates": 2437,
+    "returned": 200,
+    "elapsed_s": 1.07
+  }
+}
+```
 
-## Relation Tagging
+### Schema Field Reference
 
-Deterministic classification based on edge existence:
+**scores**:
+- `fused`: wRRF fused score (fused mode) or APPR/lateral score (separated mode)
+- `appr`: raw APPR score. null if paper only found via coupling/cocitation.
 
-| seed → paper | paper → seed | Relation |
-| :----------: | :----------: | -------- |
-| yes | no | `foundation` — seed cites this paper |
-| no | yes | `follow-up` — this paper cites seed |
-| yes | yes | `mutual` |
-| no | no | `lateral` — discovered via coupling/cocitation |
+**quality** (all nullable — see 03-layer-quality.md for why):
+- `cited_by`: raw citation count (~100% coverage)
+- `cnp`: citation_normalized_percentile, 0-1, field+year normalized (87-99%)
+- `fwci`: Field-Weighted Citation Impact, unbounded (87-99%, ρ=0.99 with cnp)
+- `rcr`: Relative Citation Ratio, iCite, PubMed only (55-85%)
+
+**bridges** (lateral papers only, null for foundation/follow-up/mutual):
+- All shared refs/citers returned (no top-N cutoff)
+- Sorted by AA weight descending (structural rarity proxy)
+- `type`: `shared_ref` (seed and paper both cite bridge) or `shared_citer` (third paper cites both)
+- `weight`: Adamic-Adar weight = 1/log(indegree or outdegree)
+
+**relation**:
+- `foundation`: seed cites this paper (seed → paper edge exists)
+- `follow-up`: this paper cites seed (paper → seed edge exists)
+- `mutual`: both directions
+- `lateral`: no direct citation edge. Discovered via coupling/cocitation.
+
+### Quality Signals — Selection Rationale
+
+| Signal | Included | Rationale |
+|--------|----------|-----------|
+| cnp | ✅ | 0-1 range, field+year normalized, 87-99% coverage. Primary quality indicator. |
+| fwci | ✅ | ρ=0.99 with cnp but absolute scale. Some users prefer this. |
+| cited_by | ✅ | ~100% coverage. Biased but universally available fallback. |
+| rcr | ✅ | High quality for biomedical. 55-85% coverage (PubMed only). |
+| apt | ❌ | 7.9% coverage. Clinical translation only — misleading for basic science. |
+| nih_percentile | ❌ | 6.4% coverage. NIH-funded only — extreme selection bias. |
+| fcr | ❌ | Baseline for RCR. Not useful standalone. |
+| Global PageRank | ❌ | Not precomputed. cited_by serves as rough proxy. |
+
+See [03-layer-quality.md](03-layer-quality.md) for detailed evaluation.
+
+### NULL Handling
+
+All quality fields are nullable. NULL means "not measured" — not "zero" or
+"average". No imputation. See [07-missing-data.md](07-missing-data.md).
+
+Common NULL patterns:
+- Preprints (bioRxiv/arXiv): cnp, fwci, rcr all NULL
+- Chemistry journals: rcr NULL (not in PubMed)
+- Very new papers (2025+): cnp/fwci may be NULL or near-zero
+
+## Architecture
+
+```
+Rust expand()                          Python CLI
+──────────────                        ──────────
+APPR(seed, α, ε)                      PG metadata enrichment:
+coupling_aa(seed)          →            title, doi, year, abstract
+cocitation_aa(seed)                     cnp, fwci, rcr, cited_by
+fused/separated fusion                 relation tagging
+seed exclusion                         bridge title enrichment
+bridge collection (pass 2)            JSON serialization
+→ Vec<ExpandPaper>                    → stdout
+```
 
 ## Evaluation Results (5 seeds)
 
@@ -134,21 +213,25 @@ Deterministic classification based on edge existence:
 | avg ref recovery | 78.6% | 78.9% | 80.9% |
 | avg citer recovery | 78-80% | 77.9% | 86.3% |
 | avg lateral count | 60-62 | 67 | 47 |
-| lateral quality | all on-topic (5/5 seeds) | all on-topic | 7/10 good laterals |
+| lateral quality | all on-topic (5/5 seeds) | all on-topic | 7/10 |
 
-Key finding: APPR alone misses 3 high-quality lateral papers that
-coupling/cocitation discovers. Both fused and separated modes recover them.
-Separated mode guarantees more lateral slots.
+Key findings:
+- APPR alone misses 3+ high-quality lateral papers per seed
+- Both modes recover them; separated guarantees more lateral slots
+- Lateral papers verified on-topic via PMC abstract review (all 5 seeds)
+- fwci/cnp capture landmark papers but demote seed-relevant niche work
 
 ## Future Phases
 
 | Phase | Addition |
 |-------|---------|
-| 2 | Direction filtering (`--direction forward|reverse|both`) + HKPR |
-| 3 | Multi-seed (`quarry expand <id1> <id2>`) |
+| 1b+ | Bridge collection (pass 2, lazy) + quality metadata enrichment |
+| 2 | Direction filtering + HKPR |
+| 3 | Embedding bridge reranking (**CRITICAL** — AA weight alone cannot distinguish niche-relevant from niche-coincidental) |
+| 4 | Multi-seed + temporal |
 
 ## Open Questions
 
-- [ ] wRRF weight tuning across more diverse seeds
+- [ ] Weighted APPR (CSR edge weight = fwci) vs post-hoc — requires CSR structure change
 - [ ] `technique` relation: requires MeSH qualifier (22M coverage)
 - [ ] Multi-seed weight determination

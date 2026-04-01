@@ -1,6 +1,6 @@
 # Subgraph Mining Architecture
 
-> Status: Phase 1a complete (APPR). Phase 1b next (expand command + fusion).
+> Status: Phase 1b active. APPR + expand(fused/separated) + CLI implemented.
 
 ## Problem
 
@@ -117,21 +117,21 @@ leave-one-out, symmetry, expert judgment. See: [09-evaluation.md](09-evaluation.
       (e.g., RCR available for 74% of PubMed papers, 0% of non-PubMed)
       See: [07-missing-data.md](07-missing-data.md)
 - [ ] Optimal APPR α for citation networks (start with 0.15, tune via eval)
-- [ ] Whether L3 (Quality) should be reranking-only or participate in fusion
+- [x] ~~L3 Quality: fusion vs reranking~~ → **neither** — metadata only (see 03)
 - [ ] Embedding model choice for Layer 2 (jina-v5 nano currently)
-- [ ] Evaluation methodology (no ground truth labels)
 
 ## Implementation Roadmap
 
-| Phase | Scope                            | Fusion                          | Status                                    |
-| ----- | -------------------------------- | ------------------------------- | ----------------------------------------- |
-| 1a    | APPR (push-based)                | —                               | **Done** — 1.45s, 2366 candidates, verified |
-| 1b    | expand CLI + coupling + cocite   | wRRF(3 signals) in Rust         | **Next**                                  |
-| 2     | + Quality (RCR rerank) + HKPR    | wRRF(4+ signals) + rerank       | HKPR builds on APPR push framework        |
-| 3     | + Content (embedding, BM25)      | wRRF(6+ signals)                | After embeddings                          |
-| 4     | + Temporal + recency factor      | Full wRRF + empirical param tune | Long-term                                 |
+| Phase | Scope | Status |
+| ----- | ----- | ------ |
+| 1a | APPR (push-based) | **Done** |
+| 1b | expand(fused/separated) + AA coupling/cocite + wRRF + CLI | **Active** — bridge + schema finalization remaining |
+| 2 | Direction filtering + HKPR | |
+| 3 | Content (embedding, BM25) + embedding bridge reranking (**critical**) | After embeddings |
+| 4 | Temporal + multi-seed | Long-term |
 
-Each phase is additive — previous interfaces are stable.
+Quality signals (cnp, fwci, rcr) are **metadata only** — not used in fusion.
+See [03-layer-quality.md](03-layer-quality.md) for rationale.
 
 ## Current State
 
@@ -140,18 +140,18 @@ Implemented:
 - [x] iCite citation merge (OA ∪ iCite, +746M edges)
 - [x] CSR build from Parquet (no CSV, peak ~77GB, 182M nodes / 3.77B edges)
 - [x] APPR in Rust (push-based, O(1/ε), bidirectional)
-- [x] Bib coupling + co-citation in Rust (raw count)
-- [x] k_hop for simple neighbor lookup
+- [x] expand() — dual modes (fused wRRF + separated with lateral slots)
+- [x] AA-weighted cosine-normalized coupling/cocitation
+- [x] CLI: `quarry expand` with DOI/W-prefix input, rich table + JSON output
+- [x] Regression tests: 31 tests across 3 seeds
+- [x] PG index: idx_works_work_id_int (53s → 9ms lookup)
 
-Verified (PET depolymerase paper, Seo 2025):
-- APPR: 2,366 nodes scored in 1.45s
-- Top 20: all PET enzyme papers, no off-topic
-- Seed score: 44.1% of total (improved from 80.5% in power iteration)
-- Hub suppression: working (no generic high-citation papers in top results)
+Verified (5 seeds: PET, base editing, PLM, glycosylase BE, aptamer):
+- All top-20 on-topic across all seeds (PMC abstract verified)
+- Lateral papers all relevant (0 noise across 5 seeds)
+- wRRF w=0.7/0.15/0.15 preserves ref recovery while adding laterals
 
-Deleted:
-- [x] `pagerank::compute` (full-graph PR)
-- [x] `pagerank::subgraph` (subgraph PPR via power iteration)
-- [x] Python `subgraph_pagerank` binding
-
-Next: Rust `expand()` function with AA-weighted coupling/cocitation + wRRF + CLI.
+Remaining Phase 1b:
+- [ ] Bridge collection (pass 2, lazy) for lateral papers
+- [ ] Quality metadata enrichment (cnp, fwci, rcr, cited_by)
+- [ ] Output schema finalization (see 08-expand-command.md)

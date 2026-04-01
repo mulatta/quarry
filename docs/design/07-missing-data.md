@@ -2,86 +2,51 @@
 
 > How to handle signals with partial coverage without introducing bias.
 
-## The Problem
+## Decision: Expose, Don't Impute
 
-Different signals have vastly different coverage:
+**quarry returns NULL for missing data. No imputation, no default values.**
 
-| Signal | Coverage (PubMed) | Coverage (all OA) |
-|--------|-------------------|-------------------|
-| Citation edges (out) | 74% of iCite | 25% of OA works |
-| Citation edges (in) | ~80% | ~28% |
-| RCR | 74% | 4% |
-| FCR | 84% | 5% |
-| MeSH | ~95% of T1 | ~5% of all |
-| OA Topics | ~100% | ~100% |
-| Embeddings | 0% (in progress) | 0% |
-| pub_year | ~100% | ~100% |
+This resolves the previously undecided question (approaches A-D) by choosing
+a simpler path: quarry is a data pipeline, not a scoring engine. Missing data
+is the consumer's problem.
 
-When a signal is available for some papers but not others,
-using it as a weight or score creates **systematic bias**:
-papers WITH the signal get boosted/penalized, papers WITHOUT
-are treated as default → unfair comparison.
+### Rationale
 
-## Approaches Under Consideration
+Evaluated on 5 seed papers (PET enzyme, base editing, PLM, bioinformatics):
 
-### A. Imputation (fill missing with field average)
+| Signal | Coverage in expand top-200 | NULL pattern |
+|--------|---------------------------|-------------|
+| cnp/fwci | 87-99% | Mostly preprints (bioRxiv, 2025) |
+| rcr | 55-85% | Non-PubMed papers (chemistry, CS) |
+| cited_by_count | ~100% | Rare |
 
-```
-if RCR available: use RCR
-else: use median RCR for the paper's field/year
-```
+NULL is not random — it's **systematic**:
+- Preprints: no fwci/cnp (not yet indexed by OpenAlex metrics)
+- Chemistry journals: no rcr (not in PubMed)
+- Very new papers: no citations yet
 
-Pros: all papers get a value, no missing data gap.
-Cons: imputed values add noise, may not reflect true quality.
+Imputing these with field averages (approach A) or segregating scores
+(approach B) would hide this systematic pattern from the consumer.
+Returning NULL preserves the signal that "this paper's quality is unmeasured".
 
-### B. Segregated scoring (only compare within same coverage)
+### Coverage by Paper Category (from 1,305 papers across 5 seeds)
 
-```
-papers_with_RCR = [... scored with RCR ...]
-papers_without = [... scored without RCR ...]
-interleave by primary signal (PPR)
-```
+| Category | Count | fwci% | cnp% | rcr% |
+|----------|-------|-------|------|------|
+| PubMed article | 748 | 99% | 99% | 79% |
+| PubMed review | 273 | 100% | 100% | 82% |
+| Preprint | 105 | 10% | 10% | 8% |
+| Chemistry/material | 48 | 100% | 100% | 0% |
+| OA other | 109 | 92% | 92% | 0% |
 
-Pros: no bias from missing data.
-Cons: complex, papers in different pools may not be fairly compared.
+### Previous Approaches (Considered, Not Adopted)
 
-### C. Reranking-only for partial signals
+| Approach | Description | Why not |
+|----------|-------------|---------|
+| A. Imputation | Fill NULL with field median | False precision. Preprint ≠ "average paper" |
+| B. Segregated scoring | Separate pools by coverage | Complex, still unfair cross-pool comparison |
+| C. Reranking-only | Partial signals as tiebreaker | quarry doesn't rerank — metadata only |
+| D. Coverage-weighted | Signal weight ∝ coverage in pool | Unnecessary if signals are metadata only |
 
-```
-L2 fusion: uses only ~100% coverage signals (PPR, topics, pub_year)
-L3 rerank: uses partial signals (RCR, MeSH) as tiebreaker only
-```
-
-Pros: primary ranking unbiased, partial signals only adjust within ties.
-Cons: high-quality signal (RCR) is underutilized.
-
-### D. Coverage-weighted contribution
-
-```
-RRF weight for signal S = coverage(S) within candidate pool
-if pool has 80% RCR coverage → RCR weight = 0.8 in fusion
-if pool has 10% RCR coverage → RCR weight = 0.1
-```
-
-Pros: signal influence proportional to its reliability in this query.
-Cons: weight varies per query, harder to reason about.
-
-## Current Decision
-
-**Undecided.** Prototype with approach C (reranking-only for partial signals),
-evaluate bias on test cases, then consider alternatives.
-
-## Test Cases for Evaluation
-
-1. Seed with high RCR in well-covered field (e.g., cancer biology)
-   → RCR should help differentiate
-2. Seed in poorly-covered field (e.g., niche ecology)
-   → RCR coverage low, should not distort results
-3. Seed citing both PubMed and non-PubMed papers
-   → MeSH available for some neighbors, not others
-
-## Open Questions
-
-- [ ] Which approach to implement first
-- [ ] How to measure bias (compare results with/without partial signal)
-- [ ] Whether to precompute coverage statistics per field for approach D
+All approaches assumed quarry would use quality for scoring.
+Since quality is metadata only, the fairness problem dissolves.
