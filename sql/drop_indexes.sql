@@ -11,6 +11,7 @@ DROP INDEX IF EXISTS idx_grants_pmid;
 DROP INDEX IF EXISTS idx_chemicals_pmid;
 
 -- OpenAlex
+DROP INDEX IF EXISTS idx_works_work_id_int;
 DROP INDEX IF EXISTS idx_works_pmid;
 DROP INDEX IF EXISTS idx_works_doi;
 DROP INDEX IF EXISTS idx_works_tier;
