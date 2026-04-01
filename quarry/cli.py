@@ -68,7 +68,7 @@ def sql(
 @app.command()
 def expand(
     seed: str = typer.Argument(
-        ..., help="Seed paper: work_id_int, DOI (--doi), or PMID (--pmid)"
+        ..., help="Seed paper: work_id_int, W<id>, DOI, or https://doi.org/..."
     ),
     limit: int = typer.Option(200, "--limit", "-n", help="Max results"),
     mode: str = typer.Option(
@@ -83,185 +83,71 @@ def expand(
     Modes:
       fused     — wRRF fusion, all candidates compete (focused exploration)
       separated — APPR + guaranteed lateral slots (broad survey)
+
+    Output: complete JSON with metadata. Use jq/SQL for filtering/sorting.
     """
     import json
-    import time
-
-    import quarry_graph
 
     from quarry.config import settings
+    from quarry.core.expand import run_expand
 
-    # Load graph
-    g = quarry_graph.Graph(str(settings.csr_dir))
-
-    # Resolve seed to work_id_int
-    seed_id = _resolve_seed(seed)
-
-    if not g.has_node(seed_id):
-        typer.echo(f"Error: seed {seed_id} not found in graph", err=True)
-        raise typer.Exit(1)
-
-    # Run expand
-    t0 = time.perf_counter()
-    papers, stats = g.expand(
-        seed_id, alpha=alpha, epsilon=epsilon, mode=mode, limit=limit
-    )
-    elapsed = time.perf_counter() - t0
-
-    # Enrich with metadata from PG
-    include_abstract = fmt == "detail"
-    metadata = _enrich_metadata(
-        [wid for wid, _ in papers], include_abstract=include_abstract
-    )
-
-    # Relation tagging
-    seed_fwd = set(g.neighbors(seed_id, "forward"))
-    seed_rev = set(g.neighbors(seed_id, "reverse"))
-
-    results = []
-    for wid, score in papers:
-        meta = metadata.get(wid, {})
-        cites_seed = wid in seed_rev  # paper → seed
-        cited_by_seed = wid in seed_fwd  # seed → paper
-        if cited_by_seed and cites_seed:
-            relation = "mutual"
-        elif cited_by_seed:
-            relation = "foundation"
-        elif cites_seed:
-            relation = "follow-up"
-        else:
-            relation = "lateral"
-        entry = {
-            "work_id": wid,
-            "title": meta.get("title", ""),
-            "year": meta.get("pub_year"),
-            "cited_by": meta.get("cited_by_count"),
-            "relation": relation,
-            "fused_score": round(score, 6),
-        }
-        if include_abstract:
-            entry["abstract"] = meta.get("abstract", "")
-        results.append(entry)
+    try:
+        result = run_expand(
+            seed=seed,
+            csr_dir=str(settings.csr_dir),
+            pg_conninfo=settings.pg_conninfo,
+            mode=mode,
+            alpha=alpha,
+            epsilon=epsilon,
+            limit=limit,
+            include_abstract=(fmt == "detail"),
+        )
+    except ValueError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1) from None
 
     if fmt in ("json", "detail"):
-        output = {
-            "seed": seed_id,
-            "params": {
-                "alpha": alpha,
-                "epsilon": epsilon,
-                "mode": mode,
-                "limit": limit,
-            },
-            "papers": results,
-            "stats": {
-                **stats,
-                "returned": len(results),
-                "elapsed_s": round(elapsed, 3),
-            },
-        }
-        typer.echo(json.dumps(output, indent=2, ensure_ascii=False))
+        typer.echo(json.dumps(result, indent=2, ensure_ascii=False))
     else:
-        from rich.console import Console
-        from rich.table import Table
+        _print_table(result)
 
-        from rich.text import Text
 
-        console = Console()
-        console.print(
-            f"Seed: W{seed_id}  ({elapsed:.2f}s, {len(results)} results)  "
-            f"[dim]appr={stats['appr_candidates']} coup={stats['coupling_candidates']} cocite={stats['cocitation_candidates']}[/dim]"
+def _print_table(result: dict) -> None:
+    """Print expand result as a rich table."""
+    from rich.console import Console
+    from rich.table import Table
+    from rich.text import Text
+
+    stats = result["stats"]
+    seed_id = result["seed"]["work_id"]
+    papers = result["papers"]
+
+    console = Console()
+    console.print(
+        f"Seed: W{seed_id}  ({stats['elapsed_s']}s, {stats['returned']} results)  "
+        f"[dim]appr={stats['appr_candidates']} coup={stats['coupling_candidates']} cocite={stats['cocitation_candidates']}[/dim]"
+    )
+
+    table = Table(show_edge=False, pad_edge=False, box=None, expand=True)
+    table.add_column("#", justify="right", style="dim", width=4, no_wrap=True)
+    table.add_column("rel", width=10, no_wrap=True)
+    table.add_column("year", justify="right", width=4, no_wrap=True)
+    table.add_column("score", justify="right", width=8, no_wrap=True)
+    table.add_column("work_id", width=13, no_wrap=True)
+    table.add_column("title", ratio=1, overflow="ellipsis", no_wrap=True)
+
+    for p in papers:
+        year = str(p["year"]) if p["year"] else "-"
+        table.add_row(
+            str(p["rank"]),
+            p["relation"],
+            year,
+            f"{p['scores']['fused']:.6f}",
+            f"W{p['work_id']}",
+            Text(p["title"] or "-"),
         )
 
-        table = Table(show_edge=False, pad_edge=False, box=None, expand=True)
-        table.add_column("#", justify="right", style="dim", width=4, no_wrap=True)
-        table.add_column("rel", width=10, no_wrap=True)
-        table.add_column("year", justify="right", width=4, no_wrap=True)
-        table.add_column("score", justify="right", width=8, no_wrap=True)
-        table.add_column("work_id", width=13, no_wrap=True)
-        table.add_column("title", ratio=1, overflow="ellipsis", no_wrap=True)
-
-        for i, r in enumerate(results[:limit]):
-            rel = r["relation"]
-            year = str(r["year"]) if r["year"] else "-"
-            title = r["title"] or "-"
-            table.add_row(
-                str(i + 1),
-                rel,
-                year,
-                f"{r['fused_score']:.6f}",
-                f"W{r['work_id']}",
-                Text(title),
-            )
-
-        console.print(table)
-
-
-def _resolve_seed(seed: str) -> int:
-    """Resolve seed string to work_id_int.
-
-    Accepts: work_id_int, W<id>, DOI, https://doi.org/DOI, --pmid <pmid>.
-    """
-    # Strip W prefix (OpenAlex format)
-    if seed.upper().startswith("W") and seed[1:].isdigit():
-        return int(seed[1:])
-
-    # Direct integer → work_id_int
-    try:
-        return int(seed)
-    except ValueError:
-        pass
-
-    # DOI — normalize to OA format (https://doi.org/ + lowercase) for exact match
-    if seed.startswith("10.") or seed.startswith("https://doi.org/"):
-        doi = "https://doi.org/" + seed.removeprefix("https://doi.org/").lower()
-        return _pg_lookup(
-            "SELECT work_id_int FROM works WHERE doi = %s LIMIT 1",
-            (doi,),
-            f"DOI not found: {doi}",
-        )
-
-    raise typer.Exit(f"Cannot resolve seed: {seed}")
-
-
-def _pg_lookup(sql: str, params: tuple, err_msg: str) -> int:
-    """Execute parameterized PG query, return first column of first row."""
-    import psycopg
-    from quarry.config import settings
-
-    with psycopg.connect(settings.pg_conninfo) as conn, conn.cursor() as cur:
-        cur.execute(sql, params)
-        row = cur.fetchone()
-        if row:
-            return row[0]
-    raise typer.Exit(err_msg)
-
-
-def _enrich_metadata(work_ids: list[int], *, include_abstract: bool = False) -> dict:
-    """Fetch metadata from PG for a batch of work_ids."""
-    if not work_ids:
-        return {}
-
-    try:
-        import psycopg
-        from quarry.config import settings
-
-        cols = "work_id_int, title, pub_year, cited_by_count"
-        if include_abstract:
-            cols += ", abstract"
-        with psycopg.connect(settings.pg_conninfo) as conn, conn.cursor() as cur:
-            cur.execute(
-                f"SELECT {cols} FROM works WHERE work_id_int = ANY(%s)",
-                (list(work_ids),),
-            )
-            result = {}
-            for row in cur.fetchall():
-                entry = {"title": row[1], "pub_year": row[2], "cited_by_count": row[3]}
-                if include_abstract:
-                    entry["abstract"] = row[4] or ""
-                result[row[0]] = entry
-            return result
-    except Exception:
-        return {}
+    console.print(table)
 
 
 @app.command()
