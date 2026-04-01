@@ -169,16 +169,8 @@ impl Graph {
         self.fwd.indptr()
     }
 
-    pub(crate) fn rev_indptr(&self) -> &[u64] {
-        self.rev.indptr()
-    }
-
     pub(crate) fn fwd_indices(&self) -> &[u32] {
         self.fwd.indices()
-    }
-
-    pub(crate) fn rev_indices(&self) -> &[u32] {
-        self.rev.indices()
     }
 
     pub(crate) fn node_count(&self) -> usize {
@@ -457,15 +449,18 @@ impl Graph {
 
     // -- Full-graph algorithms --
 
-    /// PageRank via pull-based power iteration (rayon parallel).
-    fn pagerank(
+    /// Push-based Approximate Personalized PageRank (Andersen et al. 2006).
+    /// Local computation — only visits nodes near the seed. O(1/ε).
+    #[pyo3(signature = (seed, alpha=0.15, epsilon=1e-6, top_k=None))]
+    fn appr(
         &self,
         py: Python<'_>,
+        seed: i64,
         alpha: f64,
-        max_iter: usize,
-        tol: f64,
+        epsilon: f64,
+        top_k: Option<usize>,
     ) -> PyResult<Vec<(i64, f64)>> {
-        py.allow_threads(|| Ok(algo::pagerank::compute(self, alpha, max_iter, tol)))
+        py.allow_threads(|| Ok(algo::appr::compute(self, seed, alpha, epsilon, top_k)))
     }
 
     /// Weakly connected components via atomic union-find.
@@ -509,31 +504,6 @@ impl Graph {
     }
 
     // -- Subgraph methods --
-
-    /// PageRank on induced subgraph.
-    /// PageRank or Personalized PageRank on an induced subgraph.
-    /// If restart_node is given, runs PPR (teleport to that node).
-    #[pyo3(signature = (ids, alpha=0.85, max_iter=100, tol=1e-6, restart_node=None))]
-    fn subgraph_pagerank(
-        &self,
-        py: Python<'_>,
-        ids: Vec<i64>,
-        alpha: f64,
-        max_iter: usize,
-        tol: f64,
-        restart_node: Option<i64>,
-    ) -> PyResult<Vec<(i64, f64)>> {
-        py.allow_threads(|| {
-            Ok(algo::pagerank::subgraph(
-                self,
-                &ids,
-                alpha,
-                max_iter,
-                tol,
-                restart_node,
-            ))
-        })
-    }
 
     /// Brandes betweenness centrality on induced subgraph.
     fn subgraph_betweenness(
@@ -895,13 +865,13 @@ mod tests {
     }
 
     #[test]
-    fn test_subgraph_pagerank() {
+    fn test_appr() {
         let g = test_graph();
-        let pr = algo::pagerank::subgraph(&g, &[1, 2, 3], 0.85, 100, 1e-8, None);
-        assert_eq!(pr.len(), 3);
-        assert!(pr.iter().all(|&(_, s)| s > 0.0));
-        let total: f64 = pr.iter().map(|&(_, s)| s).sum();
-        assert!((total - 1.0).abs() < 0.01, "total={}", total);
+        let result = algo::appr::compute(&g, 1, 0.15, 1e-8, None);
+        assert!(!result.is_empty());
+        assert!(result.iter().all(|&(_, s)| s > 0.0));
+        // seed should have highest score
+        assert_eq!(result[0].0, 1);
     }
 
     #[test]
@@ -933,13 +903,10 @@ mod tests {
     }
 
     #[test]
-    fn test_pagerank() {
+    fn test_appr_top_k() {
         let g = test_graph();
-        let pr = algo::pagerank::compute(&g, 0.85, 100, 1e-8);
-        assert_eq!(pr.len(), 5);
-        assert!(pr.iter().all(|&(_, s)| s > 0.0));
-        let total: f64 = pr.iter().map(|&(_, s)| s).sum();
-        assert!((total - 1.0).abs() < 0.01, "total={}", total);
+        let result = algo::appr::compute(&g, 1, 0.15, 1e-8, Some(2));
+        assert!(result.len() <= 2);
     }
 
     // -- Helpers for tests (avoid PyO3 `py` parameter) --
