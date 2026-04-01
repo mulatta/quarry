@@ -1,16 +1,39 @@
-//! `expand`: APPR + AA-weighted coupling/cocitation + wRRF fusion.
+//! `expand`: APPR + AA-weighted coupling/cocitation fusion.
 //!
-//! Core entry point for subgraph mining. Takes a seed paper, computes
-//! three structural signals, and fuses them into a single ranked list.
+//! Core entry point for subgraph mining. Two modes:
+//! - **fused**: wRRF merges all candidates into a single ranked list.
+//!   Better for focused exploration (specific follow-up experiments).
+//! - **separated**: APPR fills structural slots, coupling/cocitation fills
+//!   guaranteed lateral slots. Better for broad surveys (review writing).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::algo::appr;
 use crate::graph::Graph;
 
+/// Expansion mode.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// wRRF: all candidates compete in a single pool.
+    Fused,
+    /// APPR top-N + lateral top-M (guaranteed lateral slots).
+    Separated,
+}
+
+/// Parameters for expand operation.
+pub struct ExpandParams {
+    pub alpha: f64,
+    pub epsilon: f64,
+    pub mode: Mode,
+    pub weights: [f64; 3],
+    pub rrf_k: usize,
+    pub lateral_pct: usize,
+    pub limit: usize,
+}
+
 /// Result of expand operation.
 pub struct ExpandResult {
-    /// (work_id, fused_score) sorted by fused_score descending.
+    /// (work_id, score) sorted descending.
     pub papers: Vec<(i64, f64)>,
     pub stats: ExpandStats,
 }
@@ -22,32 +45,13 @@ pub struct ExpandStats {
     pub elapsed_ms: u64,
 }
 
-/// Run subgraph expansion: APPR + AA coupling + AA cocitation + wRRF.
-///
-/// `weights`: [appr, coupling, cocitation] — wRRF signal weights.
-/// `rrf_k`: smoothing constant for RRF (typically 60).
-/// `limit`: max results returned.
-pub fn compute(
-    graph: &Graph,
-    seed: i64,
-    alpha: f64,
-    epsilon: f64,
-    weights: [f64; 3],
-    rrf_k: usize,
-    limit: usize,
-) -> ExpandResult {
+/// Run subgraph expansion.
+pub fn compute(graph: &Graph, seed: i64, params: &ExpandParams) -> ExpandResult {
+    let ExpandParams { alpha, epsilon, mode, weights, rrf_k, lateral_pct, limit } = *params;
     let start = std::time::Instant::now();
 
     let Some(seed_idx) = graph.resolve(seed) else {
-        return ExpandResult {
-            papers: vec![],
-            stats: ExpandStats {
-                appr_candidates: 0,
-                coupling_candidates: 0,
-                cocitation_candidates: 0,
-                elapsed_ms: 0,
-            },
-        };
+        return empty_result();
     };
 
     // 1. APPR
@@ -62,20 +66,33 @@ pub fn compute(
     let cocitation_results = cocitation_aa(graph, seed_idx);
     let cocitation_count = cocitation_results.len();
 
-    // 4. wRRF fusion
-    let fused = wrrf_fuse(
-        &appr_results,
-        &coupling_results,
-        &cocitation_results,
-        weights,
-        rrf_k,
-        seed,
-    );
-
-    // 5. Sort and truncate
-    let mut papers: Vec<(i64, f64)> = fused.into_iter().collect();
-    papers.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    papers.truncate(limit);
+    // 4. Fuse based on mode
+    let papers = match mode {
+        Mode::Fused => {
+            let fused = wrrf_fuse(
+                &appr_results,
+                &coupling_results,
+                &cocitation_results,
+                weights,
+                rrf_k,
+                seed,
+            );
+            let mut v: Vec<(i64, f64)> = fused.into_iter().collect();
+            v.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            v.truncate(limit);
+            v
+        }
+        Mode::Separated => separated_fuse(
+            &appr_results,
+            &coupling_results,
+            &cocitation_results,
+            seed,
+            seed_idx,
+            graph,
+            lateral_pct,
+            limit,
+        ),
+    };
 
     let elapsed_ms = start.elapsed().as_millis() as u64;
 
@@ -88,6 +105,76 @@ pub fn compute(
             elapsed_ms,
         },
     }
+}
+
+fn empty_result() -> ExpandResult {
+    ExpandResult {
+        papers: vec![],
+        stats: ExpandStats {
+            appr_candidates: 0,
+            coupling_candidates: 0,
+            cocitation_candidates: 0,
+            elapsed_ms: 0,
+        },
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+/// Separated fusion: APPR fills structural slots, coupling/cocitation fills lateral slots.
+///
+/// Lateral = papers NOT in seed's direct references or citers AND not in APPR top.
+/// This guarantees lateral discovery even when APPR dominates.
+fn separated_fuse(
+    appr: &[(i64, f64)],
+    coupling: &[(i64, f64)],
+    cocitation: &[(i64, f64)],
+    seed: i64,
+    seed_idx: u32,
+    graph: &Graph,
+    lateral_pct: usize,
+    limit: usize,
+) -> Vec<(i64, f64)> {
+    let lateral_slots = limit * lateral_pct / 100;
+    let structural_slots = limit - lateral_slots;
+
+    // Seed's direct neighbors (refs + citers)
+    let refs: HashSet<u32> = graph.fwd_neighbors(seed_idx).iter().copied().collect();
+    let citers: HashSet<u32> = graph.rev_neighbors(seed_idx).iter().copied().collect();
+
+    // Structural: APPR top-N (excluding seed)
+    let mut structural: Vec<(i64, f64)> = Vec::with_capacity(structural_slots);
+    let mut structural_ids: HashSet<i64> = HashSet::new();
+    for &(id, score) in appr {
+        if id == seed {
+            continue;
+        }
+        structural.push((id, score));
+        structural_ids.insert(id);
+        if structural.len() >= structural_slots {
+            break;
+        }
+    }
+
+    // Lateral: coupling/cocitation candidates NOT in refs, citers, or structural top
+    let mut lateral_scores: HashMap<i64, f64> = HashMap::new();
+    for &(id, score) in coupling.iter().chain(cocitation.iter()) {
+        if id == seed || structural_ids.contains(&id) {
+            continue;
+        }
+        if let Some(idx) = graph.resolve(id)
+            && (refs.contains(&idx) || citers.contains(&idx))
+        {
+            continue;
+        }
+        *lateral_scores.entry(id).or_insert(0.0) += score;
+    }
+
+    let mut laterals: Vec<(i64, f64)> = lateral_scores.into_iter().collect();
+    laterals.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    laterals.truncate(lateral_slots);
+
+    structural.extend(laterals);
+    structural
 }
 
 /// Adamic-Adar weighted bibliographic coupling with cosine normalization.
@@ -290,7 +377,18 @@ fn wrrf_fuse(
 mod tests {
     use super::*;
 
-    // Reuse test graph builder from appr tests
+    fn params(mode: Mode, limit: usize) -> ExpandParams {
+        ExpandParams {
+            alpha: 0.15,
+            epsilon: 1e-8,
+            mode,
+            weights: [0.5, 0.25, 0.25],
+            rrf_k: 60,
+            lateral_pct: 25,
+            limit,
+        }
+    }
+
     fn write_test_graph(dir: &std::path::Path, n: usize, ids: &[i64], edges: &[(u32, u32)]) {
         std::fs::write(
             dir.join("meta.json"),
@@ -384,9 +482,9 @@ mod tests {
     }
 
     #[test]
-    fn expand_excludes_seed() {
+    fn fused_excludes_seed() {
         let (_dir, graph) = test_expand_graph();
-        let result = compute(&graph, 100, 0.15, 1e-8, [0.5, 0.25, 0.25], 60, 100);
+        let result = compute(&graph, 100, &params(Mode::Fused, 100));
         assert!(
             result.papers.iter().all(|&(id, _)| id != 100),
             "seed should not appear in results"
@@ -394,24 +492,24 @@ mod tests {
     }
 
     #[test]
-    fn expand_returns_candidates() {
+    fn fused_returns_candidates() {
         let (_dir, graph) = test_expand_graph();
-        let result = compute(&graph, 100, 0.15, 1e-8, [0.5, 0.25, 0.25], 60, 100);
+        let result = compute(&graph, 100, &params(Mode::Fused, 100));
         assert!(!result.papers.is_empty(), "expand should return candidates");
         assert!(result.stats.appr_candidates > 0);
     }
 
     #[test]
-    fn expand_limit_works() {
+    fn fused_limit_works() {
         let (_dir, graph) = test_expand_graph();
-        let result = compute(&graph, 100, 0.15, 1e-8, [0.5, 0.25, 0.25], 60, 2);
+        let result = compute(&graph, 100, &params(Mode::Fused, 2));
         assert!(result.papers.len() <= 2);
     }
 
     #[test]
-    fn expand_sorted_descending() {
+    fn fused_sorted_descending() {
         let (_dir, graph) = test_expand_graph();
-        let result = compute(&graph, 100, 0.15, 1e-8, [0.5, 0.25, 0.25], 60, 100);
+        let result = compute(&graph, 100, &params(Mode::Fused, 100));
         for w in result.papers.windows(2) {
             assert!(
                 w[0].1 >= w[1].1,
@@ -420,6 +518,23 @@ mod tests {
                 w[1].1
             );
         }
+    }
+
+    #[test]
+    fn separated_excludes_seed() {
+        let (_dir, graph) = test_expand_graph();
+        let result = compute(&graph, 100, &params(Mode::Separated, 100));
+        assert!(
+            result.papers.iter().all(|&(id, _)| id != 100),
+            "seed should not appear in separated results"
+        );
+    }
+
+    #[test]
+    fn separated_returns_candidates() {
+        let (_dir, graph) = test_expand_graph();
+        let result = compute(&graph, 100, &params(Mode::Separated, 100));
+        assert!(!result.papers.is_empty(), "separated should return candidates");
     }
 
     #[test]
@@ -483,9 +598,16 @@ mod tests {
     }
 
     #[test]
-    fn expand_unknown_seed_returns_empty() {
+    fn fused_unknown_seed_returns_empty() {
         let (_dir, graph) = test_expand_graph();
-        let result = compute(&graph, 999, 0.15, 1e-8, [0.5, 0.25, 0.25], 60, 100);
+        let result = compute(&graph, 999, &params(Mode::Fused, 100));
+        assert!(result.papers.is_empty());
+    }
+
+    #[test]
+    fn separated_unknown_seed_returns_empty() {
+        let (_dir, graph) = test_expand_graph();
+        let result = compute(&graph, 999, &params(Mode::Separated, 100));
         assert!(result.papers.is_empty());
     }
 }

@@ -12,6 +12,9 @@ use pyo3::prelude::*;
 use crate::algo;
 use crate::pattern;
 
+/// Return type for expand(): (papers, stats).
+type ExpandReturn = (Vec<(i64, f64)>, HashMap<String, u64>);
+
 /// Validate direction string, returning an error for invalid values.
 fn validate_direction(direction: &str) -> PyResult<()> {
     match direction {
@@ -463,27 +466,41 @@ impl Graph {
         py.allow_threads(|| Ok(algo::appr::compute(self, seed, alpha, epsilon, top_k)))
     }
 
-    /// Subgraph expansion: APPR + AA coupling + AA cocitation + wRRF fusion.
-    /// Returns (papers, stats) where papers is [(work_id, fused_score)].
-    #[pyo3(signature = (seed, alpha=0.15, epsilon=1e-6, weights=(0.5, 0.25, 0.25), rrf_k=60, limit=200))]
+    /// Subgraph expansion: APPR + AA coupling + AA cocitation.
+    /// mode: "fused" (wRRF, focused) or "separated" (APPR + lateral slots, broad).
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (seed, alpha=0.15, epsilon=1e-6, mode="fused", weights=(0.7, 0.15, 0.15), rrf_k=60, lateral_pct=25, limit=200))]
     fn expand(
         &self,
         py: Python<'_>,
         seed: i64,
         alpha: f64,
         epsilon: f64,
+        mode: &str,
         weights: (f64, f64, f64),
         rrf_k: usize,
+        lateral_pct: usize,
         limit: usize,
-    ) -> PyResult<(Vec<(i64, f64)>, HashMap<String, u64>)> {
-        let w = [weights.0, weights.1, weights.2];
+    ) -> PyResult<ExpandReturn> {
+        let m = match mode {
+            "fused" => algo::expand::Mode::Fused,
+            "separated" => algo::expand::Mode::Separated,
+            _ => return Err(pyo3::exceptions::PyValueError::new_err(
+                format!("invalid mode '{}': must be 'fused' or 'separated'", mode),
+            )),
+        };
+        let params = algo::expand::ExpandParams {
+            alpha, epsilon, mode: m,
+            weights: [weights.0, weights.1, weights.2],
+            rrf_k, lateral_pct, limit,
+        };
         py.allow_threads(|| {
-            let result = algo::expand::compute(self, seed, alpha, epsilon, w, rrf_k, limit);
+            let result = algo::expand::compute(self, seed, &params);
             let mut stats = HashMap::new();
-            stats.insert("appr_candidates".to_string(), result.stats.appr_candidates as u64);
-            stats.insert("coupling_candidates".to_string(), result.stats.coupling_candidates as u64);
-            stats.insert("cocitation_candidates".to_string(), result.stats.cocitation_candidates as u64);
-            stats.insert("elapsed_ms".to_string(), result.stats.elapsed_ms);
+            stats.insert("appr_candidates".into(), result.stats.appr_candidates as u64);
+            stats.insert("coupling_candidates".into(), result.stats.coupling_candidates as u64);
+            stats.insert("cocitation_candidates".into(), result.stats.cocitation_candidates as u64);
+            stats.insert("elapsed_ms".into(), result.stats.elapsed_ms);
             Ok((result.papers, stats))
         })
     }
