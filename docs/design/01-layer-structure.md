@@ -4,96 +4,80 @@
 
 ## Data Source
 
-- CSR graph: 181M nodes, 3B edges (mmap, quarry-graph Rust)
+- CSR graph: 182M nodes, 3.77B edges (mmap, quarry-graph Rust)
 - Forward (outgoing references) + Reverse (incoming citations)
+- OA + iCite merged (iCite added 746M edges for PubMed papers)
 
 ## L0 Atomic Operations
 
-### PPR (Personalized PageRank)
+### APPR (Approximate Personalized PageRank)
 
-- **Input**: seed node, candidate set, α (teleport probability)
-- **Output**: {node_id: ppr_score} for each candidate
-- **Property**: random walk with restart at seed — score decays with graph distance
-- **Hub handling**: restart brings walker back to seed, suppressing hub scores
-- **Dangling nodes**: 50.5% of nodes have zero out-degree → walk restarts at seed (reinforces locality)
-- **Implementation**: modify existing `subgraph_pagerank` in Rust with `restart_node` parameter
-- **Complexity**: O(E/ε) with push-based approximation
-- **Open**: optimal α for citation networks (literature suggests 0.15-0.25, vs 0.85 for web)
+- **Input**: seed node, α (teleport), ε (precision)
+- **Output**: sparse {node_id: ppr_score} — only touched nodes
+- **Property**: push-based local computation on full CSR, O(1/ε)
+- **Hub handling**: high-degree nodes dilute push mass across neighbors
+- **Implementation**: `algo/appr.rs` — replaces power iteration `subgraph_pagerank`
+- **Default**: α=0.15, ε=1e-6
+- **Verified**: PET paper → 2,366 nodes in 1.45s, all top 20 on-topic
 
-### Bibliographic Coupling
+### Bibliographic Coupling (Adamic-Adar weighted, cosine normalized)
 
-- **Input**: seed node, candidate set
-- **Output**: {node_id: shared_reference_count}
-- **Property**: papers sharing references with seed — citation-path-independent
-- **Strength**: discovers related papers even without direct/indirect citation link
-- **Implementation**: existing `bibcoupling.rs`
-- **Complexity**: O(d_seed × d_candidate) per pair
+- **Input**: seed node
+- **Output**: {node_id: coupling_score}
+- **Scoring**: shared references weighted by 1/log(indegree) — niche references
+  count more than popular ones. Cosine-normalized to remove reference list size bias.
+  ```
+  raw(A,B) = Σ_{r ∈ refs(A) ∩ refs(B)} 1/log(indegree(r))
+  score(A,B) = raw(A,B) / √(self_weight(A) × self_weight(B))
+  ```
+- **Property**: discovers related papers even without direct citation link
+- **Implementation**: existing `bibcoupling.rs` (raw count) → upgrade to AA+cosine
+- **Complexity**: O(d_seed) for seed-centric computation
 
-### Co-citation
+### Co-citation (Adamic-Adar weighted, cosine normalized)
 
-- **Input**: seed node, candidate set
-- **Output**: {node_id: co_citation_count}
-- **Property**: papers cited alongside seed by third papers
-- **Strength**: captures community perception ("these papers go together")
-- **Implementation**: existing `co_citation.rs`
-- **Complexity**: O(d_seed × d_candidate) per pair
+- **Input**: seed node
+- **Output**: {node_id: cocitation_score}
+- **Scoring**: papers co-cited with seed, weighted by 1/log(outdegree) of the
+  citer — niche citers count more than review papers. Cosine-normalized.
+  ```
+  raw(A,B) = Σ_{c ∈ citers(A) ∩ citers(B)} 1/log(outdegree(c))
+  score(A,B) = raw(A,B) / √(self_weight(A) × self_weight(B))
+  ```
+- **Property**: captures community perception ("these papers go together")
+- **Implementation**: existing `co_citation.rs` (raw count) → upgrade to AA+cosine
+- **Complexity**: O(d_seed) for seed-centric computation
 
-### Adamic-Adar (future, Phase 4)
+### Note on Adamic-Adar
 
-- **Input**: seed, candidate
-- **Output**: score = Σ 1/log(degree(common_neighbor))
-- **Property**: common neighbors weighted by their rarity — niche connections > hub connections
-- **Use**: missing edge prediction / link prediction
-- **Status**: not implemented
+Originally planned as a separate L0 operation. Now incorporated as the
+weighting scheme for coupling and co-citation in Phase 1b — not a separate
+signal but a quality improvement to existing signals. This avoids redundant computation
+and keeps the signal count manageable.
 
-## L1 Aggregation
+## L1 Aggregation: wRRF
 
-How to combine PPR, coupling, co-citation into one Structure score:
+Three signals → one Structure score via weighted RRF:
 
-**Option A**: Mini-RRF within layer
 ```
-structure_rank(paper) = 1/(k+rank_ppr) + 1/(k+rank_coupling) + 1/(k+rank_cocite)
+structure_score(paper) = w_appr/(k + rank_appr) + w_coup/(k + rank_coup) + w_cocite/(k + rank_cocite)
+
+defaults: w_appr=0.5, w_coup=0.25, w_cocite=0.25, k=60
 ```
 
-**Option B**: PPR as primary, coupling/cocite as additive boost
-```
-structure_score(paper) = ppr_score + λ·norm(coupling) + μ·norm(cocite)
-```
+APPR gets higher weight because it captures global graph proximity
+(multi-hop paths), while coupling/cocitation are local (1-2 hop derived).
 
-**Decision**: TBD. Prototype both, evaluate on test cases.
+This fusion happens in Rust (`expand` function), not Python.
 
 ## Current State
 
-- [x] PPR implemented and verified (Rust, `restart_node` parameter)
-- [x] CSR: 182M nodes, 3.77B edges (OA + iCite merged)
-- [x] Bib coupling + co-citation: Rust code exists, not yet wired into pipeline
-- [ ] Iterative expansion: designed, not implemented
-- [ ] L1 aggregation: TBD
-
-### Verified PPR Results (N-glycosylation test paper)
-
-PPR (α=0.2) on 2-hop pool (5000 nodes):
-- Hub suppression: Laemmli 1970 (c:250K) dropped from PR #8 to PPR outside top 20
-- Topic relevance: IL6, glycosylation, SRC-YAP-SOX2 papers surfaced in top 20
-- Off-topic: GSEA (#3), PGC-1α (#6) — need coupling/MeSH to filter
-
-### Open Issues for Discussion
-
-1. **α tuning**: α=0.2 gives seed=0.805, #2=0.003 (268× ratio). Too concentrated?
-   - Lower α (0.1) = even more concentrated on seed
-   - Higher α (0.5) = wider exploration, but hub papers return
-   - Adaptive α based on seed's citation structure?
-
-2. **Seed exclusion**: Should seed be excluded from ranking? It's always #1 by far.
-   Showing it wastes a slot. But omitting changes score distribution.
-
-3. **Off-topic via structure alone**: GSEA/PGC-1α are highly cited → many paths pass
-   through them. PPR alone can't distinguish "methodological tool" from "topically related".
-   Coupling/cocite may help: seed doesn't share references with GSEA.
-
-4. **Pool boundary effects**: Fixed 2-hop, max 5000 → arbitrary cutoff.
-   Papers at 3-hop that are highly relevant may be missed.
-   Iterative expansion addresses this but adds complexity.
+- [x] APPR: implemented and verified (`algo/appr.rs`)
+- [x] Bib coupling: Rust code exists (raw count, `pattern/bibcoupling.rs`)
+- [x] Co-citation: Rust code exists (raw count, `pattern/co_citation.rs`)
+- [ ] AA weighting + cosine normalization for coupling/cocitation
+- [ ] wRRF fusion in Rust `expand()` function
+- [ ] Seed exclusion in `expand()` output
 
 ## Known Data Issues
 

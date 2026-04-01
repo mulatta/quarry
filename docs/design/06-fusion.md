@@ -1,11 +1,70 @@
 # Score Fusion
 
-> Combining ranked lists from multiple layers into a final ranking.
+> Combining ranked lists from multiple signals into a final ranking.
 
-## Computation Levels
+## Phase 1b: Structure Layer wRRF (Rust)
+
+Three signals fused in Rust `expand()` function:
 
 ```
-L0: Atomic operations (PPR, bib coupling, MeSH Jaccard, RCR, ...)
+fused_score(paper) = Σ  w_i / (k + rank_i(paper))
+
+signals: APPR, coupling (AA-cosine), cocitation (AA-cosine)
+defaults: w = [0.5, 0.25, 0.25], k = 60
+```
+
+### Why wRRF over alternatives
+
+| Method | Pros | Cons | Decision |
+|--------|------|------|----------|
+| **wRRF** | Scale-invariant, handles missing entries, single param k | Weight tuning needed | **Phase 1b** |
+| CombMNZ | Score-aware (uses actual values) | Requires normalization, sensitive to outliers | Compare in eval |
+| Condorcet | Theoretically sound | O(n²), minimal gain over RRF | Skip |
+| LambdaMART | Best quality | Needs labeled data | Phase 4+ if ever |
+
+### Weight Rationale
+
+- APPR (0.5): global graph proximity, captures multi-hop relevance
+- Coupling (0.25): methodology similarity via shared references
+- Co-citation (0.25): community signal via shared citers
+
+These are starting defaults. Tuning via eval protocol (reference recovery, LOO).
+
+### Handling Missing Signals
+
+If a paper appears in APPR but not in coupling/cocitation:
+- That signal simply contributes 0 to the sum
+- RRF gracefully degrades — remaining signals still produce valid ranking
+
+Papers appearing in coupling/cocitation but NOT in APPR:
+- These are "lateral" candidates — no structural proximity but bibliometric similarity
+- Included in output with only coupling/cocitation score contributing
+
+## Future Phases
+
+### Phase 2: Cross-Layer Fusion
+
+When Quality layer (RCR, APT) is added:
+
+```
+final_score(paper) = wRRF(structure_score, quality_score)
+```
+
+Or: quality as L3 reranking (reorder without adding/removing candidates).
+
+### Phase 3+: Full Multi-Layer
+
+```
+final_score(paper) = wRRF(structure, content, quality, temporal)
+```
+
+Each layer produces its own ranked list via internal aggregation,
+then cross-layer wRRF produces the final output.
+
+## Computation Levels (Full Architecture)
+
+```
+L0: Atomic operations (APPR, coupling, MeSH Jaccard, RCR, ...)
      ↓
 L1: Layer aggregation (each layer → one ranked list)
      ↓
@@ -14,67 +73,12 @@ L2: Cross-layer fusion (4 ranked lists → 1 final list)
 L3: Reranking (optional quality boost on final list)
 ```
 
-## L1: Within-Layer Aggregation
-
-Each layer may use multiple L0 operations. How to combine within a layer:
-
-### Layer 1 (Structure): PPR + coupling + co-citation
-- Option A: mini-RRF(rank_ppr, rank_coupling, rank_cocite)
-- Option B: PPR primary, coupling/cocite as additive bonus
-- Decision: TBD
-
-### Layer 2 (Content): embedding + BM25 + MeSH + topics
-- Option: RRF over available signals (skip unavailable)
-- Decision: TBD
-
-### Layer 3 (Quality): RCR + cited_by + global PR
-- Option: max(norm(RCR), norm(cited_by)) — take best available
-- Decision: TBD
-
-### Layer 4 (Temporal): recency + velocity
-- Option: weighted sum (user-controlled weights)
-- Decision: TBD
-
-## L2: Cross-Layer Fusion
-
-**RRF (Reciprocal Rank Fusion)**:
-
-```
-RRF_score(paper) = Σ_layer  1 / (k + rank_layer(paper))
-
-k = 60 (standard constant)
-```
-
-Properties:
-- Scale-invariant (uses ranks, not scores)
-- No normalization needed
-- Single parameter (k)
-- Handles missing entries (paper not ranked by a layer → no contribution)
-
-### Handling Missing Layers
-
-If a layer is unavailable (e.g., embeddings not ready):
-- Simply omit that layer from the sum
-- Remaining layers produce valid fusion
-- This is why RRF is chosen — graceful degradation
-
-## L3: Reranking
-
-Post-hoc quality adjustment on L2 output:
-
-```
-final_score(paper) = L2_rank_position × (1 + γ·norm(quality_signal))
-```
-
-Or equivalently: sort L2 top-k by (L2_rank, quality_signal) with quality as tiebreaker.
-
-**Reranking is independent of L2 fusion** — it only reorders, never adds/removes.
-
-Currently operates without embeddings. Uses RCR/cited_by_count only.
+Phase 1b implements L0 + L1 for Structure layer only.
+L2/L3 activate when additional layers are implemented.
 
 ## Open Questions
 
-- [ ] k value for RRF (60 is standard but may need tuning)
-- [ ] Whether layers should have unequal weights in RRF
+- [ ] k value for wRRF (60 is standard but may need tuning)
+- [ ] Whether CombMNZ outperforms wRRF for this workload — A/B test in eval
 - [ ] L3 reranking formula — multiplicative vs tiebreaker
 - [ ] Evaluation: how to measure fusion quality without ground truth

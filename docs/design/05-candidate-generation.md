@@ -59,7 +59,6 @@ Key properties:
 
 ## Rust API
 
-Phase 1a (current):
 ```rust
 /// Push-based Approximate Personalized PageRank on full CSR graph.
 /// Returns (node_id, score) pairs sorted by score descending.
@@ -73,12 +72,13 @@ pub fn appr(
 ) -> Vec<(i64, f64)>
 ```
 
-Python binding:
+APPR is called internally by `expand()`. Direct Python binding also available
+for debugging/testing:
 ```python
-quarry_graph.appr(seed: int, alpha: float = 0.15, epsilon: float = 1e-6) -> list[tuple[int, float]]
+graph.appr(seed, alpha=0.15, epsilon=1e-6, top_k=None) -> list[tuple[int, float]]
 ```
 
-Phase 1c (expand command): add `direction: Direction` parameter.
+Phase 2: add `direction: Direction` parameter for directional filtering.
 ```rust
 pub enum Direction { Forward, Reverse, Both }
 ```

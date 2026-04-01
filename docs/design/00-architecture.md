@@ -1,6 +1,6 @@
 # Subgraph Mining Architecture
 
-> Status: Phase 1a next. APPR implementation pending. CSR + merged citations verified.
+> Status: Phase 1a complete (APPR). Phase 1b next (expand command + fusion).
 
 ## Problem
 
@@ -27,7 +27,7 @@ Within a layer, combination method is layer-specific (e.g., score sum, max, or m
 ### L1 → L2: Layer → Fusion
 
 Four layers produce four independent ranked lists.
-Fusion combines them via RRF (Reciprocal Rank Fusion) — rank-based, scale-invariant.
+Fusion combines them via wRRF (Weighted Reciprocal Rank Fusion) — rank-based, scale-invariant.
 
 ### L2 → L3: Fusion → Reranking
 
@@ -38,7 +38,7 @@ Only modifies ordering, does not add/remove candidates.
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│                     L2: Fusion (RRF)                             │
+│                     L2: Fusion (wRRF)                            │
 │  Input: 4 ranked lists → Output: final ranked subgraph           │
 └─────┬──────────┬──────────────┬──────────────┬───────────────────┘
       │          │              │              │
@@ -46,12 +46,15 @@ Only modifies ordering, does not add/remove candidates.
  │ Layer 1 │ │ Layer 2 │ │  Layer 3  │ │   Layer 4   │
  │Structure│ │ Content │ │  Quality  │ │  Temporal   │
  │         │ │         │ │           │ │             │
- │ PPR     │ │ Embed   │ │ RCR/FCR   │ │ Recency     │
- │ Coupling│ │ BM25    │ │ PageRank  │ │ Velocity    │
- │ CoCite  │ │ MeSH    │ │ APT       │ │             │
- │ Adamic  │ │ Topics  │ │           │ │             │
+ │ APPR    │ │ Embed   │ │ RCR/FCR   │ │ Recency     │
+ │ Coupling│ │ BM25    │ │ APT       │ │ Velocity    │
+ │ CoCite  │ │ MeSH    │ │           │ │             │
  └─────────┘ └─────────┘ └───────────┘ └─────────────┘
 ```
+
+Note: Coupling and co-citation use Adamic-Adar weighting with cosine
+normalization. This replaces the previously planned separate "Adamic-Adar"
+atomic operation — the weighting is now built into coupling/cocitation scoring.
 
 ### Layer 1: Structure (citation graph topology)
 
@@ -100,8 +103,8 @@ See: [06-fusion.md](06-fusion.md)
 
 ## expand Command
 
-CLI entry point for subgraph mining. Single/multi-seed, direction filtering,
-relation tagging, RRF fusion. See: [08-expand-command.md](08-expand-command.md)
+CLI entry point for subgraph mining. Core logic in Rust (`expand` function),
+Python CLI is a thin wrapper. See: [08-expand-command.md](08-expand-command.md)
 
 ## Evaluation
 
@@ -120,14 +123,13 @@ leave-one-out, symmetry, expert judgment. See: [09-evaluation.md](09-evaluation.
 
 ## Implementation Roadmap
 
-| Phase | Layers                        | Fusion                          | Status                                                |
-| ----- | ----------------------------- | ------------------------------- | ----------------------------------------------------- |
-| 1a    | Structure (APPR)              | —                               | **Next** — APPR replaces power iteration PPR          |
-| 1b    | + coupling + cocite           | RRF(3 signals)                  | After APPR                                            |
-| 1c    | expand CLI command            | RRF + direction filtering       | After fusion                                          |
-| 2     | + Quality (RCR rerank) + HKPR | RRF(4+ signals) + rerank        | HKPR builds on APPR push framework                    |
-| 3     | + Content (embedding, BM25)   | RRF(6+ signals)                 | After embeddings                                      |
-| 4     | + Temporal + Adamic-Adar      | Full RRF + empirical param tune | Long-term                                             |
+| Phase | Scope                            | Fusion                          | Status                                    |
+| ----- | -------------------------------- | ------------------------------- | ----------------------------------------- |
+| 1a    | APPR (push-based)                | —                               | **Done** — 1.45s, 2366 candidates, verified |
+| 1b    | expand CLI + coupling + cocite   | wRRF(3 signals) in Rust         | **Next**                                  |
+| 2     | + Quality (RCR rerank) + HKPR    | wRRF(4+ signals) + rerank       | HKPR builds on APPR push framework        |
+| 3     | + Content (embedding, BM25)      | wRRF(6+ signals)                | After embeddings                          |
+| 4     | + Temporal + recency factor      | Full wRRF + empirical param tune | Long-term                                 |
 
 Each phase is additive — previous interfaces are stable.
 
@@ -137,18 +139,19 @@ Implemented:
 
 - [x] iCite citation merge (OA ∪ iCite, +746M edges)
 - [x] CSR build from Parquet (no CSV, peak ~77GB, 182M nodes / 3.77B edges)
-- [x] PPR prototype verified: hub suppression, topic relevance confirmed
+- [x] APPR in Rust (push-based, O(1/ε), bidirectional)
+- [x] Bib coupling + co-citation in Rust (raw count)
 - [x] k_hop for simple neighbor lookup
 
-To be replaced:
+Verified (PET depolymerase paper, Seo 2025):
+- APPR: 2,366 nodes scored in 1.45s
+- Top 20: all PET enzyme papers, no off-topic
+- Seed score: 44.1% of total (improved from 80.5% in power iteration)
+- Hub suppression: working (no generic high-citation papers in top results)
 
-- [ ] Power iteration PPR (`subgraph_pagerank`) → APPR (Phase 1a)
-- [ ] Fixed 2-hop BFS pool → APPR natural boundary (Phase 1a)
+Deleted:
+- [x] `pagerank::compute` (full-graph PR)
+- [x] `pagerank::subgraph` (subgraph PPR via power iteration)
+- [x] Python `subgraph_pagerank` binding
 
-Issues APPR addresses:
-
-- Seed score dominance → APPR's local push distributes mass more naturally
-- Off-topic via hub edges → APPR dilutes hub mass across many neighbors
-- Single signal → RRF fusion (Phase 1b, after APPR)
-
-Next: implement `appr()` in Rust, delete `pagerank::compute` and `pagerank::subgraph`.
+Next: Rust `expand()` function with AA-weighted coupling/cocitation + wRRF + CLI.
