@@ -55,6 +55,13 @@ quarry expand W4406019873
 # direction=both, focus=all, limit=200, sort=fused, format=table
 ```
 
+### Seed Exclusion
+
+Seed papers are always excluded from the output. APPR returns seed as top-1
+(highest score by definition), but expand filters it out before ranking/output.
+This is handled in the expand command (Python), not in Rust — the APPR API
+returns the raw algorithm result including seed.
+
 ## Output Structure
 
 ```json
