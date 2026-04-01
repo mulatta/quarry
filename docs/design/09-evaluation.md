@@ -96,7 +96,109 @@ If overlap is high → signals are redundant → fusion adds little value
 If PPR_only is large → coupling/cocite miss important papers
 ```
 
-### 7. Temporal Consistency
+### 7. External Baseline Comparison (OpenAlex / Semantic Scholar)
+
+Compare expand results against production recommendation systems as baselines.
+
+#### 7a. OpenAlex Related Works API
+
+```
+GET https://api.openalex.org/works/{id}/related_works
+```
+
+Returns ~10 related works per paper. Uses citation-based similarity.
+Low volume but freely accessible.
+
+```
+For each eval seed:
+  oa_related = openalex.related_works(seed_doi)
+  expand_top = expand(seed, limit=200)
+
+  # Overlap: how many OA-recommended papers does expand find?
+  overlap = oa_related ∩ expand_top
+  oa_coverage = |overlap| / |oa_related|
+
+  # Disagreement analysis: papers OA recommends but expand misses
+  oa_only = oa_related - expand_top
+  # → Are these genuinely related? Or OA noise?
+
+  # Papers expand finds but OA doesn't (expand's added value)
+  expand_only = expand_top[:10] - oa_related
+```
+
+**Purpose**: OA uses a different algorithm (likely co-citation/coupling based).
+If expand finds OA's recommendations AND more, that's evidence of quality.
+If expand misses OA's core recommendations, investigate why.
+
+#### 7b. Semantic Scholar Related Papers API
+
+```
+GET https://api.semanticscholar.org/graph/v1/paper/{id}/recommendations
+```
+
+Returns up to 500 recommended papers. Uses SPECTER embeddings + citation
+graph features + LTR reranking — significantly more sophisticated than our
+structure-only approach.
+
+```
+For each eval seed:
+  s2_recs = semantic_scholar.recommendations(seed_doi, limit=500)
+  expand_top = expand(seed, limit=200)
+
+  # Tier analysis: how well does expand cover S2's top tiers?
+  s2_top10  = s2_recs[:10]
+  s2_top50  = s2_recs[:50]
+  s2_top200 = s2_recs[:200]
+
+  coverage_10  = |expand_top ∩ s2_top10|  / 10
+  coverage_50  = |expand_top ∩ s2_top50|  / 50
+  coverage_200 = |expand_top ∩ s2_top200| / 200
+
+  # Rank correlation: for papers in both, do rankings agree?
+  common = expand_top ∩ s2_top200
+  τ = kendall_tau(expand_ranks[common], s2_ranks[common])
+```
+
+**Purpose**: S2 is the strongest freely available baseline. It uses
+embeddings (content signal) that we don't have yet in Phase 1.
+
+- **High coverage of S2 top-10**: our structure-only approach captures
+  the most important related papers even without embeddings.
+- **Low rank correlation**: expected — different signals produce different
+  orderings. Not a problem if both orderings are valid.
+- **S2-only papers**: likely content-similar but structurally distant.
+  These are the papers our Phase 3 (embedding layer) should capture.
+
+#### 7c. Baseline Comparison Protocol
+
+```python
+EXTERNAL_BASELINES = {
+    "openalex": fetch_oa_related,       # ~10 papers, citation-based
+    "semantic_scholar": fetch_s2_recs,   # ~500 papers, embedding+citation+LTR
+}
+
+for seed in EVAL_SEEDS:
+    expand_results = expand(seed, limit=200)
+    for name, fetch_fn in EXTERNAL_BASELINES.items():
+        baseline = fetch_fn(seed)
+        report(
+            seed=seed,
+            baseline=name,
+            overlap=len(set(expand_results) & set(baseline)),
+            baseline_coverage=overlap / len(baseline),
+            expand_unique=len(set(expand_results) - set(baseline)),
+            baseline_unique=len(set(baseline) - set(expand_results)),
+        )
+```
+
+**Rate limits**: OA: 10 req/s (polite pool), S2: 100 req/5min.
+Cache responses per seed to avoid repeated API calls during sweeps.
+
+**When to run**: After major algorithm changes (not every parameter tweak).
+Results provide context for internal metrics — if reference recovery drops
+but S2 coverage improves, the change may still be positive.
+
+### 8. Temporal Consistency
 
 ```
 Run expand(seed) on CSR built from:
@@ -132,16 +234,23 @@ for seed in EVAL_SEEDS:
         log(seed, algo, ref_recall_50, ref_recall_200, loo_recovery, symmetry)
 ```
 
-### Phase 2: Expert (once per major algorithm change)
+### Phase 2: External baselines (after major algorithm changes)
+
+- Run Method 7 (OA + S2 comparison) for all eval seeds
+- Cache API responses to avoid rate limits
+- Determines whether structure-only approach is competitive
+
+### Phase 3: Expert (once per major algorithm change)
 
 - 2-3 seeds, top 50 results
 - Manual relevant/noise labels
 - Compare precision across algorithms
 
-### Phase 3: Signal analysis (once)
+### Phase 4: Signal analysis (once per new signal addition)
 
 - Measure overlap/complementarity of PPR, coupling, cocite
 - Determine if RRF adds value over single signal
+- Baseline: current sweep shows APPR-only ≥ all fusion configs on reference recovery
 
 ## Seed Selection Criteria for Evaluation
 
@@ -162,5 +271,7 @@ Diverse set covering:
 | recall@200 (reference recovery) | >0.5    | >0.7 |
 | LOO recovery rate               | >0.3    | >0.5 |
 | symmetry rate                   | >0.5    | >0.7 |
+| S2 top-10 coverage              | >0.3    | >0.6 |
+| OA related coverage             | >0.5    | >0.8 |
 | noise rate (expert)             | <0.2    | <0.1 |
 | elapsed time                    | <5s     | <2s  |
