@@ -1,6 +1,6 @@
 # Subgraph Mining Architecture
 
-> Status: Phase 1b active. APPR + expand(fused/separated) + CLI implemented.
+> Status: Phase 1b complete. Phase 2 planning.
 
 ## Problem
 
@@ -125,7 +125,7 @@ leave-one-out, symmetry, expert judgment. See: [09-evaluation.md](09-evaluation.
 | Phase | Scope | Status |
 | ----- | ----- | ------ |
 | 1a | APPR (push-based) | **Done** |
-| 1b | expand(fused/separated) + AA coupling/cocite + wRRF + CLI | **Active** — bridge + schema finalization remaining |
+| 1b | expand(fused/separated) + AA coupling/cocite + wRRF + CLI | **Done** |
 | 2 | Direction filtering + HKPR | |
 | 3 | Content (embedding, BM25) + embedding bridge reranking (**critical**) | After embeddings |
 | 4 | Temporal + multi-seed | Long-term |
@@ -143,15 +143,16 @@ Implemented:
 - [x] expand() — dual modes (fused wRRF + separated with lateral slots)
 - [x] AA-weighted cosine-normalized coupling/cocitation
 - [x] CLI: `quarry expand` with DOI/W-prefix input, rich table + JSON output
-- [x] Regression tests: 31 tests across 3 seeds
+- [x] Regression tests: 35 tests across 3 seeds
 - [x] PG index: idx_works_work_id_int (53s → 9ms lookup)
+- [x] Bridge collection (pass 2, lazy) for lateral papers — SharedRef + SharedCiter with AA weight
+- [x] Quality metadata enrichment (cnp, fwci, rcr, cited_by) — metadata only (AD-2)
+- [x] Output schema finalized (see 08-expand-command.md)
+- [x] Weighted APPR evaluation: cnp/fwci post-hoc weighting tested, rejected (AD-2 confirmed)
 
 Verified (5 seeds: PET, base editing, PLM, glycosylase BE, aptamer):
 - All top-20 on-topic across all seeds (PMC abstract verified)
 - Lateral papers all relevant (0 noise across 5 seeds)
 - wRRF w=0.7/0.15/0.15 preserves ref recovery while adding laterals
-
-Remaining Phase 1b:
-- [ ] Bridge collection (pass 2, lazy) for lateral papers
-- [ ] Quality metadata enrichment (cnp, fwci, rcr, cited_by)
-- [ ] Output schema finalization (see 08-expand-command.md)
+- cnp weighting: promotes established papers, penalizes preprints (NULL) — inappropriate
+- fwci weighting: promotes bioinformatics tools over seed-specific papers — inappropriate

@@ -1,6 +1,6 @@
 # quarry expand — Command Design
 
-> Status: Phase 1b implemented. Schema finalization in progress.
+> Status: Phase 1b complete.
 
 ## Definition
 
