@@ -175,6 +175,7 @@ CREATE TABLE IF NOT EXISTS id_crosswalk (
     pmid    INTEGER NOT NULL
 );
 
+CREATE INDEX IF NOT EXISTS idx_works_work_id_int ON works(work_id_int);
 CREATE INDEX IF NOT EXISTS idx_works_pmid ON works(pmid);
 CREATE INDEX IF NOT EXISTS idx_works_doi ON works(doi);
 CREATE INDEX IF NOT EXISTS idx_works_tier ON works(tier);

@@ -2,67 +2,71 @@
 
 > Signal: paper importance / reliability, independent of seed relationship.
 
+## Decision: Metadata Only (No Reranking)
+
+Quality signals are **exposed as metadata in expand output**, not used for
+scoring or reranking. Reason: quarry returns complete data, downstream
+consumers (jq, SQL, agents) decide how to sort/filter.
+
+This resolves the open question "L2 fusion vs L3 reranking" — neither.
+Quality data is informational, not computational.
+
+## Available Signals — Evaluation Results
+
+Evaluated on 5 seed papers across fields (PET enzyme, base editing,
+protein language model, bioinformatics). Coverage measured on expand top-200.
+
+### Selected (included in output)
+
+| Signal | Coverage | Source | Why included |
+|--------|----------|--------|-------------|
+| **cnp** (citation_normalized_percentile) | 87-99% | OpenAlex | 0-1 range, field+year normalized, no additional normalization needed. Primary quality indicator. |
+| **fwci** (Field-Weighted Citation Impact) | 87-99% | OpenAlex | Same coverage as cnp, ρ=0.99 correlation with cnp. Included for users who prefer absolute scale. |
+| **cited_by_count** | ~100% | OpenAlex | Raw citation count. Biased (power law, not field-normalized) but universally available. Useful as fallback when cnp/fwci are NULL. |
+| **rcr** (Relative Citation Ratio) | 55-85% | iCite | PubMed-only. High quality for biomedical papers. NULL for chemistry, CS, preprints. |
+
+### Not Selected (excluded from output)
+
+| Signal | Coverage | Why excluded |
+|--------|----------|-------------|
+| **apt** (Approximate Potential to Translate) | 7.9% | Too niche — measures clinical translation probability. Only meaningful for translational medicine. Misleading for basic science. |
+| **nih_percentile** | 6.4% | NIH-funded papers only. Extreme selection bias. |
+| **fcr** (Field Citation Rate) | ~5% global | Baseline for RCR calculation. Not useful standalone — RCR already incorporates it. |
+| **Global PageRank** | Not computed | Would require full-graph iteration (~minutes). cited_by_count serves as rough proxy. |
+
+### Key Findings from Evaluation
+
+1. **fwci and cnp are essentially identical** (ρ=0.99 across all seeds).
+   cnp preferred because 0-1 range requires no normalization.
+
+2. **Preprints have no quality signals** — fwci/cnp coverage drops to 10%
+   for preprints. In ML-heavy seeds (Jiang-2025), 8% of expand results
+   are preprints with NULL quality data.
+
+3. **fwci captures landmark papers** — ESM-2 (fwci=672), Yoshida 2016
+   (fwci=51) correctly identified as field-defining. But also promotes
+   off-topic high-impact papers (e.g., PBAT degradation for PET seed).
+
+4. **fwci demotes seed-relevant niche papers** — recent method papers
+   with low citations (fwci<3) are structurally important but would be
+   deprioritized by quality reranking.
+
+5. **Conclusion**: quality signals measure "field importance" not
+   "relevance to seed". Using them for reranking would hurt precision.
+   Exposing as metadata lets users make informed judgments.
+
+## NULL Handling
+
+Quality signals with NULL are returned as `null` in JSON output.
+No imputation, no penalty, no default values. Downstream consumers
+decide how to handle missing data.
+
+Rationale: imputing (e.g., fwci=1.0 for NULL) creates false precision.
+A preprint with NULL fwci is genuinely unmeasured, not "average".
+
 ## Data Sources
 
-- iCite: 40.2M PubMed papers (RCR, FCR, APT, NIH percentile)
-- OA: cited_by_count (~100% coverage)
-- Global PageRank: precomputable from CSR graph
-
-## L0 Atomic Operations
-
-### RCR (Relative Citation Ratio)
-
-- **Input**: PMID → iCite lookup
-- **Output**: RCR score (field-normalized citation impact)
-- **Interpretation**: RCR=1.0 = field average; RCR=2.0 = 2x field average
-- **Coverage**: 29.6M / 40.2M iCite papers = 74% of PubMed
-- **Non-PubMed**: unavailable (0% of T2/T4)
-
-### FCR (Field Citation Rate)
-
-- **Input**: PMID → iCite lookup
-- **Output**: expected citation rate for the paper's field/year
-- **Use**: baseline for RCR; also useful standalone as field norm
-- **Coverage**: 33.6M / 40.2M = 84% of PubMed
-
-### APT (Approximate Potential to Translate)
-
-- **Input**: PMID → iCite lookup
-- **Output**: probability of clinical translation (0-1)
-- **Use**: biomedical relevance filter
-- **Coverage**: 21.9M iCite papers
-
-### cited_by_count
-
-- **Input**: work_id → OA works table
-- **Output**: absolute citation count
-- **Coverage**: ~100%
-- **Caveat**: highly skewed (power law), hub-biased, not field-normalized
-
-### Global PageRank (future)
-
-- **Input**: precomputed from full CSR graph
-- **Output**: global network centrality score
-- **Use**: "importance in the overall citation network"
-- **Status**: not precomputed (requires full-graph iteration, ~minutes)
-
-## Role in Pipeline
-
-**Quality is a reranking signal, not a primary ranker.**
-
-Structure (Layer 1) determines which papers are related.
-Quality determines which related papers are most impactful.
-
-```
-L2 fusion output: [A, B, C, D, E, ...]  (ranked by structural + content relevance)
-L3 reranking:     [A, C, B, D, E, ...]  (C promoted because RCR=5.0 vs B's RCR=0.8)
-```
-
-Reranking does not add or remove candidates — only reorders.
-
-## Open Questions
-
-- [ ] Should Quality participate in L2 fusion (as a ranked list) or only in L3 reranking?
-      Argument for fusion: quality is a legitimate relevance signal
-      Argument for reranking: avoids missing data bias (see 07-missing-data.md)
-- [ ] Global PageRank precomputation: worth the cost? Or cited_by_count sufficient?
+- OpenAlex (fwci, cnp, cited_by_count): 58% coverage of all 490M works.
+  Includes chemistry, CS, preprints via bioRxiv.
+- iCite (rcr): 7.4% of all works (36M PubMed papers). High quality but
+  limited to biomedical literature.
