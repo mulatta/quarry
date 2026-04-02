@@ -396,17 +396,46 @@ Distance classification (free — computed as byproduct of bridge):
 - overlap 1-10%: citation bridges + caution
 - overlap < 1%: citation bridges sparse, recommend embedding (Phase 3)
 
+## k-Scalability
+
+Type 1-2 use `seed_count ≥ 2` threshold (papers shared by any pair).
+This works well for k=2-3 but degrades at larger k:
+
+```
+k=2:  seed_count ≥ 2 → strict (only 1 pair possible)
+k=5:  seed_count ≥ 2 → C(5,2)=10 pairs → approaches union, noisy
+k=10: seed_count ≥ 2 → C(10,2)=45 pairs → essentially union
+```
+
+Type suitability by k:
+
+| Type | k=2-3 | k=5+ | Reason |
+|------|-------|------|--------|
+| common_refs/citers | ✅ | ❌ | intersection → 0, pairwise → noisy |
+| coupling/cocitation | ✅ | △ | product → 0 if any seed has no overlap |
+| path | ✅ | ❌ | C(k,2) pairwise paths explode |
+| ppr (geometric mean) | ✅ | ✅ | naturally normalizes across k |
+| steiner | ✅ (k≥3) | ✅ | designed for multi-terminal |
+
+For k ≥ 4: recommend PPR and Steiner. CLI should warn on Type 1-4
+with high k.
+
 ## Implementation Plan
 
-| Step | Scope | Cost |
-|------|-------|------|
-| 1 | Rust `bridge()` + common_refs/common_citers | Low |
-| 2 | coupling_bridges + cocitation_bridges | Low (refactor from expand) |
-| 3 | path_bridges (BFS shortest path, k-paths via Yen) | Medium |
-| 4 | ppr_bridges (per-seed APPR product) | Low (reuse APPR) |
-| 5 | steiner_bridges (KMB heuristic) | Medium |
-| 6 | Python binding + CLI | Low |
-| 7 | Quality evaluation (abstract review, 3 seed pairs) | Eval |
+| Step | Scope | Status |
+|------|-------|--------|
+| 1 | Rust `bridge()` + common_refs/common_citers | **Done** |
+| 2 | coupling_bridges + cocitation_bridges | Planned |
+| 3 | path_bridges (BFS shortest path, k-paths via Yen) | Planned |
+| 4 | ppr_bridges (per-seed APPR product) | Planned |
+| 5 | steiner_bridges (KMB heuristic) | Planned |
+| 6 | Python binding + CLI | Planned |
+| 7 | Quality evaluation (abstract review, 3 seed pairs) | Planned |
+
+Step 1 quality evaluation (KOBLAN+SICKLE, EvolvePro+MULTI-evolve,
+3 seed pairs): common_refs noise=0%, common_citers noise=0%.
+
+See `.claude/outputs/bridge_eval*.py` for scripts.
 
 ## References
 
