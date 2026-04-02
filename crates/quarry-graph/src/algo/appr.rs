@@ -27,13 +27,35 @@ pub fn compute(
     let Some(seed_idx) = graph.resolve(seed) else {
         return vec![];
     };
+    let teleport = HashMap::from([(seed_idx, 1.0)]);
+    compute_with_teleport(graph, &teleport, alpha, epsilon, top_k)
+}
+
+/// APPR with arbitrary teleport distribution (for multi-seed PPR bridges).
+///
+/// `teleport`: map from internal node index to initial mass.
+/// Sum of teleport values should be 1.0 for normalized scores.
+pub fn compute_with_teleport(
+    graph: &Graph,
+    teleport: &HashMap<u32, f64>,
+    alpha: f64,
+    epsilon: f64,
+    top_k: Option<usize>,
+) -> Vec<(i64, f64)> {
+    if teleport.is_empty() {
+        return vec![];
+    }
 
     let mut residual: HashMap<u32, f64> = HashMap::new();
     let mut estimate: HashMap<u32, f64> = HashMap::new();
     let mut queue: VecDeque<u32> = VecDeque::new();
 
-    residual.insert(seed_idx, 1.0);
-    queue.push_back(seed_idx);
+    for (&idx, &mass) in teleport {
+        if mass > 0.0 {
+            residual.insert(idx, mass);
+            queue.push_back(idx);
+        }
+    }
 
     while let Some(v) = queue.pop_front() {
         let r_v = match residual.get(&v) {
@@ -43,21 +65,17 @@ pub fn compute(
 
         let degree = total_degree(graph, v);
         if degree == 0 {
-            // dangling node: absorb all residual as estimate
             *estimate.entry(v).or_insert(0.0) += r_v;
             residual.insert(v, 0.0);
             continue;
         }
 
-        // check push condition: residual[v] / degree(v) > ε
         if r_v / degree as f64 <= epsilon {
             continue;
         }
 
-        // retain α fraction as PPR score
         *estimate.entry(v).or_insert(0.0) += alpha * r_v;
 
-        // push (1-α) fraction to neighbors
         let push_mass = (1.0 - alpha) * r_v / degree as f64;
         residual.insert(v, 0.0);
 
@@ -182,6 +200,62 @@ pub(crate) mod tests {
 
         let graph = Graph::open(graph_dir).unwrap();
         let result = compute(&graph, 999, 0.15, 1e-6, None);
+        assert!(result.is_empty());
+    }
+
+    /// Shared teleport: uniform distribution over two seeds.
+    /// Both seeds should have positive scores, and nodes between them should too.
+    ///
+    /// Graph: 0 → 1 → 2 → 3 (chain). Seeds = {0, 3} (endpoints).
+    /// With shared teleport, interior nodes (1, 2) receive mass from both ends.
+    #[test]
+    fn shared_teleport_both_seeds_scored() {
+        let dir = tempfile::tempdir().unwrap();
+        write_test_graph(dir.path(), 4, &[100, 101, 102, 103], &[(0, 1), (1, 2), (2, 3)]);
+
+        let graph = Graph::open(dir.path()).unwrap();
+        let teleport = HashMap::from([(0u32, 0.5), (3u32, 0.5)]);
+        let result = compute_with_teleport(&graph, &teleport, 0.15, 1e-8, None);
+
+        assert_eq!(result.len(), 4, "all nodes should be reached");
+        let scores: HashMap<i64, f64> = result.into_iter().collect();
+        assert!(scores[&100] > 0.0);
+        assert!(scores[&103] > 0.0);
+        // Interior nodes get mass from both ends — should be significant
+        assert!(scores[&101] > 0.0);
+        assert!(scores[&102] > 0.0);
+    }
+
+    /// Shared teleport should produce different scores than single-seed.
+    #[test]
+    fn shared_teleport_differs_from_single() {
+        let dir = tempfile::tempdir().unwrap();
+        write_test_graph(dir.path(), 4, &[100, 101, 102, 103], &[(0, 1), (1, 2), (2, 3)]);
+
+        let graph = Graph::open(dir.path()).unwrap();
+        let single = compute(&graph, 100, 0.15, 1e-8, None);
+        let teleport = HashMap::from([(0u32, 0.5), (3u32, 0.5)]);
+        let multi = compute_with_teleport(&graph, &teleport, 0.15, 1e-8, None);
+
+        let single_scores: HashMap<i64, f64> = single.into_iter().collect();
+        let multi_scores: HashMap<i64, f64> = multi.into_iter().collect();
+
+        // Node 3 (far endpoint) should score much higher with shared teleport
+        assert!(
+            multi_scores[&103] > single_scores[&103],
+            "far endpoint should score higher with shared teleport: {} > {}",
+            multi_scores[&103], single_scores[&103]
+        );
+    }
+
+    /// Empty teleport returns empty result.
+    #[test]
+    fn empty_teleport_returns_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        write_test_graph(dir.path(), 2, &[100, 101], &[(0, 1)]);
+
+        let graph = Graph::open(dir.path()).unwrap();
+        let result = compute_with_teleport(&graph, &HashMap::new(), 0.15, 1e-6, None);
         assert!(result.is_empty());
     }
 

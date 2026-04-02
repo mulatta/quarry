@@ -126,9 +126,9 @@ leave-one-out, symmetry, expert judgment. See: [09-evaluation.md](09-evaluation.
 | ----- | ----- | ------ |
 | 1a | APPR (push-based) | **Done** |
 | 1b | expand(fused/separated) + AA coupling/cocite + wRRF + CLI | **Done** |
-| 2a | Multi-seed expand (field/common/bridge modes) | Planned — [design](11-multi-seed.md) |
+| 2a | Bridge discovery (7 types: LCA, CD, coupling, cocite, path, PPR, Steiner) | Design confirmed — [design](11-bridge.md) |
 | 2b | MCP server expand tool | Planned (deferred) |
-| 3 | Content (embedding, BM25) + embedding bridge reranking + HKPR re-eval | After embeddings |
+| 3 | Content (embedding, BM25) + embedding bridge candidates + HKPR re-eval | After embeddings |
 | 4 | Temporal | Long-term |
 
 Direction-restricted APPR **rejected** — experiment showed bidirectional APPR
