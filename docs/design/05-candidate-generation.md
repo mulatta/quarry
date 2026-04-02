@@ -75,7 +75,8 @@ for debugging/testing:
 graph.appr(seed, alpha=0.15, epsilon=1e-6, top_k=None) -> list[tuple[int, float]]
 ```
 
-Phase 2: add `direction: Direction` parameter for directional filtering.
+Direction-restricted APPR was evaluated and rejected (see AD-4).
+Relation tags (foundation/follow-up/lateral) serve direction use cases.
 
 ## Verified Results
 
@@ -101,14 +102,21 @@ PET depolymerase paper (Seo 2025, α=0.15, ε=1e-6):
 - `k_hop` — kept for simple neighbor lookup (e.g., "show direct citations").
   NOT used in expansion logic. APPR handles expansion independently.
 
-## vs HKPR (Phase 2)
+## vs HKPR (deferred to Phase 3)
 
 HKPR (Heat Kernel PageRank) uses Poisson decay instead of geometric.
-Structurally resolves seed score dominance (seed contribution ~0.7% vs PPR ~20%).
-Planned as Phase 2 addition — same push framework, different decay function.
+Lower seed dominance (~10% at t=3 vs ~47% for APPR), broader exploration
+(45-82K nodes vs 1.5-2.4K). Evaluated as APPR replacement and wRRF hybrid.
+
+**Result**: HKPR promotes field landmark/origin papers (high-citation, 2-3 hop
+upstream) but displaces seed-specific niche papers. Effect is inconsistent
+across seeds. Deferred to Phase 3 — embedding similarity can filter HKPR
+candidates for relevance before fusion. See AD-5.
+
+Code retained: `algo/hkpr.rs`, `graph.hkpr()` Python binding.
 
 ## Open Questions
 
 - [ ] Optimal α for citation networks — empirical tuning via eval protocol
 - [ ] Whether ε=1e-6 gives sufficient coverage or needs adjustment
-- [ ] Direction filtering semantics for expand command (Phase 2)
+- [x] ~~Direction filtering~~ → rejected, relation tags sufficient (AD-4)

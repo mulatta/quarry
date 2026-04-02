@@ -126,9 +126,14 @@ leave-one-out, symmetry, expert judgment. See: [09-evaluation.md](09-evaluation.
 | ----- | ----- | ------ |
 | 1a | APPR (push-based) | **Done** |
 | 1b | expand(fused/separated) + AA coupling/cocite + wRRF + CLI | **Done** |
-| 2 | Direction filtering + HKPR | |
-| 3 | Content (embedding, BM25) + embedding bridge reranking (**critical**) | After embeddings |
-| 4 | Temporal + multi-seed | Long-term |
+| 2a | Multi-seed expand (field/common/bridge modes) | Planned — [design](11-multi-seed.md) |
+| 2b | MCP server expand tool | Planned (deferred) |
+| 3 | Content (embedding, BM25) + embedding bridge reranking + HKPR re-eval | After embeddings |
+| 4 | Temporal | Long-term |
+
+Direction-restricted APPR **rejected** — experiment showed bidirectional APPR
+has higher precision; direction use cases served by relation tags + limit increase.
+See [AD-4](10-architecture-decisions.md#ad-4-no-direction-restricted-appr).
 
 Quality signals (cnp, fwci, rcr) are **metadata only** — not used in fusion.
 See [03-layer-quality.md](03-layer-quality.md) for rationale.

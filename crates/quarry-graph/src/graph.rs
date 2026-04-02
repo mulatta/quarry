@@ -463,6 +463,20 @@ impl Graph {
         py.allow_threads(|| Ok(algo::appr::compute(self, seed, alpha, epsilon, top_k)))
     }
 
+    /// Heat Kernel PageRank (Kloster & Gleich 2014).
+    /// Level-based push with Poisson decay. t controls diffusion range.
+    #[pyo3(signature = (seed, t=3.0, epsilon=1e-6, top_k=None))]
+    fn hkpr(
+        &self,
+        py: Python<'_>,
+        seed: i64,
+        t: f64,
+        epsilon: f64,
+        top_k: Option<usize>,
+    ) -> PyResult<Vec<(i64, f64)>> {
+        py.allow_threads(|| Ok(algo::hkpr::compute(self, seed, t, epsilon, top_k)))
+    }
+
     /// Subgraph expansion: APPR + AA coupling + AA cocitation.
     /// mode: "fused" (wRRF, focused) or "separated" (APPR + lateral slots, broad).
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]

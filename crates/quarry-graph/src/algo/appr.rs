@@ -98,7 +98,7 @@ fn total_degree(graph: &Graph, idx: u32) -> usize {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// Linear chain: all reachable nodes get scores, further nodes get less.
@@ -186,7 +186,7 @@ mod tests {
     }
 
     /// Write a minimal CSR graph to disk for testing.
-    fn write_test_graph(dir: &std::path::Path, n: usize, ids: &[i64], edges: &[(u32, u32)]) {
+    pub(crate) fn write_test_graph(dir: &std::path::Path, n: usize, ids: &[i64], edges: &[(u32, u32)]) {
         // meta.json
         let total_edges = edges.len();
         std::fs::write(
