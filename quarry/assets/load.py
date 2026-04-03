@@ -288,7 +288,7 @@ def ch_load_pm(context: AssetExecutionContext) -> MaterializeResult:
     pm_dir = str(settings.pm_parquet_dir)
     _ch_load_tables(
         [f"pm_{t}" for t in _PM_TABLES],
-        [(f"pm_{t}", f"{pm_dir}/{t}/**/*.parquet", "Parquet") for t in _PM_TABLES],
+        [(f"pm_{t}", f"{pm_dir}/{t}/*.parquet", "Parquet") for t in _PM_TABLES],
         context,
     )
     return MaterializeResult(metadata={"status": MetadataValue.text("ok")})
