@@ -47,6 +47,9 @@ pub struct BridgeParams {
     pub alpha: f64,
     /// Type 6: APPR epsilon.
     pub epsilon: f64,
+    /// Types 3-4: skip neighbors with degree above this threshold.
+    /// High-degree nodes have low AA weight and dominate traversal cost.
+    pub max_neighbor_degree: usize,
 }
 
 impl Default for BridgeParams {
@@ -57,6 +60,7 @@ impl Default for BridgeParams {
             k_paths: 1,
             alpha: 0.15,
             epsilon: 1e-6,
+            max_neighbor_degree: 10_000,
         }
     }
 }
@@ -70,7 +74,7 @@ pub struct CommonEntry {
     pub seed_count: usize,
 }
 
-/// A paper scored by per-seed overlap product (Types 3-4, 6).
+/// A paper scored by per-seed overlap product.
 #[derive(Clone, Debug)]
 pub struct ScoredEntry {
     pub work_id: i64,
@@ -78,7 +82,7 @@ pub struct ScoredEntry {
     pub score: f64,
 }
 
-/// A node on shortest path(s) between seeds (Type 5).
+/// A node on shortest path(s) between seeds.
 #[derive(Clone, Debug)]
 pub struct PathEntry {
     pub work_id: i64,
@@ -234,7 +238,27 @@ pub fn compute(graph: &Graph, seeds: &[i64], params: &BridgeParams) -> BridgeRes
                 result.stats.overlap_citers = overlap;
                 result.common_citers = entries;
             }
-            // Types 3-7: not yet implemented
+            BridgeType::Coupling => {
+                result.coupling_bridges = coupling_bridges(
+                    graph,
+                    &seed_indices,
+                    &seed_set,
+                    &neighbors,
+                    params.limit,
+                    params.max_neighbor_degree,
+                );
+            }
+            BridgeType::Cocitation => {
+                result.cocitation_bridges = cocitation_bridges(
+                    graph,
+                    &seed_indices,
+                    &seed_set,
+                    &neighbors,
+                    params.limit,
+                    params.max_neighbor_degree,
+                );
+            }
+            // Types 5-7: not yet implemented
             _ => {}
         }
     }
@@ -345,6 +369,140 @@ fn common_citers(
 }
 
 // ---------------------------------------------------------------------------
+// Type 3: coupling_bridges (Cross-seed Bibliographic Coupling)
+// ---------------------------------------------------------------------------
+
+/// Papers whose references overlap with multiple seeds' references.
+///
+/// For each seed, accumulate AA-weighted overlap scores for papers that
+/// cite the same references. Then keep only candidates with overlap > 0
+/// for ALL seeds, scored by the product of per-seed overlaps.
+fn coupling_bridges(
+    graph: &Graph,
+    seed_indices: &[u32],
+    seed_set: &HashSet<u32>,
+    neighbors: &SeedNeighbors,
+    limit: usize,
+    max_neighbor_degree: usize,
+) -> Vec<ScoredEntry> {
+    let k = seed_indices.len();
+
+    // Per-seed overlap: for each candidate C, how much do C's refs overlap
+    // with this seed's refs?
+    let mut per_seed: Vec<HashMap<u32, f64>> = Vec::with_capacity(k);
+
+    for (i, &_seed_idx) in seed_indices.iter().enumerate() {
+        let mut overlap: HashMap<u32, f64> = HashMap::new();
+        for &ref_idx in &neighbors.refs[i] {
+            let indegree = graph.rev_neighbors(ref_idx).len();
+            if indegree > max_neighbor_degree {
+                continue; // skip hub refs — low AA, high traversal cost
+            }
+            let w = aa_weight(indegree);
+            // All papers that cite this ref are coupling candidates
+            for &citer in graph.rev_neighbors(ref_idx) {
+                if !seed_set.contains(&citer) {
+                    *overlap.entry(citer).or_insert(0.0) += w;
+                }
+            }
+        }
+        per_seed.push(overlap);
+    }
+
+    // Intersect: keep candidates present in ALL seeds' overlap maps
+    score_cross_seed(&per_seed, graph, limit)
+}
+
+// ---------------------------------------------------------------------------
+// Type 4: cocitation_bridges (Cross-seed Co-citation)
+// ---------------------------------------------------------------------------
+
+/// Papers that both seeds' downstream communities commonly cite.
+///
+/// For each seed, look at what its citers cite (2-hop forward from citers).
+/// Papers cited by citers of multiple seeds are cocitation bridges.
+fn cocitation_bridges(
+    graph: &Graph,
+    seed_indices: &[u32],
+    seed_set: &HashSet<u32>,
+    neighbors: &SeedNeighbors,
+    limit: usize,
+    max_neighbor_degree: usize,
+) -> Vec<ScoredEntry> {
+    let k = seed_indices.len();
+
+    let mut per_seed: Vec<HashMap<u32, f64>> = Vec::with_capacity(k);
+
+    for (i, &_seed_idx) in seed_indices.iter().enumerate() {
+        let mut overlap: HashMap<u32, f64> = HashMap::new();
+        for &citer_idx in &neighbors.citers[i] {
+            let outdegree = graph.fwd_neighbors(citer_idx).len();
+            if outdegree > max_neighbor_degree {
+                continue; // skip review papers — low AA, high traversal cost
+            }
+            let w = aa_weight(outdegree);
+            // All papers cited by this citer are cocitation candidates
+            for &cited in graph.fwd_neighbors(citer_idx) {
+                if !seed_set.contains(&cited) {
+                    *overlap.entry(cited).or_insert(0.0) += w;
+                }
+            }
+        }
+        per_seed.push(overlap);
+    }
+
+    score_cross_seed(&per_seed, graph, limit)
+}
+
+/// Score candidates that appear in ALL per-seed overlap maps.
+/// score = product of per-seed overlaps.
+fn score_cross_seed(
+    per_seed: &[HashMap<u32, f64>],
+    graph: &Graph,
+    limit: usize,
+) -> Vec<ScoredEntry> {
+    let k = per_seed.len();
+    if k == 0 {
+        return vec![];
+    }
+
+    // Start from the smallest map to minimize iteration
+    let smallest = per_seed
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, m)| m.len())
+        .map(|(i, _)| i)
+        .unwrap();
+
+    let mut entries: Vec<ScoredEntry> = per_seed[smallest]
+        .iter()
+        .filter_map(|(&idx, _)| {
+            let mut scores = Vec::with_capacity(k);
+            for map in per_seed {
+                match map.get(&idx) {
+                    Some(&s) => scores.push(s),
+                    None => return None, // not in all seeds
+                }
+            }
+            let product: f64 = scores.iter().product();
+            Some(ScoredEntry {
+                work_id: graph.id_of(idx),
+                per_seed_scores: scores,
+                score: product,
+            })
+        })
+        .collect();
+
+    entries.sort_unstable_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    entries.truncate(limit);
+    entries
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -356,12 +514,18 @@ mod tests {
     /// Build a small test graph from CSV edges.
     ///
     /// ```text
-    ///   10 → 20, 30          (seed A cites 20, 30)
-    ///   11 → 20, 30, 40      (seed B cites 20, 30, 40)
-    ///   12 → 30, 40, 50      (seed C cites 30, 40, 50)
-    ///   60 → 10, 11          (citer of both A and B)
-    ///   61 → 10, 11, 12      (citer of all three)
-    ///   62 → 11, 12          (citer of B and C)
+    ///   Seeds:
+    ///     10 → 20, 30          (seed A cites 20, 30)
+    ///     11 → 20, 30, 40      (seed B cites 20, 30, 40)
+    ///     12 → 30, 40, 50      (seed C cites 30, 40, 50)
+    ///   Citers of seeds:
+    ///     60 → 10, 11, 80      (cites A+B, also cites 80)
+    ///     61 → 10, 11, 12, 80  (cites all three + 80)
+    ///     62 → 11, 12, 90      (cites B+C, also cites 90)
+    ///   Coupling candidates (cite refs of multiple seeds):
+    ///     70 → 20, 40          (cites ref 20 from A, ref 40 from B)
+    ///     71 → 20, 50          (cites ref 20 from A, ref 50 from C)
+    ///     72 → 30              (cites only shared ref — not a bridge)
     /// ```
     fn test_graph() -> Graph {
         let dir = tempfile::tempdir().unwrap();
@@ -381,14 +545,23 @@ mod tests {
             writeln!(f, "12,30").unwrap();
             writeln!(f, "12,40").unwrap();
             writeln!(f, "12,50").unwrap();
-            // Citers
+            // Citers of seeds (+ cocitation targets 80, 90)
             writeln!(f, "60,10").unwrap();
             writeln!(f, "60,11").unwrap();
+            writeln!(f, "60,80").unwrap();
             writeln!(f, "61,10").unwrap();
             writeln!(f, "61,11").unwrap();
             writeln!(f, "61,12").unwrap();
+            writeln!(f, "61,80").unwrap();
             writeln!(f, "62,11").unwrap();
             writeln!(f, "62,12").unwrap();
+            writeln!(f, "62,90").unwrap();
+            // Coupling candidates
+            writeln!(f, "70,20").unwrap(); // cites A's ref 20
+            writeln!(f, "70,40").unwrap(); // cites B's ref 40
+            writeln!(f, "71,20").unwrap(); // cites A's ref 20
+            writeln!(f, "71,50").unwrap(); // cites C's ref 50
+            writeln!(f, "72,30").unwrap(); // cites only shared ref 30
         }
         let graph_dir = dir.path().join("graph");
         crate::build::build_from_csv_raw(&csv_path, &graph_dir).unwrap();
@@ -619,6 +792,150 @@ mod tests {
         let citer_ids: HashSet<i64> = result.common_citers.iter().map(|e| e.work_id).collect();
         assert!(!citer_ids.contains(&1));
         assert!(!citer_ids.contains(&2));
+    }
+
+    // -- Type 3: coupling_bridges --
+
+    #[test]
+    fn coupling_two_seeds() {
+        let g = test_graph();
+        // Seeds A(10) refs: {20,30}, B(11) refs: {20,30,40}
+        // Node 70 cites 20 (A's ref) and 40 (B-only ref) → coupling bridge
+        // Node 72 cites only 30 (shared ref) → overlap with A and B, but
+        //   only through shared ref, so it IS a coupling bridge
+        // Node 71 cites 20 (A's ref) and 50 (C-only ref) → no overlap with B
+        let seeds = [10, 11];
+        let params = BridgeParams {
+            types: vec![BridgeType::Coupling],
+            limit: 100,
+            ..Default::default()
+        };
+        let result = compute(&g, &seeds, &params);
+
+        let ids: HashSet<i64> = result.coupling_bridges.iter().map(|e| e.work_id).collect();
+        // 70 cites ref 20 (A+B share) and ref 40 (B-only) → overlap_A > 0 (via 20), overlap_B > 0 (via 20,40)
+        assert!(ids.contains(&70), "70 couples A and B refs");
+        // 71 cites ref 20 (A+B) and ref 50 (C-only) → overlap_A > 0 (via 20), overlap_B > 0 (via 20)
+        assert!(ids.contains(&71), "71 also has overlap with both A and B via ref 20");
+        // Seeds should not appear
+        assert!(!ids.contains(&10));
+        assert!(!ids.contains(&11));
+
+        // Score is product of per-seed overlaps
+        for e in &result.coupling_bridges {
+            let product: f64 = e.per_seed_scores.iter().product();
+            assert!(
+                (e.score - product).abs() < 1e-10,
+                "score should be product of per_seed_scores"
+            );
+            assert_eq!(e.per_seed_scores.len(), 2);
+        }
+    }
+
+    #[test]
+    fn coupling_three_seeds() {
+        let g = test_graph();
+        // Seeds A(10), B(11), C(12)
+        // A refs: {20,30}, B refs: {20,30,40}, C refs: {30,40,50}
+        // Node 70 cites 20,40 → overlap_A via 20, overlap_B via 20+40, overlap_C via 40 → all > 0
+        // Node 71 cites 20,50 → overlap_A via 20, overlap_B via 20, overlap_C via 50 → all > 0
+        let seeds = [10, 11, 12];
+        let params = BridgeParams {
+            types: vec![BridgeType::Coupling],
+            limit: 100,
+            ..Default::default()
+        };
+        let result = compute(&g, &seeds, &params);
+
+        let ids: HashSet<i64> = result.coupling_bridges.iter().map(|e| e.work_id).collect();
+        assert!(ids.contains(&70), "70 has overlap with all 3 seeds");
+        assert!(ids.contains(&71), "71 has overlap with all 3 seeds");
+
+        for e in &result.coupling_bridges {
+            assert_eq!(e.per_seed_scores.len(), 3);
+        }
+    }
+
+    // -- Type 4: cocitation_bridges --
+
+    #[test]
+    fn cocitation_two_seeds() {
+        let g = test_graph();
+        // Seeds A(10), B(11)
+        // Citers of A: {60,61}, Citers of B: {60,61,62}
+        // Citer 60 cites: 10,11,80 → cocitation candidates from A's perspective: {11,80}
+        // Citer 61 cites: 10,11,12,80 → cocitation candidates from A's perspective: {11,12,80}
+        // So overlap_A[80] > 0 (from citers 60,61)
+        // Citer 60 cites: 10,11,80 → from B's perspective: {10,80}
+        // Citer 61 cites: 10,11,12,80 → from B's perspective: {10,12,80}
+        // Citer 62 cites: 11,12,90 → from B's perspective: {12,90}
+        // So overlap_B[80] > 0 (from citers 60,61)
+        // → 80 appears in both → cocitation bridge
+        // 90 only appears in B's perspective (via citer 62) → not a bridge
+        let seeds = [10, 11];
+        let params = BridgeParams {
+            types: vec![BridgeType::Cocitation],
+            limit: 100,
+            ..Default::default()
+        };
+        let result = compute(&g, &seeds, &params);
+
+        let ids: HashSet<i64> = result.cocitation_bridges.iter().map(|e| e.work_id).collect();
+        assert!(ids.contains(&80), "80 is cited by citers of both A and B");
+        assert!(!ids.contains(&90), "90 is only cited by B's citers");
+        // Seeds excluded
+        assert!(!ids.contains(&10));
+        assert!(!ids.contains(&11));
+
+        for e in &result.cocitation_bridges {
+            let product: f64 = e.per_seed_scores.iter().product();
+            assert!(
+                (e.score - product).abs() < 1e-10,
+                "score should be product"
+            );
+        }
+    }
+
+    #[test]
+    fn cocitation_three_seeds() {
+        let g = test_graph();
+        // A citers: {60,61}, B citers: {60,61,62}, C citers: {61,62}
+        // 80 is cited by 60,61 → overlap_A(80)>0, overlap_B(80)>0, overlap_C(80)>0 (via 61)
+        // → cocitation bridge for all 3
+        let seeds = [10, 11, 12];
+        let params = BridgeParams {
+            types: vec![BridgeType::Cocitation],
+            limit: 100,
+            ..Default::default()
+        };
+        let result = compute(&g, &seeds, &params);
+
+        let ids: HashSet<i64> = result.cocitation_bridges.iter().map(|e| e.work_id).collect();
+        assert!(ids.contains(&80), "80 is cocited by all 3 seed communities");
+
+        for e in &result.cocitation_bridges {
+            assert_eq!(e.per_seed_scores.len(), 3);
+        }
+    }
+
+    #[test]
+    fn coupling_max_degree_prune() {
+        let g = test_graph();
+        let seeds = [10, 11];
+        // With max_neighbor_degree=1, all refs with indegree > 1 are skipped
+        // In our graph, most refs have indegree > 1 (cited by seeds + others)
+        let params = BridgeParams {
+            types: vec![BridgeType::Coupling],
+            limit: 100,
+            max_neighbor_degree: 1,
+            ..Default::default()
+        };
+        let result = compute(&g, &seeds, &params);
+        // With aggressive pruning, fewer or no results
+        // This just verifies it doesn't panic
+        for e in &result.coupling_bridges {
+            assert!(e.score > 0.0);
+        }
     }
 
     // -- Integration tests (require real CSR graph) --
