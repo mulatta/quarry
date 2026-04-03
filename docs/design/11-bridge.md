@@ -425,7 +425,7 @@ with high k.
 | Step | Scope | Status |
 |------|-------|--------|
 | 1 | Rust `bridge()` + common_refs/common_citers | **Done** |
-| 2 | coupling_bridges + cocitation_bridges | Planned |
+| 2 | coupling_bridges + cocitation_bridges | **Done** |
 | 3 | path_bridges (BFS shortest path, k-paths via Yen) | Planned |
 | 4 | ppr_bridges (per-seed APPR product) | Planned |
 | 5 | steiner_bridges (KMB heuristic) | Planned |
@@ -435,6 +435,11 @@ with high k.
 Step 1 quality evaluation (KOBLAN+SICKLE, EvolvePro+MULTI-evolve,
 3 seed pairs): common_refs noise=0%, common_citers noise=0%.
 
+Step 2 quality evaluation: coupling noise=0% across all pairs.
+Cocitation finds canonical literature. Medium pair (EvolvePro+PET):
+Type 1-2 returned 0 results, Type 3-4 found 713/309 candidates —
+2-hop traversal unlocks bridges that 1-hop intersection misses.
+`max_neighbor_degree=10,000` prune keeps traversal fast (~0.2s).
 See `.claude/outputs/bridge_eval*.py` for scripts.
 
 ## References
