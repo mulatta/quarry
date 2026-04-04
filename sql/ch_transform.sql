@@ -33,7 +33,7 @@ SELECT
     w.pmid          AS pmid,
     w.doi           AS doi,
     w.title         AS title,
-    w.abstract      AS abstract,
+    coalesce(p.abstract, w.abstract) AS abstract,  -- PM full-text preferred over OA snippet
     w.pub_year      AS pub_year,
     w.pub_date      AS pub_date,
     w.type          AS type,
