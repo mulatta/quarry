@@ -24,6 +24,7 @@ from quarry.store.lance import LanceStore
 log = logging.getLogger(__name__)
 
 _PREFETCH_DEPTH = 3  # bounded queue depth for backpressure
+_OPTIMIZE_EVERY = 100  # compact LanceDB fragments every N batches
 
 
 def _encode_config_hash() -> bytes:
@@ -204,6 +205,13 @@ def run(batch_size: int | None = None, limit: int | None = None, logger=None):
             elapsed,
         )
 
+        # Compact fragments periodically to prevent memory growth.
+        # Each upsert creates a new fragment; without compaction,
+        # fragment metadata accumulates unboundedly in memory.
+        if batch_num % _OPTIMIZE_EVERY == 0:
+            logger.info("batch %d: optimizing LanceDB...", batch_num)
+            lance.optimize()
+
         if limit and (batch_num * batch_size) >= limit:
             break
 
@@ -211,8 +219,10 @@ def run(batch_size: int | None = None, limit: int | None = None, logger=None):
 
     logger.info("Done: encoded=%d, skipped=%d", total_encoded, total_skipped)
 
-    # Build indices if we encoded anything
+    # Compact remaining fragments before index build
     if total_encoded > 0:
+        logger.info("Final LanceDB optimize...")
+        lance.optimize()
         logger.info("Building FTS index...")
         lance.create_fts_index()
         logger.info("Building scalar index on work_id...")

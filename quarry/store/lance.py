@@ -81,6 +81,12 @@ class LanceStore:
         )
         return {r["work_id"]: bytes(r["content_hash"]) for r in result}
 
+    def optimize(self):
+        """Compact fragments + prune old versions. Call periodically during long runs."""
+        from datetime import timedelta
+
+        self.table.optimize(cleanup_older_than=timedelta(seconds=0))
+
     def create_fts_index(self):
         """Build BM25 full-text index on title and abstract."""
         self.table.create_fts_index(["title", "abstract"], replace=True)
