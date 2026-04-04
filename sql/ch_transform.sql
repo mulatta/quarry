@@ -160,7 +160,10 @@ SELECT citing_id, cited_id FROM oa_work_citations
 UNION ALL
 SELECT citing_id, cited_id FROM icite_citations;
 
-OPTIMIZE TABLE merged_citations FINAL;
+/* NOTE: OPTIMIZE TABLE merged_citations FINAL removed — handled in
+   ch_transform asset post-CREATE step to avoid memory issues with
+   38B+ row merge under 64GB limit. ReplacingMergeTree dedup occurs
+   naturally during background merges or explicit OPTIMIZE. */
 
 /* 6. cited_by_clin_export: iCite clinical citation expansion */
 
