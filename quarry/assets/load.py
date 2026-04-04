@@ -420,6 +420,10 @@ def ch_transform(context: AssetExecutionContext) -> MaterializeResult:
             stmt, context, label=label, grace_hash=table_name in _GRACE_HASH_TABLES
         )
 
+    # merged_citations (38B+ rows ReplacingMergeTree) skips OPTIMIZE FINAL
+    # — too large for 64GB limit. Background merge handles dedup gradually;
+    # minor duplicates in parquet export are harmless for CSR graph.
+
     return MaterializeResult(
         metadata={"status": MetadataValue.text("ok")},
     )
