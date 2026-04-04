@@ -67,11 +67,28 @@ def _ch_client_cmd() -> list[str]:
     ]
 
 
+_GRACE_HASH_SETTINGS = [
+    "--join_algorithm",
+    "grace_hash",
+    "--max_bytes_in_join",
+    "10000000000",
+    "--grace_hash_join_initial_buckets",
+    "4",
+]
+
+
 def _ch_query(
-    query: str, context: AssetExecutionContext, label: str | None = None
+    query: str,
+    context: AssetExecutionContext,
+    label: str | None = None,
+    *,
+    grace_hash: bool = False,
 ) -> None:
     """Run a single CH query."""
-    run(_ch_client_cmd() + ["--query", query], context, label=label or f"[CH] {query}")
+    cmd = _ch_client_cmd()
+    if grace_hash:
+        cmd += _GRACE_HASH_SETTINGS
+    run(cmd + ["--query", query], context, label=label or f"[CH] {query}")
 
 
 def _psql(sql: str, context: AssetExecutionContext, label: str | None = None) -> None:
@@ -386,6 +403,9 @@ def ch_transform(context: AssetExecutionContext) -> MaterializeResult:
     with open(export_sql) as f:
         content = f.read()
 
+    # Tables with large JOINs that need grace_hash to stay within 64GB.
+    _GRACE_HASH_TABLES = {"works_export", "papers_export", "icite_citations"}
+
     # Extract CREATE OR REPLACE TABLE statements
     stmts = re.split(r"(?=CREATE OR REPLACE TABLE)", content)
     for stmt in stmts:
@@ -394,8 +414,11 @@ def ch_transform(context: AssetExecutionContext) -> MaterializeResult:
             continue
         # Extract table name for logging
         match = re.match(r"CREATE OR REPLACE TABLE (\S+)", stmt)
-        label = f"[CH] CREATE {match.group(1)}" if match else "[CH] CREATE TABLE"
-        _ch_query(stmt, context, label=label)
+        table_name = match.group(1) if match else ""
+        label = f"[CH] CREATE {table_name}" if match else "[CH] CREATE TABLE"
+        _ch_query(
+            stmt, context, label=label, grace_hash=table_name in _GRACE_HASH_TABLES
+        )
 
     return MaterializeResult(
         metadata={"status": MetadataValue.text("ok")},

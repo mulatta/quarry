@@ -63,7 +63,10 @@ SELECT
     if(i.is_clinical = 'Yes', true, false) AS is_clinical
 FROM oa_works w
 LEFT JOIN pm_papers p ON w.pmid = p.pmid AND w.pmid IS NOT NULL
-LEFT JOIN icite_raw i ON w.pmid = i.pmid AND w.pmid IS NOT NULL;
+LEFT JOIN icite_raw i ON w.pmid = i.pmid AND w.pmid IS NOT NULL
+SETTINGS join_algorithm = 'grace_hash',
+         max_bytes_in_join = 10000000000,
+         grace_hash_join_initial_buckets = 4;
 
 /* 3. papers_export: PubMed papers enriched with iCite */
 
