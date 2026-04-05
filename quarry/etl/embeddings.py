@@ -137,6 +137,52 @@ def _prefetch(batch_size, lance, logger):
         raise _error[0]
 
 
+def _parquet_work_ids() -> set[str]:
+    """Collect all work_ids from parquet that pass the embedding filter.
+
+    Same filter as _parquet_batches — only reads work_id column (lightweight).
+    """
+    works_dir = Path(settings.parquet_dir) / "works"
+    dataset = ds.dataset(works_dir, format="parquet", partitioning="hive")
+    has_language = "language" in dataset.schema.names
+    base_filter = (
+        ds.field("tier").isin(["t1", "t2"])
+        & ds.field("type").isin(settings.embed_allowed_types)
+        & ds.field("abstract").is_valid()
+        & ds.field("title").is_valid()
+        & (ds.field("is_retracted") == False)  # noqa: E712
+    )
+    if has_language:
+        base_filter &= (
+            ds.field("language").isin(["en"]) | ~ds.field("language").is_valid()
+        )
+    ids: set[str] = set()
+    for batch in dataset.scanner(columns=["work_id"], filter=base_filter).to_batches():
+        ids.update(batch.column("work_id").to_pylist())
+    return ids
+
+
+def _gc_orphans(lance, logger) -> int:
+    """Delete LanceDB entries not present in current parquet source."""
+    logger.info("[GC] Scanning parquet for valid work_ids...")
+    source_ids = _parquet_work_ids()
+    logger.info("[GC] Parquet: %d work_ids", len(source_ids))
+
+    logger.info("[GC] Scanning LanceDB for stored work_ids...")
+    lance_ids = lance.all_work_ids()
+    logger.info("[GC] LanceDB: %d work_ids", len(lance_ids))
+
+    orphans = lance_ids - source_ids
+    if not orphans:
+        logger.info("[GC] No orphans found")
+        return 0
+
+    logger.info("[GC] Deleting %d orphan entries...", len(orphans))
+    deleted = lance.delete_work_ids_batch(orphans)
+    logger.info("[GC] Deleted %d orphans", deleted)
+    return deleted
+
+
 def run(batch_size: int | None = None, limit: int | None = None, logger=None):
     batch_size = batch_size or settings.embed_parquet_batch
     if logger is None:
@@ -219,8 +265,18 @@ def run(batch_size: int | None = None, limit: int | None = None, logger=None):
 
     logger.info("Done: encoded=%d, skipped=%d", total_encoded, total_skipped)
 
+    # Orphan GC: remove LanceDB entries that no longer exist in parquet source.
+    # Runs after encoding so that source of truth (parquet) is fully reflected.
+    if not limit:
+        orphan_count = _gc_orphans(lance, logger)
+    else:
+        orphan_count = 0
+        logger.info("Skipping orphan GC (limit mode)")
+
+    dirty = total_encoded > 0 or orphan_count > 0
+
     # Compact remaining fragments before index build
-    if total_encoded > 0:
+    if dirty:
         logger.info("Final LanceDB optimize...")
         lance.optimize()
         logger.info("Building FTS index...")
