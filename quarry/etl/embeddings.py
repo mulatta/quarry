@@ -1,14 +1,12 @@
 """Batch-encode papers from CH → LanceDB with content-hash caching.
 
-Two-phase incremental update via ClickHouse:
-  Phase 1: Stream (work_id, content_hash) from CH via ArrowStream,
-           compare against LanceDB in batches (producer-consumer pipeline).
-           Memory: O(diff_size), not O(total_works).
-  Phase 2: Fetch full text from CH for diff work_ids only (index lookup),
-           encode on GPU in accumulated batches, upsert to LanceDB.
+Incremental update via ClickHouse:
+  1. Export LanceDB hashes to CH temp table (~1.4GB, 2-3min)
+  2. CH JOIN: works_export vs lance_hashes → diff work_ids (~3min)
+  3. Fetch full text from CH for diff IDs, encode on GPU, upsert
+  4. Orphan GC: lance_hashes LEFT JOIN works_export → delete missing
 
 content_hash is pre-computed by CH (BLAKE3) during ch_transform.
-Orphan GC runs separately — not part of Phase 1 hot path.
 """
 
 import logging
@@ -23,10 +21,9 @@ from quarry.store.lance import LanceStore
 
 log = logging.getLogger(__name__)
 
-_PREFETCH_DEPTH = 3
 _OPTIMIZE_EVERY = 100
+_PREFETCH_DEPTH = 3
 
-# Embedding-eligible filter (mirrors parquet tier/type/language filter).
 _EMBED_WHERE = (
     "tier IN ('t1', 't2')"
     " AND type IN ({types})"
@@ -51,241 +48,234 @@ def _ch_cmd() -> list[str]:
         str(settings.ch_port),
         "--database",
         settings.ch_database,
+        "--receive_timeout",
+        "7200",
+        "--send_timeout",
+        "7200",
     ]
 
 
-# ── Phase 1: streaming diff via ArrowStream ──
-
-
-def _compute_diff(
-    lance: LanceStore, logger, batch_size: int = 50_000
-) -> tuple[set[str], int]:
-    """Stream CH hashes via ArrowStream, compare against LanceDB in pipeline.
-
-    Producer: reads ArrowStream RecordBatches from CH (C++ decoding).
-    Consumer: batch-lookups LanceDB hashes, computes diff.
-    Memory: O(diff_size) — no seen_ids set, no full hash dict.
-
-    Returns (to_encode_ids, skipped_count).
-    """
-    import pyarrow.ipc as ipc
-
-    where = _embed_where()
-    query = f"SELECT work_id, content_hash FROM works_export WHERE {where}"
-
-    logger.info("[Diff] Starting CH ArrowStream + LanceDB pipeline comparison...")
-
-    # Start CH process with ArrowStream output
-    proc = subprocess.Popen(
-        _ch_cmd() + ["--query", query + " FORMAT ArrowStream"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    assert proc.stdout is not None
-
-    reader = ipc.RecordBatchStreamReader(proc.stdout)
-
-    # Producer-consumer: CH read → queue → LanceDB lookup
-    batch_queue: queue.Queue = queue.Queue(maxsize=_PREFETCH_DEPTH)
-    to_encode_ids: set[str] = set()
-    result_lock = threading.Lock()
-    skipped = 0
-    total_scanned = 0
-
-    _consumer_error: list[BaseException] = []
-
-    def _consumer():
-        nonlocal skipped, total_scanned
-        try:
-            while True:
-                item = batch_queue.get()
-                if item is None:
-                    break
-                wids, ch_hashes = item
-
-                # Batch lookup against LanceDB
-                existing = lance.existing_hashes(wids)
-
-                local_encode = []
-                local_skip = 0
-                for wid, ch_h in zip(wids, ch_hashes):
-                    if ch_h == existing.get(wid):
-                        local_skip += 1
-                    else:
-                        local_encode.append(wid)
-
-                with result_lock:
-                    to_encode_ids.update(local_encode)
-                    skipped += local_skip
-                    total_scanned += len(wids)
-        except Exception as exc:
-            _consumer_error.append(exc)
-
-    consumer_thread = threading.Thread(target=_consumer, daemon=True)
-    consumer_thread.start()
-
-    # Producer: read ArrowStream batches, send to consumer
-    try:
-        buf_wids: list[str] = []
-        buf_hashes: list[bytes] = []
-
-        for batch in reader:
-            wids = batch.column("work_id").to_pylist()
-            hashes = batch.column("content_hash").to_pylist()
-
-            for wid, h in zip(wids, hashes):
-                if not wid or h is None:
-                    continue
-                buf_wids.append(wid)
-                buf_hashes.append(bytes(h))
-
-                if len(buf_wids) >= batch_size:
-                    batch_queue.put((list(buf_wids), list(buf_hashes)))
-                    buf_wids.clear()
-                    buf_hashes.clear()
-
-        if buf_wids:
-            batch_queue.put((list(buf_wids), list(buf_hashes)))
-    finally:
-        batch_queue.put(None)
-        consumer_thread.join()
-
-    proc.wait()
-    if proc.returncode != 0:
-        assert proc.stderr is not None
-        raise RuntimeError(f"CH query failed: {proc.stderr.read().decode()}")
-
-    if _consumer_error:
-        raise _consumer_error[0]
-
-    logger.info(
-        "[Diff] scanned=%d, to_encode=%d, skipped=%d",
-        total_scanned,
-        len(to_encode_ids),
-        skipped,
-    )
-    return to_encode_ids, skipped
-
-
-# ── Orphan GC (separate from Phase 1) ──
-
-
-def _gc_orphans(lance: LanceStore, logger) -> int:
-    """Detect and delete orphan LanceDB entries not in CH.
-
-    Streams work_ids from CH (lightweight — no content_hash) and compares
-    against LanceDB work_id set.
-    """
-    import pyarrow.ipc as ipc
-
-    where = _embed_where()
-    query = f"SELECT work_id FROM works_export WHERE {where}"
-
-    logger.info("[GC] Streaming CH work_ids...")
-    proc = subprocess.Popen(
-        _ch_cmd() + ["--query", query + " FORMAT ArrowStream"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    assert proc.stdout is not None
-
-    ch_ids: set[str] = set()
-    for batch in ipc.RecordBatchStreamReader(proc.stdout):
-        ch_ids.update(batch.column("work_id").to_pylist())
-
-    proc.wait()
-    if proc.returncode != 0:
-        assert proc.stderr is not None
-        raise RuntimeError(f"CH query failed: {proc.stderr.read().decode()}")
-
-    logger.info("[GC] CH: %d work_ids", len(ch_ids))
-
-    logger.info("[GC] Scanning LanceDB work_ids...")
-    lance_ids = lance.all_work_ids()
-    logger.info("[GC] LanceDB: %d work_ids", len(lance_ids))
-
-    orphans = lance_ids - ch_ids
-    if not orphans:
-        logger.info("[GC] No orphans found")
-        return 0
-
-    logger.info("[GC] Deleting %d orphans...", len(orphans))
-    deleted = lance.delete_work_ids_batch(orphans)
-    logger.info("[GC] Deleted %d orphans", deleted)
-    return deleted
-
-
-# ── Phase 2: CH fetch + encode ──
-
-
-def _ch_stream_rows(query: str, columns: list[str]):
-    """Stream rows from CH as dicts via TabSeparatedWithNames."""
-    proc = subprocess.Popen(
-        _ch_cmd() + ["--query", query + " FORMAT TabSeparatedWithNames"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+def _ch_exec(query: str) -> str:
+    """Execute CH query, return stdout. Raises on error."""
+    proc = subprocess.run(
+        _ch_cmd() + ["--query", query],
+        capture_output=True,
         text=True,
     )
-    assert proc.stdout is not None
+    if proc.returncode != 0:
+        raise RuntimeError(f"CH query failed: {proc.stderr.strip()}")
+    return proc.stdout
 
-    header = proc.stdout.readline().strip().split("\t")
-    if header != columns:
-        proc.kill()
-        raise ValueError(f"Column mismatch: expected {columns}, got {header}")
 
-    for line in proc.stdout:
-        vals = line.rstrip("\n").split("\t")
-        yield dict(zip(columns, vals))
+def _load_ids_to_ch(ids: list[str], table: str, logger) -> int:
+    """Load work_id list into CH table via RowBinary pipe."""
+    _ch_exec(
+        f"CREATE TABLE IF NOT EXISTS {table} ("
+        f"  work_id String"
+        f") ENGINE = MergeTree() ORDER BY work_id"
+    )
+    _ch_exec(f"TRUNCATE TABLE {table}")
 
+    proc = subprocess.Popen(
+        _ch_cmd() + ["--query", f"INSERT INTO {table} FORMAT RowBinary"],
+        stdin=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert proc.stdin is not None
+
+    for wid in ids:
+        wid_bytes = wid.encode("utf-8")
+        length = len(wid_bytes)
+        while length >= 0x80:
+            proc.stdin.write(bytes([length & 0x7F | 0x80]))
+            length >>= 7
+        proc.stdin.write(bytes([length]))
+        proc.stdin.write(wid_bytes)
+
+    proc.stdin.close()
     proc.wait()
     if proc.returncode != 0:
         assert proc.stderr is not None
-        raise RuntimeError(f"CH query failed: {proc.stderr.read()}")
+        raise RuntimeError(f"CH INSERT failed: {proc.stderr.read().decode()}")
+
+    logger.info("[CH] Loaded %d IDs to %s", len(ids), table)
+    return len(ids)
 
 
-def _prefetch(to_encode_ids: set[str], encode_batch: int, logger):
+# ── Step 1: Load LanceDB hashes into CH temp table ──
+
+
+def _load_lance_hashes_to_ch(lance: LanceStore, logger) -> int:
+    """Export LanceDB (work_id, content_hash) → CH temp table via pipe."""
+    logger.info("[Diff] Creating CH temp table for LanceDB hashes...")
+    _ch_exec(
+        "CREATE TABLE IF NOT EXISTS _tmp_lance_hashes ("
+        "  work_id String,"
+        "  content_hash FixedString(32)"
+        ") ENGINE = MergeTree() ORDER BY work_id"
+    )
+    _ch_exec("TRUNCATE TABLE _tmp_lance_hashes")
+
+    # Stream from LanceDB → CH INSERT via pipe
+    logger.info("[Diff] Exporting LanceDB hashes to CH...")
+    proc = subprocess.Popen(
+        _ch_cmd()
+        + [
+            "--query",
+            "INSERT INTO _tmp_lance_hashes FORMAT RowBinary",
+        ],
+        stdin=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert proc.stdin is not None
+
+    count = 0
+    for batch in (
+        lance.table.to_lance()
+        .scanner(columns=["work_id", "content_hash"], batch_size=100_000)
+        .to_batches()
+    ):
+        wids = batch.column("work_id").to_pylist()
+        hashes = batch.column("content_hash").to_pylist()
+        for wid, h in zip(wids, hashes):
+            if not wid or h is None:
+                continue
+            wid_bytes = wid.encode("utf-8")
+            # RowBinary: String = varint_len + bytes, FixedString(32) = 32 raw bytes
+            # Varint encoding for string length
+            length = len(wid_bytes)
+            while length >= 0x80:
+                proc.stdin.write(bytes([length & 0x7F | 0x80]))
+                length >>= 7
+            proc.stdin.write(bytes([length]))
+            proc.stdin.write(wid_bytes)
+            proc.stdin.write(bytes(h))
+            count += 1
+
+    proc.stdin.close()
+    proc.wait()
+    if proc.returncode != 0:
+        assert proc.stderr is not None
+        raise RuntimeError(f"CH INSERT failed: {proc.stderr.read().decode()}")
+
+    logger.info("[Diff] Loaded %d LanceDB hashes to CH", count)
+    return count
+
+
+# ── Step 2: CH JOIN → diff ──
+
+
+def _compute_diff_in_ch(logger) -> tuple[list[str], list[str], int]:
+    """CH-side JOIN: works_export vs _tmp_lance_hashes → diff + orphans.
+
+    Returns (to_encode_ids, orphan_ids, skipped_count).
+    """
+    where = _embed_where()
+
+    # New + changed: in works_export but hash differs or missing in lance
+    logger.info("[Diff] Computing diff via CH JOIN...")
+    diff_result = _ch_exec(
+        f"SELECT work_id FROM works_export "
+        f"WHERE {where} "
+        f"AND work_id NOT IN ("
+        f"  SELECT l.work_id FROM _tmp_lance_hashes l "
+        f"  INNER JOIN works_export w ON l.work_id = w.work_id "
+        f"  WHERE w.content_hash = l.content_hash AND {where}"
+        f")"
+    )
+    to_encode_ids = [
+        wid.strip() for wid in diff_result.strip().split("\n") if wid.strip()
+    ]
+
+    # Total eligible count for skip calculation
+    total_result = _ch_exec(f"SELECT count() FROM works_export WHERE {where}")
+    total = int(total_result.strip())
+    skipped = total - len(to_encode_ids)
+
+    # Orphans: in lance but not in eligible works_export
+    logger.info("[Diff] Computing orphans via CH JOIN...")
+    orphan_result = _ch_exec(
+        f"SELECT l.work_id FROM _tmp_lance_hashes l "
+        f"LEFT JOIN works_export w ON l.work_id = w.work_id "
+        f"WHERE w.work_id IS NULL "
+        f"   OR NOT ({where.replace('tier', 'w.tier').replace('type', 'w.type').replace('abstract', 'w.abstract').replace('title', 'w.title').replace('is_retracted', 'w.is_retracted').replace('language', 'w.language')})"
+    )
+    orphan_ids = [
+        wid.strip() for wid in orphan_result.strip().split("\n") if wid.strip()
+    ]
+
+    logger.info(
+        "[Diff] to_encode=%d, skipped=%d, orphans=%d",
+        len(to_encode_ids),
+        skipped,
+        len(orphan_ids),
+    )
+    return to_encode_ids, orphan_ids, skipped
+
+
+# ── Step 3: CH fetch + encode ──
+
+
+def _prefetch(encode_batch: int, logger):
     """Background I/O: fetch full text for diff work_ids from CH.
 
-    Yields (works_batch, hashes_batch) tuples of size encode_batch.
-    Uses CH WHERE work_id IN (...) for index lookup.
+    Reads from _tmp_encode_ids JOIN works_export — no IN clause needed.
+    All IDs already in CH temp table.
     """
     q: queue.Queue = queue.Queue(maxsize=_PREFETCH_DEPTH)
 
     def _producer():
         try:
             where = _embed_where()
-            ids_list = list(to_encode_ids)
+            query = (
+                f"SELECT w.work_id, w.title, w.abstract,"
+                f" hex(w.content_hash) AS hex_hash"
+                f" FROM works_export w"
+                f" INNER JOIN _tmp_encode_ids e ON w.work_id = e.work_id"
+                f" WHERE {where}"
+            )
+
+            proc = subprocess.Popen(
+                _ch_cmd()
+                + [
+                    "--query",
+                    query + " FORMAT TabSeparatedWithNames",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            assert proc.stdout is not None
+
             buf: list[dict] = []
             buf_hashes: dict[str, bytes] = {}
 
-            chunk_size = 50_000
-            for i in range(0, len(ids_list), chunk_size):
-                chunk = ids_list[i : i + chunk_size]
-                id_csv = ", ".join(f"'{w}'" for w in chunk)
-                query = (
-                    f"SELECT work_id, title, abstract,"
-                    f" hex(content_hash) AS hex_hash"
-                    f" FROM works_export WHERE {where}"
-                    f" AND work_id IN ({id_csv})"
+            proc.stdout.readline()  # skip TSV header
+            for line in proc.stdout:
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) < 4:
+                    continue
+                wid, title, abstract, hex_hash = (
+                    parts[0],
+                    parts[1],
+                    parts[2],
+                    parts[3],
                 )
+                if not title or not abstract or title == "\\N" or abstract == "\\N":
+                    continue
 
-                for row in _ch_stream_rows(
-                    query, ["work_id", "title", "abstract", "hex_hash"]
-                ):
-                    wid = row["work_id"]
-                    title = row["title"]
-                    abstract = row["abstract"]
+                buf.append({"work_id": wid, "title": title, "abstract": abstract})
+                buf_hashes[wid] = bytes.fromhex(hex_hash)
 
-                    if not title or not abstract or title == "\\N" or abstract == "\\N":
-                        continue
+                if len(buf) >= encode_batch:
+                    q.put((list(buf), dict(buf_hashes)))
+                    buf.clear()
+                    buf_hashes.clear()
 
-                    buf.append({"work_id": wid, "title": title, "abstract": abstract})
-                    buf_hashes[wid] = bytes.fromhex(row["hex_hash"])
-
-                    if len(buf) >= encode_batch:
-                        q.put((list(buf), dict(buf_hashes)))
-                        buf.clear()
-                        buf_hashes.clear()
+            proc.wait()
+            if proc.returncode != 0:
+                assert proc.stderr is not None
+                raise RuntimeError(f"CH fetch failed: {proc.stderr.read()}")
 
             if buf:
                 q.put((list(buf), dict(buf_hashes)))
@@ -310,6 +300,18 @@ def _prefetch(to_encode_ids: set[str], encode_batch: int, logger):
     thread.join()
 
 
+# ── Cleanup ──
+
+
+def _cleanup_temp(logger):
+    """Drop CH temp tables."""
+    for table in ["_tmp_lance_hashes", "_tmp_encode_ids"]:
+        try:
+            _ch_exec(f"DROP TABLE IF EXISTS {table}")
+        except Exception as exc:
+            logger.warning("Failed to drop %s: %s", table, exc)
+
+
 # ── Main entry point ──
 
 
@@ -318,7 +320,7 @@ def run(batch_size: int | None = None, limit: int | None = None, logger=None):
         logger = log
     lance = LanceStore(settings.lancedb_uri)
 
-    # Ensure table exists; build work_id index for fast hash lookups
+    # Ensure table exists
     try:
         if lance.table.count_rows() > 0:
             logger.info("Building work_id BTree index for hash lookups...")
@@ -326,87 +328,98 @@ def run(batch_size: int | None = None, limit: int | None = None, logger=None):
     except Exception:
         lance.create_table()
 
-    # Phase 1: streaming diff (ArrowStream + producer-consumer)
-    to_encode_ids, total_skipped = _compute_diff(lance, logger)
+    try:
+        # Step 1: LanceDB hashes → CH temp table
+        lance_count = _load_lance_hashes_to_ch(lance, logger)
+        logger.info("[Step 1] Loaded %d LanceDB hashes to CH", lance_count)
 
-    if limit:
-        to_encode_ids = set(list(to_encode_ids)[:limit])
+        # Step 2: CH JOIN → diff
+        to_encode_ids, orphan_ids, total_skipped = _compute_diff_in_ch(logger)
 
-    if not to_encode_ids:
-        logger.info("Nothing to encode: skipped=%d", total_skipped)
-        # Still run orphan GC
-        orphan_count = _gc_orphans(lance, logger) if not limit else 0
-        if orphan_count > 0:
-            lance.optimize()
-        return
+        if limit:
+            to_encode_ids = to_encode_ids[:limit]
 
-    # Phase 2: fetch from CH + encode (only changed works)
-    encoder = JinaEncoder(
-        dim=256,
-        batch_size=settings.embed_batch_size,
-        max_tokens=settings.embed_max_tokens,
-    )
+        if not to_encode_ids and not orphan_ids:
+            logger.info(
+                "Nothing to do: encoded=0, skipped=%d, orphans=0", total_skipped
+            )
+            return
 
-    encode_batch = settings.embed_encode_batch
-    total_encoded = 0
-    batch_num = 0
+        # Step 3: load diff IDs → CH temp table, then fetch + encode
+        _load_ids_to_ch(to_encode_ids, "_tmp_encode_ids", logger)
 
-    for to_encode, hashes in _prefetch(to_encode_ids, encode_batch, logger):
-        texts = [f"{w['title']}. {w['abstract']}" for w in to_encode]
-        t0 = time.time()
-        vec_ret = encoder.encode_passages(texts)
-        vec_clust = encoder.encode_clustering(texts)
-        elapsed = time.time() - t0
-
-        lance_rows = [
-            {
-                "work_id": w["work_id"],
-                "content_hash": hashes[w["work_id"]],
-                "title": w["title"],
-                "abstract": w["abstract"],
-                "vec_retrieval": vec_ret[i].tolist(),
-                "vec_cluster": vec_clust[i].tolist(),
-            }
-            for i, w in enumerate(to_encode)
-        ]
-
-        lance.upsert(lance_rows)
-
-        total_encoded += len(to_encode)
-        batch_num += 1
-        throughput = len(texts) / elapsed if elapsed > 0 else 0
-
-        logger.info(
-            "batch %d: encoded=%d, total=%d/%d, %.0f vec/s, %.1fs",
-            batch_num,
-            len(to_encode),
-            total_encoded,
-            len(to_encode_ids),
-            throughput,
-            elapsed,
+        encoder = JinaEncoder(
+            dim=256,
+            batch_size=settings.embed_batch_size,
+            max_tokens=settings.embed_max_tokens,
         )
 
-        if batch_num % _OPTIMIZE_EVERY == 0:
-            logger.info("batch %d: optimizing LanceDB...", batch_num)
+        encode_batch = settings.embed_encode_batch
+        total_encoded = 0
+        batch_num = 0
+
+        for to_encode, hashes in _prefetch(encode_batch, logger):
+            texts = [f"{w['title']}. {w['abstract']}" for w in to_encode]
+            t0 = time.time()
+            vec_ret = encoder.encode_passages(texts)
+            vec_clust = encoder.encode_clustering(texts)
+            elapsed = time.time() - t0
+
+            lance_rows = [
+                {
+                    "work_id": w["work_id"],
+                    "content_hash": hashes[w["work_id"]],
+                    "title": w["title"],
+                    "abstract": w["abstract"],
+                    "vec_retrieval": vec_ret[i].tolist(),
+                    "vec_cluster": vec_clust[i].tolist(),
+                }
+                for i, w in enumerate(to_encode)
+            ]
+
+            lance.upsert(lance_rows)
+
+            total_encoded += len(to_encode)
+            batch_num += 1
+            throughput = len(texts) / elapsed if elapsed > 0 else 0
+
+            logger.info(
+                "batch %d: encoded=%d, total=%d/%d, %.0f vec/s, %.1fs",
+                batch_num,
+                len(to_encode),
+                total_encoded,
+                len(to_encode_ids),
+                throughput,
+                elapsed,
+            )
+
+            if batch_num % _OPTIMIZE_EVERY == 0:
+                logger.info("batch %d: optimizing LanceDB...", batch_num)
+                lance.optimize()
+
+        encoder.unload()
+
+        logger.info("Done: encoded=%d, skipped=%d", total_encoded, total_skipped)
+
+        # Orphan GC
+        if orphan_ids and not limit:
+            logger.info("[GC] Deleting %d orphans...", len(orphan_ids))
+            deleted = lance.delete_work_ids_batch(set(orphan_ids))
+            logger.info("[GC] Deleted %d orphans", deleted)
+
+        dirty = total_encoded > 0 or bool(orphan_ids)
+
+        if dirty:
+            logger.info("Final LanceDB optimize...")
             lance.optimize()
+            logger.info("Building FTS index...")
+            lance.create_fts_index()
+            logger.info("Building scalar index on work_id...")
+            lance.create_scalar_index("work_id")
+            logger.info("Building vector index...")
+            lance.create_vector_index("vec_retrieval")
+            lance.create_vector_index("vec_cluster")
+            logger.info("Indices built.")
 
-    encoder.unload()
-
-    logger.info("Done: encoded=%d, skipped=%d", total_encoded, total_skipped)
-
-    # Orphan GC (separate phase)
-    orphan_count = _gc_orphans(lance, logger) if not limit else 0
-
-    dirty = total_encoded > 0 or orphan_count > 0
-
-    if dirty:
-        logger.info("Final LanceDB optimize...")
-        lance.optimize()
-        logger.info("Building FTS index...")
-        lance.create_fts_index()
-        logger.info("Building scalar index on work_id...")
-        lance.create_scalar_index("work_id")
-        logger.info("Building vector index...")
-        lance.create_vector_index("vec_retrieval")
-        lance.create_vector_index("vec_cluster")
-        logger.info("Indices built.")
+    finally:
+        _cleanup_temp(logger)
