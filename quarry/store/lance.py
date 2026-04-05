@@ -81,6 +81,22 @@ class LanceStore:
         )
         return {r["work_id"]: bytes(r["content_hash"]) for r in result}
 
+    def existing_hashes_all(self, batch_size: int = 100_000) -> dict[str, bytes]:
+        """Return all (work_id → content_hash) pairs from LanceDB.
+
+        Streams in batches for bounded memory.
+        """
+        result: dict[str, bytes] = {}
+        scanner = self.table.to_lance().scanner(
+            columns=["work_id", "content_hash"], batch_size=batch_size
+        )
+        for batch in scanner.to_batches():
+            wids = batch.column("work_id").to_pylist()
+            hashes = batch.column("content_hash").to_pylist()
+            for wid, h in zip(wids, hashes):
+                result[wid] = bytes(h)
+        return result
+
     def all_work_ids(self, batch_size: int = 100_000) -> set[str]:
         """Return the full set of work_ids stored in LanceDB.
 
