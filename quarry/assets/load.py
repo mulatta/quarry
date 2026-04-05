@@ -91,18 +91,21 @@ def _ch_query(
     run(cmd + ["--query", query], context, label=label or f"[CH] {query}")
 
 
-def _psql(sql: str, context: AssetExecutionContext, label: str | None = None) -> None:
-    """Run psql command."""
-    run(
-        [
-            "psql",
-            settings.pg_conninfo,
-            "-c",
-            sql,
-        ],
-        context,
-        label=label or f"[PG] {sql}",
-    )
+def _psql(
+    sql: str,
+    context: AssetExecutionContext,
+    label: str | None = None,
+    *,
+    pgoptions: str | None = None,
+) -> None:
+    """Run psql command. Optional PGOPTIONS for session-level GUC overrides."""
+    import os
+
+    cmd = ["psql", settings.pg_conninfo, "-c", sql]
+    env = None
+    if pgoptions:
+        env = {**os.environ, "PGOPTIONS": pgoptions}
+    run(cmd, context, label=label or f"[PG] {sql}", env=env)
 
 
 # ── CH init asset ──
@@ -655,103 +658,57 @@ def parquet_export(context: AssetExecutionContext) -> MaterializeResult:
 # ── PG load asset ──
 
 
-# PG text[] columns stored as '{a,b}' VARCHAR in Parquet.
-# DuckDB needs explicit conversion: strip braces → split → array.
-_TEXT_ARRAY_COLUMNS = {"pm_pub_type", "pub_type"}
-
-
-def _select_expr(columns: str) -> str:
-    """Build SELECT expression, converting '{a,b}' VARCHAR → VARCHAR[] for text[] cols."""
-    parts = []
-    for col in (c.strip() for c in columns.split(",")):
-        if col in _TEXT_ARRAY_COLUMNS:
-            parts.append(f"string_split(trim('{{}}'  FROM {col}), ',') AS {col}")
-        else:
-            parts.append(col)
-    return ", ".join(parts)
-
-
-def _pipe_pg_load(
-    pg_table: str, columns: str, parquet_path: Path, *, hive: bool = False
+def _ch_to_pg(
+    ch_table: str,
+    pg_table: str,
+    columns: str,
+    *,
+    where: str | None = None,
 ) -> None:
-    """Stream Parquet → CSV pipe → PG COPY (no temp files, no DuckDB wire overhead).
+    """Stream CH → CSVWithNames → psql COPY. Zero memory overhead.
 
-    DuckDB writes CSV to a named pipe (FIFO) while psql reads from it
-    simultaneously. ~3.7x faster than DuckDB postgres extension.
-
-    Note: text[] columns (pm_pub_type, pub_type) are stored as '{a,b}' strings
-    in parquet. PG COPY parses this directly as text[] — no conversion needed.
+    clickhouse-client writes CSV to stdout, piped directly into psql COPY.
+    No DuckDB, no intermediate files, no named pipes.
+    text[] columns (pm_pub_type, pub_type) are stored as '{a,b}' strings
+    in CH. PG COPY parses this directly as text[] — no conversion needed.
     """
-    import os
-    import threading
+    query = f"SELECT {columns} FROM {ch_table}"
+    if where:
+        query += f" WHERE {where}"
+    query += " FORMAT CSVWithNames"
 
-    import duckdb
+    ch_proc = subprocess.Popen(
+        _ch_client_cmd() + ["--query", query],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
 
-    # No _select_expr here — pass columns as-is. PG COPY handles '{a,b}' → text[].
-    select = columns
-    if parquet_path.is_dir():
-        glob = "**/*.parquet" if hive else "*.parquet"
-        src = f"{parquet_path}/{glob}"
-    else:
-        src = str(parquet_path)
-    opts = ", hive_partitioning=true" if hive else ""
-
-    pipe_path = f"/tmp/quarry_pg_pipe_{pg_table}_{os.getpid()}_{threading.get_ident()}"
-    try:
-        os.mkfifo(pipe_path)
-    except FileExistsError:
-        os.unlink(pipe_path)
-        os.mkfifo(pipe_path)
-
-    _error: list[Exception] = []
-
-    def _writer():
-        conn = duckdb.connect()
-        try:
-            conn.execute(
-                f"COPY (SELECT {select} FROM read_parquet('{src}'{opts})) "
-                f"TO '{pipe_path}' (FORMAT CSV, HEADER)"
-            )
-        except Exception as exc:
-            _error.append(exc)
-            # Open+close pipe to unblock reader if DuckDB never opened it
-            try:
-                fd = os.open(pipe_path, os.O_WRONLY | os.O_NONBLOCK)
-                os.close(fd)
-            except OSError:
-                pass
-        finally:
-            conn.close()
-
-    # Start reader (psql) first — blocks on pipe open() until writer connects.
-    reader = subprocess.Popen(
+    pg_proc = subprocess.Popen(
         [
             "psql",
             settings.pg_conninfo,
             "-c",
-            f"\\COPY {pg_table} ({columns}) FROM '{pipe_path}' CSV HEADER",
+            f"\\COPY {pg_table} ({columns}) FROM STDIN CSV HEADER NULL '\\N'",
         ],
+        stdin=ch_proc.stdout,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
     )
 
-    # Writer thread opens pipe (unblocks reader) and streams CSV.
-    writer = threading.Thread(target=_writer, daemon=True)
-    writer.start()
+    # Allow ch_proc to receive SIGPIPE if pg_proc exits early.
+    assert ch_proc.stdout is not None
+    ch_proc.stdout.close()
 
-    _, stderr = reader.communicate()
-    writer.join(timeout=30)
+    _, pg_stderr = pg_proc.communicate()
+    ch_proc.wait()
 
-    try:
-        os.unlink(pipe_path)
-    except FileNotFoundError:
-        pass
-
-    if _error:
-        raise _error[0]
-    if reader.returncode != 0:
-        raise RuntimeError(f"psql COPY failed for {pg_table}: {stderr}")
+    if ch_proc.returncode != 0:
+        assert ch_proc.stderr is not None
+        ch_err = ch_proc.stderr.read().decode()
+        raise RuntimeError(f"CH export failed for {ch_table}: {ch_err}")
+    if pg_proc.returncode != 0:
+        raise RuntimeError(f"psql COPY failed for {pg_table}: {pg_stderr}")
 
 
 _ALL_PG_TABLES = [
@@ -774,9 +731,9 @@ _ALL_PG_TABLES = [
 
 @asset(
     group_name="serve",
-    deps=[parquet_export],
-    description="Parquet → PG via CSV pipe (UNLOGGED + parallel, ~3.7x baseline).",
-    kinds={"parquet", "postgres"},
+    deps=[ch_transform],
+    description="CH → PG via CSVWithNames pipe (UNLOGGED + parallel, zero memory).",
+    kinds={"clickhouse", "postgres"},
 )
 def pg_load(context: AssetExecutionContext) -> MaterializeResult:
     _psql("\\i sql/drop_indexes.sql", context, label="[PG] dropping indexes")
@@ -793,31 +750,30 @@ def pg_load(context: AssetExecutionContext) -> MaterializeResult:
         label="[PG] truncating all tables",
     )
 
-    pq_dir = Path(settings.parquet_dir)
     failed: list[str] = []
 
     # works: sequential per-tier (same table → PG table lock prevents parallel COPY)
     for tier in _TIERS:
-        tier_dir = pq_dir / "works" / f"tier={tier}"
-        if not any(tier_dir.glob("*.parquet")) if tier_dir.exists() else True:
-            context.log.info(f"[PG] works tier={tier} skipped (no parquet files)")
-            continue
         context.log.info(f"[PG] loading works tier={tier}")
-        _pipe_pg_load("works", _WORKS_COLUMNS, tier_dir)
+        _ch_to_pg(
+            "works_export",
+            "works",
+            _WORKS_COLUMNS,
+            where=f"tier = '{tier}'",
+        )
         context.log.info(f"[PG] works tier={tier} done")
 
     # Remaining flat tables: parallel (independent tables, no lock contention)
-    def _load_table(pg_table: str, columns: str) -> str:
-        pq_path = pq_dir / f"{pg_table}.parquet"
-        _pipe_pg_load(pg_table, columns, pq_path)
+    def _load_table(ch_table: str, pg_table: str, columns: str) -> str:
+        _ch_to_pg(ch_table, pg_table, columns)
         return pg_table
 
     total = len(_EXPORT_TABLES)
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         futures: dict[object, str] = {}
-        for _, pg, cols in _EXPORT_TABLES:
-            futures[pool.submit(_load_table, pg, cols)] = pg
+        for ch, pg, cols in _EXPORT_TABLES:
+            futures[pool.submit(_load_table, ch, pg, cols)] = pg
 
         done = 0
         for future in as_completed(futures):
@@ -837,7 +793,13 @@ def pg_load(context: AssetExecutionContext) -> MaterializeResult:
     for t in _ALL_PG_TABLES:
         _psql(f"ALTER TABLE {t} SET LOGGED", context, label=f"[PG] LOGGED {t}")
 
-    _psql("\\i sql/schema.sql", context, label="[PG] recreating indexes")
+    # Boost parallel index build for bulk load session only (via PGOPTIONS).
+    _psql(
+        "\\i sql/schema.sql",
+        context,
+        label="[PG] recreating indexes",
+        pgoptions="-c maintenance_work_mem=4GB -c max_parallel_maintenance_workers=8",
+    )
 
     _psql("VACUUM ANALYZE works", context, label="[PG] VACUUM ANALYZE works")
     for _, t, _ in _EXPORT_TABLES:
