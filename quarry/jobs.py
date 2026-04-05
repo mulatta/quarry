@@ -1,8 +1,8 @@
 """Dagster job definitions for pipeline execution modes.
 
 build:      sync → parse → ch_init → ch_load → ch_transform → parquet_export
-load:       pg_load + csr_graph + paper_embeddings (parquet on disk assumed)
-embeddings: paper_embeddings only
+load:       pg_load (CH direct) + csr_graph (parquet) + paper_embeddings (CH direct)
+embeddings: paper_embeddings only (CH → ArrowStream → GPU)
 full:       build + load (single machine E2E, no R2)
 
 R2 sync is sensor-driven (not part of any job):

@@ -76,7 +76,8 @@ quarry expand <seed> \
     "alpha": 0.15,
     "epsilon": 1e-6,
     "weights": [0.7, 0.15, 0.15],
-    "limit": 200
+    "limit": 200,
+    "_note": "weights not yet exposed in Python API — uses Rust defaults"
   },
   "papers": [
     {
