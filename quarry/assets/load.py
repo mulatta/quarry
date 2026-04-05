@@ -1,12 +1,12 @@
-"""ELT pipeline assets: init → parse → CH load → CH transform → parquet → serve.
+"""ELT pipeline assets: init → parse → CH load → CH transform → serve.
 
 Asset graph:
                                                 ch_init ────────┐
   oa_sync ──→ oa_parse ──────────┐              (DB + tables)   │
                                  │                              │
-  pm_sync ──→ pm_parse ──────────┼──→ ch_load ──→ ch_transform ──→ parquet_export ──┬──→ pg_load
-                                 │                                                  ├──→ paper_embeddings
-  mesh_sync ──→ mesh_stage ──────┤                                                  └──→ csr_graph
+  pm_sync ──→ pm_parse ──────────┼──→ ch_load ──→ ch_transform ──┬──→ pg_load (CH → CSV → psql)
+                                 │                               ├──→ paper_embeddings (CH → ArrowStream → GPU)
+  mesh_sync ──→ mesh_stage ──────┤                               └──→ parquet_export ──→ csr_graph
                                  │
   icite_sync ────────────────────┘
 

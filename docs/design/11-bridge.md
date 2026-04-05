@@ -424,12 +424,12 @@ with high k.
 
 | Step | Scope | Status |
 |------|-------|--------|
-| 1 | Rust `bridge()` + common_refs/common_citers | **Done** |
-| 2 | coupling_bridges + cocitation_bridges | **Done** |
+| 1 | Rust `bridge()` + common_refs/common_citers | **Done** (Rust only, no Python binding) |
+| 2 | coupling_bridges + cocitation_bridges | **Done** (Rust only, no Python binding) |
 | 3 | path_bridges (BFS shortest path, k-paths via Yen) | Planned |
 | 4 | ppr_bridges (per-seed APPR product) | Planned |
 | 5 | steiner_bridges (KMB heuristic) | Planned |
-| 6 | Python binding + CLI | Planned |
+| 6 | Python binding + CLI (steps 1-5) | Planned |
 | 7 | Quality evaluation (abstract review, 3 seed pairs) | Planned |
 
 Step 1 quality evaluation (KOBLAN+SICKLE, EvolvePro+MULTI-evolve,
