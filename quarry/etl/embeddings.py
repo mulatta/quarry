@@ -96,7 +96,9 @@ def _compute_diff(
     Memory: O(diff_size + orphan_size), not O(total_works).
     """
     where = _embed_where()
-    query = f"SELECT work_id, hex(content_hash) FROM works_export WHERE {where}"
+    query = (
+        f"SELECT work_id, hex(content_hash) AS hex_hash FROM works_export WHERE {where}"
+    )
 
     logger.info("[Diff] Streaming CH hashes + LanceDB batch comparison...")
 
@@ -177,7 +179,7 @@ def _prefetch(to_encode_ids: set[str], encode_batch: int, logger):
                 chunk = ids_list[i : i + chunk_size]
                 id_csv = ", ".join(f"'{w}'" for w in chunk)
                 query = (
-                    f"SELECT work_id, title, abstract, hex(content_hash) "
+                    f"SELECT work_id, title, abstract, hex(content_hash) AS hex_hash "
                     f"FROM works_export WHERE {where} AND work_id IN ({id_csv})"
                 )
 
