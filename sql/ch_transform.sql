@@ -46,6 +46,7 @@ SELECT
         w.abstract IS NOT NULL AND w.abstract != '', 'oa',
         NULL
     )                AS abstract_origin,
+    BLAKE3(concat(w.title, '\n', coalesce(p.abstract, w.abstract, ''))) AS content_hash,
     w.pub_year      AS pub_year,
     w.pub_date      AS pub_date,
     w.type          AS type,
