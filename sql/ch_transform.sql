@@ -41,6 +41,11 @@ SELECT
     w.doi           AS doi,
     w.title         AS title,
     coalesce(p.abstract, w.abstract) AS abstract,  -- PM full-text preferred over OA snippet
+    multiIf(
+        p.abstract IS NOT NULL AND p.abstract != '', 'pm',
+        w.abstract IS NOT NULL AND w.abstract != '', 'oa',
+        NULL
+    )                AS abstract_origin,
     w.pub_year      AS pub_year,
     w.pub_date      AS pub_date,
     w.type          AS type,
