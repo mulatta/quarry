@@ -25,6 +25,7 @@
       imports = [
         ./nix/formatter.nix
         ./nix/packages.nix
+        ./nix/services.nix
         ./nix/shell.nix
       ];
 

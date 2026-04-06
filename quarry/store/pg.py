@@ -17,6 +17,30 @@ _READ_ONLY_RE = re.compile(r"^\s*(SELECT|WITH|EXPLAIN)\b", re.IGNORECASE)
 _SCHEMA_SQL = Path(__file__).resolve().parent.parent.parent / "sql" / "schema.sql"
 
 
+def _split_sql(ddl: str) -> list[str]:
+    """Split SQL on top-level semicolons, preserving $$ blocks intact."""
+    stmts: list[str] = []
+    current: list[str] = []
+    in_dollar = False
+    for line in ddl.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("--"):
+            continue
+        if "$$" in line:
+            in_dollar = not in_dollar
+        current.append(line)
+        if not in_dollar and stripped.endswith(";"):
+            stmt = "\n".join(current).strip().rstrip(";").strip()
+            if stmt:
+                stmts.append(stmt)
+            current = []
+    if current:
+        stmt = "\n".join(current).strip().rstrip(";").strip()
+        if stmt:
+            stmts.append(stmt)
+    return stmts
+
+
 class PGStore:
     """PostgreSQL store for PubMed + OpenAlex metadata."""
 
@@ -42,20 +66,25 @@ class PGStore:
         Rust (include_str!) and nix process-compose (initialDatabases).
         """
         ddl = _SCHEMA_SQL.read_text()
-        for stmt in ddl.split(";"):
-            stmt = stmt.strip()
-            if stmt and not stmt.startswith("--"):
-                self.conn.execute(stmt)
+        for stmt in _split_sql(ddl):
+            self.conn.execute(stmt)
 
     # -- Read queries --
 
     def query(self, sql: str) -> list[dict]:
-        """Execute a read-only SQL query. Only SELECT/WITH/EXPLAIN allowed."""
+        """Execute a read-only SQL query via quarry_ro role.
+
+        Defence in depth: regex pre-check + PG role-level enforcement.
+        """
         if not _READ_ONLY_RE.match(sql):
             raise ValueError("Only SELECT/WITH/EXPLAIN queries are allowed")
         with self.conn.cursor(row_factory=dict_row) as cur:
-            cur.execute(sql)
-            return cur.fetchall()
+            cur.execute("SET ROLE quarry_ro")
+            try:
+                cur.execute(sql)
+                return cur.fetchall()
+            finally:
+                cur.execute("RESET ROLE")
 
     def mesh_descendants(self, tree_prefix: str) -> list[dict]:
         """Get all MeSH descriptors under a tree number prefix."""

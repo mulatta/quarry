@@ -11,22 +11,21 @@ from dagster import (
     asset,
 )
 
-from quarry.assets.citations import csr_graph
-from quarry.assets.load import parquet_export
+from quarry.assets.load import ch_transform
 from quarry.config import settings
 from quarry.etl.embeddings import run as run_embeddings
 
 
 @asset(
     group_name="search",
-    deps=[parquet_export, csr_graph],
-    description="Encode works (blake3 change detection) → LanceDB vectors + FTS index.",
-    kinds={"lancedb", "python", "gpu"},
+    deps=[ch_transform],
+    description="CH → LanceDB: two-phase incremental encode (BLAKE3 diff + GPU).",
+    kinds={"clickhouse", "lancedb", "gpu"},
 )
 def paper_embeddings(
     context: AssetExecutionContext,
 ) -> MaterializeResult:
-    context.log.info("[Embed] running pipeline (blake3 cache + jina-v5)")
+    context.log.info("[Embed] running pipeline (CH BLAKE3 diff + jina-v5)")
     run_embeddings(logger=context.log)
     return MaterializeResult(
         metadata={

@@ -264,32 +264,30 @@ pub fn parse_line(
 
     let doi = raw.ids.and_then(|ids| ids.doi);
 
-    // Tier classification: pmid × abstract presence
-    let has_abstract = raw.abstract_inverted_index.is_some();
-    let tier = match (pmid.is_some(), has_abstract) {
+    // Abstract reconstruction + normalization
+    // HTML strip + whitespace collapse here so downstream (CH/PG/embeddings) gets clean text.
+    // Must happen before tier classification — empty/HTML-only inverted indices
+    // reconstruct to None and should not count as "has abstract".
+    let abstract_text = raw
+        .abstract_inverted_index
+        .as_ref()
+        .and_then(|v| {
+            let json_str = sonic_rs::to_string(v).ok()?;
+            let text = abstract_recon::reconstruct_one(&json_str);
+            if text.is_empty() {
+                None
+            } else {
+                let normalized = normalize::normalize_one(&text);
+                if normalized.is_empty() { None } else { Some(normalized) }
+            }
+        });
+
+    // Tier classification: pmid × abstract presence (post-reconstruction)
+    let tier = match (pmid.is_some(), abstract_text.is_some()) {
         (true, true) => Tier::T1,   // pmid + abstract: full enrichment
         (false, true) => Tier::T2,  // abstract only: embedding-ready
         (true, false) => Tier::T3,  // pmid only: PubMed metadata
         (false, false) => Tier::T4, // neither: graph node only
-    };
-
-    // Abstract reconstruction + normalization — T1/T2 only (tiers with abstract)
-    // HTML strip + whitespace collapse here so downstream (CH/PG/embeddings) gets clean text
-    let abstract_text = if tier <= Tier::T2 {
-        raw.abstract_inverted_index
-            .as_ref()
-            .and_then(|v| {
-                let json_str = sonic_rs::to_string(v).ok()?;
-                let text = abstract_recon::reconstruct_one(&json_str);
-                if text.is_empty() {
-                    None
-                } else {
-                    let normalized = normalize::normalize_one(&text);
-                    if normalized.is_empty() { None } else { Some(normalized) }
-                }
-            })
-    } else {
-        None
     };
 
     let title = raw.title.unwrap_or_default();

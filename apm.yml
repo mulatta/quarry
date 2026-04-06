@@ -1,0 +1,11 @@
+name: quarry
+version: 0.1.0
+description: quarry agent skills
+author: mulatta
+dependencies:
+  apm:
+    - ClickHouse/agent-skills
+    - actionbook/rust-skills
+    - dagster-io/skills#v0.0.12
+  mcp: []
+scripts: {}

@@ -169,16 +169,8 @@ impl Graph {
         self.fwd.indptr()
     }
 
-    pub(crate) fn rev_indptr(&self) -> &[u64] {
-        self.rev.indptr()
-    }
-
     pub(crate) fn fwd_indices(&self) -> &[u32] {
         self.fwd.indices()
-    }
-
-    pub(crate) fn rev_indices(&self) -> &[u32] {
-        self.rev.indices()
     }
 
     pub(crate) fn node_count(&self) -> usize {
@@ -457,15 +449,97 @@ impl Graph {
 
     // -- Full-graph algorithms --
 
-    /// PageRank via pull-based power iteration (rayon parallel).
-    fn pagerank(
+    /// Push-based Approximate Personalized PageRank (Andersen et al. 2006).
+    /// Local computation — only visits nodes near the seed. O(1/ε).
+    #[pyo3(signature = (seed, alpha=0.15, epsilon=1e-6, top_k=None))]
+    fn appr(
         &self,
         py: Python<'_>,
+        seed: i64,
         alpha: f64,
-        max_iter: usize,
-        tol: f64,
+        epsilon: f64,
+        top_k: Option<usize>,
     ) -> PyResult<Vec<(i64, f64)>> {
-        py.allow_threads(|| Ok(algo::pagerank::compute(self, alpha, max_iter, tol)))
+        py.allow_threads(|| Ok(algo::appr::compute(self, seed, alpha, epsilon, top_k)))
+    }
+
+    /// Heat Kernel PageRank (Kloster & Gleich 2014).
+    /// Level-based push with Poisson decay. t controls diffusion range.
+    #[pyo3(signature = (seed, t=3.0, epsilon=1e-6, top_k=None))]
+    fn hkpr(
+        &self,
+        py: Python<'_>,
+        seed: i64,
+        t: f64,
+        epsilon: f64,
+        top_k: Option<usize>,
+    ) -> PyResult<Vec<(i64, f64)>> {
+        py.allow_threads(|| Ok(algo::hkpr::compute(self, seed, t, epsilon, top_k)))
+    }
+
+    /// Subgraph expansion: APPR + AA coupling + AA cocitation.
+    /// mode: "fused" (wRRF, focused) or "separated" (APPR + lateral slots, broad).
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    #[pyo3(signature = (seed, alpha=0.15, epsilon=1e-6, mode="fused", weights=(0.7, 0.15, 0.15), rrf_k=60, lateral_pct=25, limit=200))]
+    fn expand(
+        &self,
+        py: Python<'_>,
+        seed: i64,
+        alpha: f64,
+        epsilon: f64,
+        mode: &str,
+        weights: (f64, f64, f64),
+        rrf_k: usize,
+        lateral_pct: usize,
+        limit: usize,
+    ) -> PyResult<(Vec<HashMap<String, PyObject>>, HashMap<String, u64>)> {
+        let m = match mode {
+            "fused" => algo::expand::Mode::Fused,
+            "separated" => algo::expand::Mode::Separated,
+            _ => return Err(pyo3::exceptions::PyValueError::new_err(
+                format!("invalid mode '{}': must be 'fused' or 'separated'", mode),
+            )),
+        };
+        let params = algo::expand::ExpandParams {
+            alpha, epsilon, mode: m,
+            weights: [weights.0, weights.1, weights.2],
+            rrf_k, lateral_pct, limit,
+        };
+        let result = py.allow_threads(|| algo::expand::compute(self, seed, &params));
+
+        // Convert ExpandPaper structs to Python dicts
+        let papers: Vec<HashMap<String, PyObject>> = result
+            .papers
+            .iter()
+            .map(|p| {
+                let mut d: HashMap<String, PyObject> = HashMap::new();
+                d.insert("work_id".into(), p.work_id.into_pyobject(py).unwrap().into_any().unbind());
+                d.insert("fused_score".into(), p.fused_score.into_pyobject(py).unwrap().into_any().unbind());
+                d.insert("appr_score".into(), p.appr_score.into_pyobject(py).unwrap().into_any().unbind());
+
+                // Bridges: list of dicts
+                let bridges: Vec<HashMap<String, PyObject>> = p.bridges.iter().map(|b| {
+                    let mut bd: HashMap<String, PyObject> = HashMap::new();
+                    bd.insert("work_id".into(), b.work_id.into_pyobject(py).unwrap().into_any().unbind());
+                    bd.insert("type".into(), match b.bridge_type {
+                        algo::expand::BridgeType::SharedRef => "shared_ref",
+                        algo::expand::BridgeType::SharedCiter => "shared_citer",
+                    }.into_pyobject(py).unwrap().into_any().unbind());
+                    bd.insert("weight".into(), b.weight.into_pyobject(py).unwrap().into_any().unbind());
+                    bd
+                }).collect();
+                d.insert("bridges".into(), bridges.into_pyobject(py).unwrap().into_any().unbind());
+                d
+            })
+            .collect();
+
+        let mut stats = HashMap::new();
+        stats.insert("appr_candidates".into(), result.stats.appr_candidates as u64);
+        stats.insert("coupling_candidates".into(), result.stats.coupling_candidates as u64);
+        stats.insert("cocitation_candidates".into(), result.stats.cocitation_candidates as u64);
+        stats.insert("elapsed_ms".into(), result.stats.elapsed_ms);
+
+        Ok((papers, stats))
     }
 
     /// Weakly connected components via atomic union-find.
@@ -509,31 +583,6 @@ impl Graph {
     }
 
     // -- Subgraph methods --
-
-    /// PageRank on induced subgraph.
-    /// PageRank or Personalized PageRank on an induced subgraph.
-    /// If restart_node is given, runs PPR (teleport to that node).
-    #[pyo3(signature = (ids, alpha=0.85, max_iter=100, tol=1e-6, restart_node=None))]
-    fn subgraph_pagerank(
-        &self,
-        py: Python<'_>,
-        ids: Vec<i64>,
-        alpha: f64,
-        max_iter: usize,
-        tol: f64,
-        restart_node: Option<i64>,
-    ) -> PyResult<Vec<(i64, f64)>> {
-        py.allow_threads(|| {
-            Ok(algo::pagerank::subgraph(
-                self,
-                &ids,
-                alpha,
-                max_iter,
-                tol,
-                restart_node,
-            ))
-        })
-    }
 
     /// Brandes betweenness centrality on induced subgraph.
     fn subgraph_betweenness(
@@ -895,13 +944,13 @@ mod tests {
     }
 
     #[test]
-    fn test_subgraph_pagerank() {
+    fn test_appr() {
         let g = test_graph();
-        let pr = algo::pagerank::subgraph(&g, &[1, 2, 3], 0.85, 100, 1e-8, None);
-        assert_eq!(pr.len(), 3);
-        assert!(pr.iter().all(|&(_, s)| s > 0.0));
-        let total: f64 = pr.iter().map(|&(_, s)| s).sum();
-        assert!((total - 1.0).abs() < 0.01, "total={}", total);
+        let result = algo::appr::compute(&g, 1, 0.15, 1e-8, None);
+        assert!(!result.is_empty());
+        assert!(result.iter().all(|&(_, s)| s > 0.0));
+        // seed should have highest score
+        assert_eq!(result[0].0, 1);
     }
 
     #[test]
@@ -933,13 +982,10 @@ mod tests {
     }
 
     #[test]
-    fn test_pagerank() {
+    fn test_appr_top_k() {
         let g = test_graph();
-        let pr = algo::pagerank::compute(&g, 0.85, 100, 1e-8);
-        assert_eq!(pr.len(), 5);
-        assert!(pr.iter().all(|&(_, s)| s > 0.0));
-        let total: f64 = pr.iter().map(|&(_, s)| s).sum();
-        assert!((total - 1.0).abs() < 0.01, "total={}", total);
+        let result = algo::appr::compute(&g, 1, 0.15, 1e-8, Some(2));
+        assert!(result.len() <= 2);
     }
 
     // -- Helpers for tests (avoid PyO3 `py` parameter) --

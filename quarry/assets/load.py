@@ -21,6 +21,7 @@ from pathlib import Path
 
 from dagster import (
     AssetExecutionContext,
+    AutomationCondition,
     MaterializeResult,
     MetadataValue,
     asset,
@@ -35,6 +36,7 @@ from quarry.assets.download import (
 from quarry.assets.helpers import run, run_parse
 from quarry.assets.stage import mesh_stage
 from quarry.config import settings
+from quarry.resources import PGResource
 
 
 def _ch_client_cmd() -> list[str]:
@@ -67,30 +69,54 @@ def _ch_client_cmd() -> list[str]:
     ]
 
 
+_GRACE_HASH_SETTINGS = [
+    "--join_algorithm",
+    "grace_hash",
+    "--max_bytes_in_join",
+    "10000000000",
+    "--grace_hash_join_initial_buckets",
+    "4",
+]
+
+
 def _ch_query(
-    query: str, context: AssetExecutionContext, label: str | None = None
+    query: str,
+    context: AssetExecutionContext,
+    label: str | None = None,
+    *,
+    grace_hash: bool = False,
+    external_group_by: bool = False,
 ) -> None:
     """Run a single CH query."""
-    run(_ch_client_cmd() + ["--query", query], context, label=label or f"[CH] {query}")
+    cmd = _ch_client_cmd()
+    if grace_hash:
+        cmd += _GRACE_HASH_SETTINGS
+    if external_group_by:
+        cmd += ["--max_bytes_before_external_group_by", "32000000000"]
+    run(cmd + ["--query", query], context, label=label or f"[CH] {query}")
 
 
-def _psql(sql: str, context: AssetExecutionContext, label: str | None = None) -> None:
-    """Run psql command."""
-    run(
-        [
-            "psql",
-            settings.pg_conninfo,
-            "-c",
-            sql,
-        ],
-        context,
-        label=label or f"[PG] {sql}",
-    )
+def _psql(
+    sql: str,
+    context: AssetExecutionContext,
+    label: str | None = None,
+    *,
+    pgoptions: str | None = None,
+) -> None:
+    """Run psql command. Optional PGOPTIONS for session-level GUC overrides."""
+    import os
+
+    cmd = ["psql", settings.pg_conninfo, "-c", sql]
+    env = None
+    if pgoptions:
+        env = {**os.environ, "PGOPTIONS": pgoptions}
+    run(cmd, context, label=label or f"[PG] {sql}", env=env)
 
 
 # ── CH init asset ──
 
-_CH_SCHEMA_SQL = Path(__file__).resolve().parent.parent.parent / "sql" / "ch_schema.sql"
+_SQL_DIR = Path(__file__).resolve().parent.parent.parent / "sql"
+_CH_SCHEMA_SQL = _SQL_DIR / "ch_schema.sql"
 
 
 def _ch_query_no_db(
@@ -144,6 +170,7 @@ def ch_init(context: AssetExecutionContext) -> MaterializeResult:
     deps=[oa_sync],
     description="quarry-parse oa: gz JSONL → Parquet.",
     kinds={"rust", "parquet"},
+    automation_condition=AutomationCondition.eager(),
 )
 def oa_parse(context: AssetExecutionContext) -> MaterializeResult:
     run_parse(
@@ -166,6 +193,7 @@ def oa_parse(context: AssetExecutionContext) -> MaterializeResult:
     deps=[pubmed_baseline_sync, pubmed_updates_sync],
     description="quarry-parse pubmed: XML → Parquet.",
     kinds={"rust", "parquet"},
+    automation_condition=AutomationCondition.eager(),
 )
 def pm_parse(context: AssetExecutionContext) -> MaterializeResult:
     args = [
@@ -288,7 +316,7 @@ def ch_load_pm(context: AssetExecutionContext) -> MaterializeResult:
     pm_dir = str(settings.pm_parquet_dir)
     _ch_load_tables(
         [f"pm_{t}" for t in _PM_TABLES],
-        [(f"pm_{t}", f"{pm_dir}/{t}/**/*.parquet", "Parquet") for t in _PM_TABLES],
+        [(f"pm_{t}", f"{pm_dir}/{t}/*.parquet", "Parquet") for t in _PM_TABLES],
         context,
     )
     return MaterializeResult(metadata={"status": MetadataValue.text("ok")})
@@ -381,21 +409,51 @@ def ch_transform(context: AssetExecutionContext) -> MaterializeResult:
             context.log.info(f"[CH] OPTIMIZE {table} FINAL done")
 
     # 2-5. Enriched export tables
-    export_sql = "sql/ch_transform.sql"
+    export_sql = _SQL_DIR / "ch_transform.sql"
     context.log.info(f"[CH] reading {export_sql}")
-    with open(export_sql) as f:
-        content = f.read()
+    content = export_sql.read_text()
+
+    # Tables with large JOINs that need grace_hash to stay within 64GB.
+    # Tables with large JOINs that need grace_hash to stay within 64GB.
+    _GRACE_HASH_TABLES = {
+        "_works_raw",  # 3-way LEFT JOIN: oa_works × pm_papers × icite_raw
+        "papers_export",  # LEFT JOIN: pm_papers × icite_raw
+        "icite_citations",  # 2× INNER JOIN: parsed × works_export
+        "merged_citations",  # 2× INNER JOIN paper_ids + ANTI JOIN oa_work_citations
+    }
+    # Large GROUP BY — spill hash table to disk when it exceeds 32GB.
+    _EXTERNAL_GROUP_BY_TABLES = {"_junk_hashes"}
 
     # Extract CREATE OR REPLACE TABLE statements
-    stmts = re.split(r"(?=CREATE OR REPLACE TABLE)", content)
+    stmts = re.split(r"(?=CREATE OR REPLACE (?:TABLE|VIEW))", content)
     for stmt in stmts:
         stmt = stmt.strip()
         if not stmt.startswith("CREATE"):
             continue
+        # CH --query accepts a single statement; trim anything after
+        # the final semicolon (trailing section comments from SQL file).
+        if ";" in stmt:
+            stmt = stmt[: stmt.rindex(";") + 1]
         # Extract table name for logging
-        match = re.match(r"CREATE OR REPLACE TABLE (\S+)", stmt)
-        label = f"[CH] CREATE {match.group(1)}" if match else "[CH] CREATE TABLE"
-        _ch_query(stmt, context, label=label)
+        match = re.match(r"CREATE OR REPLACE (?:TABLE|VIEW) (\S+)", stmt)
+        table_name = match.group(1) if match else ""
+        label = f"[CH] CREATE {table_name}" if match else "[CH] CREATE TABLE"
+        _ch_query(
+            stmt,
+            context,
+            label=label,
+            grace_hash=table_name in _GRACE_HASH_TABLES,
+            external_group_by=table_name in _EXTERNAL_GROUP_BY_TABLES,
+        )
+
+    # Drop intermediate table from 2-pass boilerplate filter
+    # Drop intermediate tables from 2-pass boilerplate filter
+    for tmp in ("_works_raw", "_junk_hashes"):
+        _ch_query(
+            f"DROP TABLE IF EXISTS {tmp}",
+            context,
+            label=f"[CH] DROP {tmp}",
+        )
 
     return MaterializeResult(
         metadata={"status": MetadataValue.text("ok")},
@@ -421,7 +479,7 @@ _WORKS_COLUMNS = (
 )
 # Parquet export columns: tier excluded (derived from hive directory tier=t1/).
 _WORKS_EXPORT_COLUMNS = (
-    "work_id, work_id_int, pmid, doi, title, abstract, "
+    "work_id, work_id_int, pmid, doi, title, abstract, content_hash, "
     "pub_year, pub_date, type, cited_by_count, host_venue, oa_status, oa_url, "
     "is_retracted, updated_date, pm_journal_abbr, pm_country, pm_medline_status, "
     "pm_pub_type, pm_created_date, pm_revised_date, pm_indexed_date, "
@@ -597,14 +655,23 @@ def parquet_export(context: AssetExecutionContext) -> MaterializeResult:
             raise RuntimeError(f"Parquet export failed for {pg_table}: {result.stderr}")
         return pg_table
 
+    # works tiers: sequential to bound memory (each tier opens 256 ParquetWriters
+    # + row-group buffers; running 4 tiers in parallel consumed ~105GB RSS).
+    done = 0
+    for tier in _TIERS:
+        try:
+            _export_and_split_tier(tier)
+            done += 1
+            context.log.info(f"[Parquet] works/tier={tier} done [{done}/{total}]")
+        except RuntimeError:
+            failed.append(f"works/tier={tier}")
+
+    # flat tables: parallel (single-file export, memory-light)
     with ThreadPoolExecutor(max_workers=settings.ch_export_max_concurrent) as pool:
         futures: dict[object, str] = {}
-        for tier in _TIERS:
-            futures[pool.submit(_export_and_split_tier, tier)] = f"works/tier={tier}"
         for ch, pg, cols in _EXPORT_TABLES:
             futures[pool.submit(_export, ch, pg, cols)] = pg
 
-        done = 0
         for future in as_completed(futures):
             name = futures[future]
             try:
@@ -628,103 +695,57 @@ def parquet_export(context: AssetExecutionContext) -> MaterializeResult:
 # ── PG load asset ──
 
 
-# PG text[] columns stored as '{a,b}' VARCHAR in Parquet.
-# DuckDB needs explicit conversion: strip braces → split → array.
-_TEXT_ARRAY_COLUMNS = {"pm_pub_type", "pub_type"}
-
-
-def _select_expr(columns: str) -> str:
-    """Build SELECT expression, converting '{a,b}' VARCHAR → VARCHAR[] for text[] cols."""
-    parts = []
-    for col in (c.strip() for c in columns.split(",")):
-        if col in _TEXT_ARRAY_COLUMNS:
-            parts.append(f"string_split(trim('{{}}'  FROM {col}), ',') AS {col}")
-        else:
-            parts.append(col)
-    return ", ".join(parts)
-
-
-def _pipe_pg_load(
-    pg_table: str, columns: str, parquet_path: Path, *, hive: bool = False
+def _ch_to_pg(
+    ch_table: str,
+    pg_table: str,
+    columns: str,
+    *,
+    where: str | None = None,
 ) -> None:
-    """Stream Parquet → CSV pipe → PG COPY (no temp files, no DuckDB wire overhead).
+    """Stream CH → CSVWithNames → psql COPY. Zero memory overhead.
 
-    DuckDB writes CSV to a named pipe (FIFO) while psql reads from it
-    simultaneously. ~3.7x faster than DuckDB postgres extension.
-
-    Note: text[] columns (pm_pub_type, pub_type) are stored as '{a,b}' strings
-    in parquet. PG COPY parses this directly as text[] — no conversion needed.
+    clickhouse-client writes CSV to stdout, piped directly into psql COPY.
+    No DuckDB, no intermediate files, no named pipes.
+    text[] columns (pm_pub_type, pub_type) are stored as '{a,b}' strings
+    in CH. PG COPY parses this directly as text[] — no conversion needed.
     """
-    import os
-    import threading
+    query = f"SELECT {columns} FROM {ch_table}"
+    if where:
+        query += f" WHERE {where}"
+    query += " FORMAT CSVWithNames"
 
-    import duckdb
+    ch_proc = subprocess.Popen(
+        _ch_client_cmd() + ["--query", query],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
 
-    # No _select_expr here — pass columns as-is. PG COPY handles '{a,b}' → text[].
-    select = columns
-    if parquet_path.is_dir():
-        glob = "**/*.parquet" if hive else "*.parquet"
-        src = f"{parquet_path}/{glob}"
-    else:
-        src = str(parquet_path)
-    opts = ", hive_partitioning=true" if hive else ""
-
-    pipe_path = f"/tmp/quarry_pg_pipe_{pg_table}_{os.getpid()}_{threading.get_ident()}"
-    try:
-        os.mkfifo(pipe_path)
-    except FileExistsError:
-        os.unlink(pipe_path)
-        os.mkfifo(pipe_path)
-
-    _error: list[Exception] = []
-
-    def _writer():
-        conn = duckdb.connect()
-        try:
-            conn.execute(
-                f"COPY (SELECT {select} FROM read_parquet('{src}'{opts})) "
-                f"TO '{pipe_path}' (FORMAT CSV, HEADER)"
-            )
-        except Exception as exc:
-            _error.append(exc)
-            # Open+close pipe to unblock reader if DuckDB never opened it
-            try:
-                fd = os.open(pipe_path, os.O_WRONLY | os.O_NONBLOCK)
-                os.close(fd)
-            except OSError:
-                pass
-        finally:
-            conn.close()
-
-    # Start reader (psql) first — blocks on pipe open() until writer connects.
-    reader = subprocess.Popen(
+    pg_proc = subprocess.Popen(
         [
             "psql",
             settings.pg_conninfo,
             "-c",
-            f"\\COPY {pg_table} ({columns}) FROM '{pipe_path}' CSV HEADER",
+            f"\\COPY {pg_table} ({columns}) FROM STDIN CSV HEADER NULL '\\N'",
         ],
+        stdin=ch_proc.stdout,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
     )
 
-    # Writer thread opens pipe (unblocks reader) and streams CSV.
-    writer = threading.Thread(target=_writer, daemon=True)
-    writer.start()
+    # Allow ch_proc to receive SIGPIPE if pg_proc exits early.
+    assert ch_proc.stdout is not None
+    ch_proc.stdout.close()
 
-    _, stderr = reader.communicate()
-    writer.join(timeout=30)
+    _, pg_stderr = pg_proc.communicate()
+    ch_proc.wait()
 
-    try:
-        os.unlink(pipe_path)
-    except FileNotFoundError:
-        pass
-
-    if _error:
-        raise _error[0]
-    if reader.returncode != 0:
-        raise RuntimeError(f"psql COPY failed for {pg_table}: {stderr}")
+    if ch_proc.returncode != 0:
+        assert ch_proc.stderr is not None
+        ch_err = ch_proc.stderr.read().decode()
+        raise RuntimeError(f"CH export failed for {ch_table}: {ch_err}")
+    if pg_proc.returncode != 0:
+        raise RuntimeError(f"psql COPY failed for {pg_table}: {pg_stderr}")
 
 
 _ALL_PG_TABLES = [
@@ -747,12 +768,14 @@ _ALL_PG_TABLES = [
 
 @asset(
     group_name="serve",
-    deps=[parquet_export],
-    description="Parquet → PG via CSV pipe (UNLOGGED + parallel, ~3.7x baseline).",
-    kinds={"parquet", "postgres"},
+    deps=[ch_transform],
+    description="CH → PG via CSVWithNames pipe (UNLOGGED + parallel, zero memory).",
+    kinds={"clickhouse", "postgres"},
 )
-def pg_load(context: AssetExecutionContext) -> MaterializeResult:
-    _psql("\\i sql/drop_indexes.sql", context, label="[PG] dropping indexes")
+def pg_load(context: AssetExecutionContext, pg: PGResource) -> MaterializeResult:
+    _psql(
+        f"\\i {_SQL_DIR / 'drop_indexes.sql'}", context, label="[PG] dropping indexes"
+    )
 
     # SET UNLOGGED — skip WAL during bulk load
     for t in _ALL_PG_TABLES:
@@ -766,31 +789,30 @@ def pg_load(context: AssetExecutionContext) -> MaterializeResult:
         label="[PG] truncating all tables",
     )
 
-    pq_dir = Path(settings.parquet_dir)
     failed: list[str] = []
 
     # works: sequential per-tier (same table → PG table lock prevents parallel COPY)
     for tier in _TIERS:
-        tier_dir = pq_dir / "works" / f"tier={tier}"
-        if not any(tier_dir.glob("*.parquet")) if tier_dir.exists() else True:
-            context.log.info(f"[PG] works tier={tier} skipped (no parquet files)")
-            continue
         context.log.info(f"[PG] loading works tier={tier}")
-        _pipe_pg_load("works", _WORKS_COLUMNS, tier_dir)
+        _ch_to_pg(
+            "works_export",
+            "works",
+            _WORKS_COLUMNS,
+            where=f"tier = '{tier}'",
+        )
         context.log.info(f"[PG] works tier={tier} done")
 
     # Remaining flat tables: parallel (independent tables, no lock contention)
-    def _load_table(pg_table: str, columns: str) -> str:
-        pq_path = pq_dir / f"{pg_table}.parquet"
-        _pipe_pg_load(pg_table, columns, pq_path)
+    def _load_table(ch_table: str, pg_table: str, columns: str) -> str:
+        _ch_to_pg(ch_table, pg_table, columns)
         return pg_table
 
     total = len(_EXPORT_TABLES)
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         futures: dict[object, str] = {}
-        for _, pg, cols in _EXPORT_TABLES:
-            futures[pool.submit(_load_table, pg, cols)] = pg
+        for ch_tbl, pg_tbl, cols in _EXPORT_TABLES:
+            futures[pool.submit(_load_table, ch_tbl, pg_tbl, cols)] = pg_tbl
 
         done = 0
         for future in as_completed(futures):
@@ -810,12 +832,27 @@ def pg_load(context: AssetExecutionContext) -> MaterializeResult:
     for t in _ALL_PG_TABLES:
         _psql(f"ALTER TABLE {t} SET LOGGED", context, label=f"[PG] LOGGED {t}")
 
-    _psql("\\i sql/schema.sql", context, label="[PG] recreating indexes")
+    # Boost parallel index build for bulk load session only (via PGOPTIONS).
+    _psql(
+        f"\\i {_SQL_DIR / 'schema.sql'}",
+        context,
+        label="[PG] recreating indexes",
+        pgoptions="-c maintenance_work_mem=4GB -c max_parallel_maintenance_workers=8",
+    )
 
     _psql("VACUUM ANALYZE works", context, label="[PG] VACUUM ANALYZE works")
     for _, t, _ in _EXPORT_TABLES:
         _psql(f"VACUUM ANALYZE {t}", context, label=f"[PG] VACUUM ANALYZE {t}")
 
-    return MaterializeResult(
-        metadata={"status": MetadataValue.text("ok")},
-    )
+    # REINDEX after bulk COPY to eliminate index bloat from batch insertions.
+    # Safe without CONCURRENTLY since no other sessions during bulk load.
+    _psql("REINDEX DATABASE quarry", context, label="[PG] REINDEX")
+
+    # Report row counts for key tables via PGResource
+    counts = {}
+    for table in ("works", "papers", "work_citations"):
+        rows = pg.store.query(f"SELECT count(*) AS n FROM {table}")[0]["n"]
+        counts[f"{table}_rows"] = MetadataValue.int(rows)
+        context.log.info(f"[PG] {table}: {rows:,} rows")
+
+    return MaterializeResult(metadata=counts)

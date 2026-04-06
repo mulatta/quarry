@@ -15,9 +15,11 @@ import hashlib
 
 from dagster import (
     AssetExecutionContext,
+    Backoff,
     DataVersion,
     MaterializeResult,
     MetadataValue,
+    RetryPolicy,
     asset,
 )
 
@@ -31,6 +33,8 @@ from quarry.etl.fetch import (
     sync_ftp_dir,
 )
 import subprocess
+
+_DOWNLOAD_RETRY = RetryPolicy(max_retries=3, delay=30, backoff=Backoff.EXPONENTIAL)
 
 
 def _version_from_file_listing(
@@ -80,6 +84,7 @@ def _ftp_sync_asset(
     group_name="pubmed",
     description="Mirror PubMed baseline XML files from NCBI FTP (~657 files, ~11GB).",
     kinds={"ftp"},
+    retry_policy=_DOWNLOAD_RETRY,
 )
 def pubmed_baseline_sync(
     context: AssetExecutionContext,
@@ -110,6 +115,7 @@ def pubmed_baseline_sync(
     group_name="pubmed",
     description="Mirror PubMed daily update XML files from NCBI FTP.",
     kinds={"ftp"},
+    retry_policy=_DOWNLOAD_RETRY,
 )
 def pubmed_updates_sync(
     context: AssetExecutionContext,
@@ -140,6 +146,7 @@ def pubmed_updates_sync(
     group_name="supplementary",
     description="Download latest MeSH descriptor XML from NLM FTP (annual update).",
     kinds={"ftp"},
+    retry_policy=_DOWNLOAD_RETRY,
 )
 def mesh_descriptor_sync(
     context: AssetExecutionContext,
@@ -174,6 +181,7 @@ def mesh_descriptor_sync(
     group_name="citations",
     description="Download iCite metadata CSV from figshare.",
     kinds={"http"},
+    retry_policy=_DOWNLOAD_RETRY,
 )
 def icite_metadata_sync(
     context: AssetExecutionContext,
@@ -207,6 +215,7 @@ def icite_metadata_sync(
     group_name="sync",
     description="aws s3 sync for OpenAlex works.",
     kinds={"s3"},
+    retry_policy=_DOWNLOAD_RETRY,
 )
 def oa_sync(
     context: AssetExecutionContext,

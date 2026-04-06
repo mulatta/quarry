@@ -70,7 +70,7 @@ class Settings(BaseSettings):
     embed_max_tokens: int = (
         1024  # tokenizer truncation; prevents GPU OOM from long texts
     )
-    embed_parquet_batch: int = 5000  # PyArrow scanner batch size (rows per yield)
+    embed_encode_batch: int = 1024  # works per GPU encode batch (CH fetch → encode)
     embed_allowed_types: list[str] = [
         "article",
         "preprint",

@@ -25,3 +25,8 @@ data/
 
 # test
 tests/data/
+
+
+# agents
+.claude/*
+apm_modules/

@@ -4,7 +4,9 @@
 
 USE quarry;
 
-/* 1. Force dedup on all raw tables */
+/* 1. Force dedup on all raw tables.
+   OPTIMIZE FINAL is intentional: batch ELT pipeline requires guaranteed
+   dedup before export to PG.  One-time per pipeline run, not recurring. */
 
 OPTIMIZE TABLE oa_works FINAL;
 OPTIMIZE TABLE oa_work_authors FINAL;
@@ -20,20 +22,48 @@ OPTIMIZE TABLE pm_chemicals FINAL;
 OPTIMIZE TABLE pm_mesh_tree FINAL;
 OPTIMIZE TABLE icite_raw FINAL;
 
-/* 2. works_export: OA works enriched with PubMed + iCite fields */
+/* 2a. Junk content hashes: content identical across ≥5 OA works.
+       Computed from oa_works directly (no PM abstract fallback — irrelevant
+       for boilerplate which has no/empty abstract). ~1.1M hashes covering
+       "Santa Clara" 29K, "DEPRECATED" 8.5K, "Editorial Board", etc. */
 
-CREATE OR REPLACE TABLE works_export
+CREATE OR REPLACE TABLE _junk_hashes
+ENGINE = MergeTree()
+ORDER BY content_hash
+AS
+SELECT BLAKE3(concat(title, '\n', coalesce(abstract, ''))) AS content_hash
+FROM oa_works
+GROUP BY content_hash
+HAVING count() >= 5;
+
+/* 2b. _works_raw: OA works enriched with PubMed + iCite fields (all rows).
+       Intermediate table — filtered into works_export, then dropped. */
+
+CREATE OR REPLACE TABLE _works_raw
 ENGINE = MergeTree()
 ORDER BY work_id
 AS
 SELECT
     w.work_id       AS work_id,
     w.work_id_int   AS work_id_int,
-    w.tier          AS tier,
+    -- Tier reclassification: OA tier is based on OA abstract only;
+    -- recompute after PM abstract fallback so T3→T1 when PM has abstract.
+    multiIf(
+        w.pmid IS NOT NULL AND coalesce(p.abstract, w.abstract) IS NOT NULL, 't1',
+        coalesce(p.abstract, w.abstract) IS NOT NULL, 't2',
+        w.pmid IS NOT NULL, 't3',
+        't4'
+    )                AS tier,
     w.pmid          AS pmid,
     w.doi           AS doi,
     w.title         AS title,
-    w.abstract      AS abstract,
+    coalesce(p.abstract, w.abstract) AS abstract,  -- PM full-text preferred over OA snippet
+    multiIf(
+        p.abstract IS NOT NULL AND p.abstract != '', 'pm',
+        w.abstract IS NOT NULL AND w.abstract != '', 'oa',
+        NULL
+    )                AS abstract_origin,
+    BLAKE3(concat(w.title, '\n', coalesce(p.abstract, w.abstract, ''))) AS content_hash,
     w.pub_year      AS pub_year,
     w.pub_date      AS pub_date,
     w.type          AS type,
@@ -64,6 +94,15 @@ SELECT
 FROM oa_works w
 LEFT JOIN pm_papers p ON w.pmid = p.pmid AND w.pmid IS NOT NULL
 LEFT JOIN icite_raw i ON w.pmid = i.pmid AND w.pmid IS NOT NULL;
+
+/* 2c. works_export: _works_raw minus boilerplate junk. */
+
+CREATE OR REPLACE TABLE works_export
+ENGINE = MergeTree()
+ORDER BY work_id
+AS
+SELECT w.* FROM _works_raw w
+LEFT ANTI JOIN _junk_hashes junk ON w.content_hash = junk.content_hash;
 
 /* 3. papers_export: PubMed papers enriched with iCite */
 
@@ -122,10 +161,20 @@ SELECT
 FROM pm_mesh_headings m
 INNER JOIN oa_id_crosswalk c ON m.pmid = c.pmid;
 
-/* 5. merged_citations: OA citations + iCite-derived citations (deduped).
-      iCite references field contains space-separated PMIDs.
-      Convert PMID → work_id_int via works_export (which has pmid column).
-      ReplacingMergeTree deduplicates overlapping edges. */
+/* 5. merged_citations: OA citations ∪ iCite-only citations.
+      Filters applied:
+        - Both endpoints must be paper types (article, review, preprint, editorial, letter)
+        - Supplementary files excluded (title starts with "Additional file" / "Supplementary")
+        - iCite edges already in OA are excluded (ANTI JOIN)
+      This removes ~39M non-paper nodes and ~700M+ non-paper edges from the graph. */
+
+/* Allowed work types for citation graph nodes. */
+CREATE OR REPLACE VIEW paper_ids AS
+SELECT work_id_int
+FROM oa_works
+WHERE type IN ('article', 'review', 'preprint', 'editorial', 'letter')
+  AND NOT startsWith(title, 'Additional file')
+  AND NOT startsWith(title, 'Supplementary');
 
 CREATE OR REPLACE TABLE icite_citations
 ENGINE = MergeTree()
@@ -146,14 +195,20 @@ INNER JOIN works_export w_cited  ON parsed.cited_pmid  = w_cited.pmid
 WHERE w_citing.work_id_int != w_cited.work_id_int;
 
 CREATE OR REPLACE TABLE merged_citations
-ENGINE = ReplacingMergeTree()
+ENGINE = MergeTree()
 ORDER BY (citing_id, cited_id)
 AS
-SELECT citing_id, cited_id FROM oa_work_citations
+SELECT oa.citing_id, oa.cited_id
+FROM oa_work_citations oa
+INNER JOIN paper_ids pa ON oa.citing_id = pa.work_id_int
+INNER JOIN paper_ids pb ON oa.cited_id = pb.work_id_int
 UNION ALL
-SELECT citing_id, cited_id FROM icite_citations;
-
-OPTIMIZE TABLE merged_citations FINAL;
+SELECT ic.citing_id, ic.cited_id
+FROM icite_citations ic
+INNER JOIN paper_ids pa ON ic.citing_id = pa.work_id_int
+INNER JOIN paper_ids pb ON ic.cited_id = pb.work_id_int
+LEFT ANTI JOIN oa_work_citations oa
+    ON ic.citing_id = oa.citing_id AND ic.cited_id = oa.cited_id;
 
 /* 6. cited_by_clin_export: iCite clinical citation expansion */
 

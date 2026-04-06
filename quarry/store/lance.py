@@ -81,6 +81,55 @@ class LanceStore:
         )
         return {r["work_id"]: bytes(r["content_hash"]) for r in result}
 
+    def existing_hashes_all(self, batch_size: int = 100_000) -> dict[str, bytes]:
+        """Return all (work_id → content_hash) pairs from LanceDB.
+
+        Streams in batches for bounded memory.
+        """
+        result: dict[str, bytes] = {}
+        scanner = self.table.to_lance().scanner(
+            columns=["work_id", "content_hash"], batch_size=batch_size
+        )
+        for batch in scanner.to_batches():
+            wids = batch.column("work_id").to_pylist()
+            hashes = batch.column("content_hash").to_pylist()
+            for wid, h in zip(wids, hashes):
+                result[wid] = bytes(h)
+        return result
+
+    def all_work_ids(self, batch_size: int = 100_000) -> set[str]:
+        """Return the full set of work_ids stored in LanceDB.
+
+        Streams in batches to avoid loading entire table into memory at once.
+        """
+        ids: set[str] = set()
+        scanner = self.table.to_lance().scanner(
+            columns=["work_id"], batch_size=batch_size
+        )
+        for batch in scanner.to_batches():
+            ids.update(batch.column("work_id").to_pylist())
+        return ids
+
+    def delete_work_ids_batch(self, work_ids: set[str], batch_size: int = 10_000):
+        """Delete orphan work_ids in batches."""
+        if not work_ids:
+            return 0
+        items = list(work_ids)
+        deleted = 0
+        for i in range(0, len(items), batch_size):
+            chunk = items[i : i + batch_size]
+            _validate_work_ids(chunk)
+            id_list = ", ".join(f"'{w}'" for w in chunk)
+            self.table.delete(f"work_id IN ({id_list})")
+            deleted += len(chunk)
+        return deleted
+
+    def optimize(self):
+        """Compact fragments + prune old versions. Call periodically during long runs."""
+        from datetime import timedelta
+
+        self.table.optimize(cleanup_older_than=timedelta(seconds=0))
+
     def create_fts_index(self):
         """Build BM25 full-text index on title and abstract."""
         self.table.create_fts_index(["title", "abstract"], replace=True)

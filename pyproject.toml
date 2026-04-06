@@ -13,6 +13,7 @@ dependencies = [
     "peft>=0.18.1",
     "psycopg[binary]",
     "pydantic-settings",
+    "pylance>=4.0.0",
 ]
 
 [project.optional-dependencies]
@@ -49,7 +50,10 @@ dev = [
 quarry = "quarry.cli:app"
 
 [tool.uv.workspace]
-members = ["crates/quarry-core", "crates/quarry-graph"]
+members = [
+    "crates/quarry-core",
+    "crates/quarry-graph",
+]
 
 [tool.uv.sources]
 quarry-core = { workspace = true }
