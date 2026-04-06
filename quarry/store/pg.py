@@ -50,12 +50,19 @@ class PGStore:
     # -- Read queries --
 
     def query(self, sql: str) -> list[dict]:
-        """Execute a read-only SQL query. Only SELECT/WITH/EXPLAIN allowed."""
+        """Execute a read-only SQL query via quarry_ro role.
+
+        Defence in depth: regex pre-check + PG role-level enforcement.
+        """
         if not _READ_ONLY_RE.match(sql):
             raise ValueError("Only SELECT/WITH/EXPLAIN queries are allowed")
         with self.conn.cursor(row_factory=dict_row) as cur:
-            cur.execute(sql)
-            return cur.fetchall()
+            cur.execute("SET ROLE quarry_ro")
+            try:
+                cur.execute(sql)
+                return cur.fetchall()
+            finally:
+                cur.execute("RESET ROLE")
 
     def mesh_descendants(self, tree_prefix: str) -> list[dict]:
         """Get all MeSH descriptors under a tree number prefix."""

@@ -829,6 +829,10 @@ def pg_load(context: AssetExecutionContext) -> MaterializeResult:
     for _, t, _ in _EXPORT_TABLES:
         _psql(f"VACUUM ANALYZE {t}", context, label=f"[PG] VACUUM ANALYZE {t}")
 
+    # REINDEX after bulk COPY to eliminate index bloat from batch insertions.
+    # Safe without CONCURRENTLY since no other sessions during bulk load.
+    _psql("REINDEX DATABASE quarry", context, label="[PG] REINDEX")
+
     return MaterializeResult(
         metadata={"status": MetadataValue.text("ok")},
     )
