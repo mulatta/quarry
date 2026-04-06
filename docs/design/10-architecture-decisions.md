@@ -302,3 +302,61 @@ Embedding adds a **candidate source**, not a replacement:
 - Far pair: embedding candidates + citation validation (order reverses)
 
 See: [11-bridge.md](11-bridge.md) for full design.
+
+## AD-7: CSR Graph Cleanup and Lightweight Build Options
+
+**Date**: 2026-04-03
+**Status**: Proposed
+
+### Context
+
+Current CSR: 182M nodes, 3.77B edges, ~30GB. Built from OA works +
+OA citations + iCite citations merge.
+
+Bridge quality evaluation (Type 1-4) revealed data quality issues that
+inflate graph size without adding signal:
+
+### Issues Found
+
+**1. Duplicate edges** — OA + iCite merge produced 792M duplicate edges
+(20%). 93% of iCite citations already exist in OA (same PubMed source).
+Fix: LEFT ANTI JOIN to insert only iCite-exclusive edges (~58M).
+
+**2. Supplementary files as nodes** — OpenAlex registers "Additional
+file 1 of ..." as separate works with type=article. These appear in
+Type 3 coupling results as non-PMID noise.
+
+**3. Non-paper work types** — dataset (21M), book-chapter (10M),
+dissertation (1.7M), book (3M), other (2M) = 39M nodes (24% of CSR).
+These participate in citations but are not useful for bridge discovery.
+
+**4. Duplicate works (journal variants)** — Same paper in multiple
+journal editions (e.g., Angewandte Chemie / Angewandte Chemie Int. Ed.)
+registered as separate work_ids with independent citation edges.
+
+### Decision
+
+Build-time filters in `merged_citations` (sql/ch_transform.sql):
+
+| Filter | Method | Effect |
+|--------|--------|--------|
+| Edge dedup | iCite ANTI JOIN against OA | -792M edges (20%) |
+| Paper types only | INNER JOIN `paper_ids` view | -39M nodes, -700M+ edges |
+| Supplementary removal | `NOT startsWith(title, 'Additional file')` | -1.7M noise nodes |
+
+`paper_ids` VIEW: `type IN ('article','review','preprint','editorial','letter')`,
+excluding supplementary files by title prefix.
+
+Engine changed: `ReplacingMergeTree` → `MergeTree` (no duplicates to replace).
+
+Expected result: ~143M nodes / ~2.6B edges (~20GB, from 182M / 3.8B / ~30GB).
+
+### Lightweight Build Option (Deferred)
+
+PubMed-only profile: `PMID > 0` filter → ~34M nodes / ~1.7B edges (~8GB).
+Trades Type 3 coverage (60-70%) for 4x size reduction.
+
+### Metadata API Migration (Deferred)
+
+PG/CH metadata can be replaced by OA API + iCite API at runtime.
+CSR is the sole irreplaceable local asset.
