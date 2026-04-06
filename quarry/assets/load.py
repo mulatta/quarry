@@ -655,14 +655,23 @@ def parquet_export(context: AssetExecutionContext) -> MaterializeResult:
             raise RuntimeError(f"Parquet export failed for {pg_table}: {result.stderr}")
         return pg_table
 
+    # works tiers: sequential to bound memory (each tier opens 256 ParquetWriters
+    # + row-group buffers; running 4 tiers in parallel consumed ~105GB RSS).
+    done = 0
+    for tier in _TIERS:
+        try:
+            _export_and_split_tier(tier)
+            done += 1
+            context.log.info(f"[Parquet] works/tier={tier} done [{done}/{total}]")
+        except RuntimeError:
+            failed.append(f"works/tier={tier}")
+
+    # flat tables: parallel (single-file export, memory-light)
     with ThreadPoolExecutor(max_workers=settings.ch_export_max_concurrent) as pool:
         futures: dict[object, str] = {}
-        for tier in _TIERS:
-            futures[pool.submit(_export_and_split_tier, tier)] = f"works/tier={tier}"
         for ch, pg, cols in _EXPORT_TABLES:
             futures[pool.submit(_export, ch, pg, cols)] = pg
 
-        done = 0
         for future in as_completed(futures):
             name = futures[future]
             try:
