@@ -13,6 +13,7 @@ dependencies = [
     "peft>=0.18.1",
     "psycopg[binary]",
     "pydantic-settings",
+    "pylance>=4.0.0",
 ]
 
 [project.optional-dependencies]
