@@ -21,6 +21,7 @@ from pathlib import Path
 
 from dagster import (
     AssetExecutionContext,
+    AutomationCondition,
     MaterializeResult,
     MetadataValue,
     asset,
@@ -169,6 +170,7 @@ def ch_init(context: AssetExecutionContext) -> MaterializeResult:
     deps=[oa_sync],
     description="quarry-parse oa: gz JSONL → Parquet.",
     kinds={"rust", "parquet"},
+    automation_condition=AutomationCondition.eager(),
 )
 def oa_parse(context: AssetExecutionContext) -> MaterializeResult:
     run_parse(
@@ -191,6 +193,7 @@ def oa_parse(context: AssetExecutionContext) -> MaterializeResult:
     deps=[pubmed_baseline_sync, pubmed_updates_sync],
     description="quarry-parse pubmed: XML → Parquet.",
     kinds={"rust", "parquet"},
+    automation_condition=AutomationCondition.eager(),
 )
 def pm_parse(context: AssetExecutionContext) -> MaterializeResult:
     args = [
@@ -761,7 +764,9 @@ _ALL_PG_TABLES = [
     kinds={"clickhouse", "postgres"},
 )
 def pg_load(context: AssetExecutionContext, pg: PGResource) -> MaterializeResult:
-    _psql(f"\\i {_SQL_DIR / 'drop_indexes.sql'}", context, label="[PG] dropping indexes")
+    _psql(
+        f"\\i {_SQL_DIR / 'drop_indexes.sql'}", context, label="[PG] dropping indexes"
+    )
 
     # SET UNLOGGED — skip WAL during bulk load
     for t in _ALL_PG_TABLES:

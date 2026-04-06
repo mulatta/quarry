@@ -16,7 +16,9 @@ _MIN_ROWS = {
 }
 
 
-@asset_check(asset=pg_load, description="Verify PG key tables have expected row counts.")
+@asset_check(
+    asset=pg_load, description="Verify PG key tables have expected row counts."
+)
 def pg_row_count_check(pg: PGResource) -> AssetCheckResult:
     results = {}
     all_passed = True
