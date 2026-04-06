@@ -113,7 +113,8 @@ def _psql(
 
 # ── CH init asset ──
 
-_CH_SCHEMA_SQL = Path(__file__).resolve().parent.parent.parent / "sql" / "ch_schema.sql"
+_SQL_DIR = Path(__file__).resolve().parent.parent.parent / "sql"
+_CH_SCHEMA_SQL = _SQL_DIR / "ch_schema.sql"
 
 
 def _ch_query_no_db(
@@ -404,10 +405,9 @@ def ch_transform(context: AssetExecutionContext) -> MaterializeResult:
             context.log.info(f"[CH] OPTIMIZE {table} FINAL done")
 
     # 2-5. Enriched export tables
-    export_sql = "sql/ch_transform.sql"
+    export_sql = _SQL_DIR / "ch_transform.sql"
     context.log.info(f"[CH] reading {export_sql}")
-    with open(export_sql) as f:
-        content = f.read()
+    content = export_sql.read_text()
 
     # Tables with large JOINs that need grace_hash to stay within 64GB.
     # Tables with large JOINs that need grace_hash to stay within 64GB.
@@ -760,7 +760,7 @@ _ALL_PG_TABLES = [
     kinds={"clickhouse", "postgres"},
 )
 def pg_load(context: AssetExecutionContext) -> MaterializeResult:
-    _psql("\\i sql/drop_indexes.sql", context, label="[PG] dropping indexes")
+    _psql(f"\\i {_SQL_DIR / 'drop_indexes.sql'}", context, label="[PG] dropping indexes")
 
     # SET UNLOGGED — skip WAL during bulk load
     for t in _ALL_PG_TABLES:
@@ -819,7 +819,7 @@ def pg_load(context: AssetExecutionContext) -> MaterializeResult:
 
     # Boost parallel index build for bulk load session only (via PGOPTIONS).
     _psql(
-        "\\i sql/schema.sql",
+        f"\\i {_SQL_DIR / 'schema.sql'}",
         context,
         label="[PG] recreating indexes",
         pgoptions="-c maintenance_work_mem=4GB -c max_parallel_maintenance_workers=8",
