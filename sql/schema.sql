@@ -2,6 +2,19 @@
 -- Loaded by: process-compose (PG init), quarry-parse db init, PGStore.init_schema()
 -- All statements are idempotent (IF NOT EXISTS).
 
+-- ── Extensions ──
+
+CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+
+-- ── Read-only role for MCP / ad-hoc queries ──
+
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'quarry_ro') THEN
+    CREATE ROLE quarry_ro NOLOGIN;
+  END IF;
+END $$;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO quarry_ro;
+
 -- ── PubMed tables ──
 
 CREATE TABLE IF NOT EXISTS papers (
