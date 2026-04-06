@@ -168,36 +168,60 @@ def _load_lance_hashes_to_ch(lance: LanceStore, logger) -> int:
 def _compute_diff_in_ch(logger) -> tuple[list[str], list[str], int]:
     """CH-side JOIN: works_export vs _tmp_lance_hashes → diff + orphans.
 
+    Content-hash dedup: only one representative work_id per content_hash
+    is encoded. Journal variants (same title+abstract, different work_id)
+    share a content_hash — encoding any one is sufficient.
+
     Returns (to_encode_ids, orphan_ids, skipped_count).
     """
     where = _embed_where()
 
-    # New + changed: in works_export but hash differs or missing in lance
+    # Pre-compute representative work_ids (one per content_hash).
+    # Reused by both diff and orphan queries to avoid duplicate window function.
+    logger.info("[Diff] Building representative work_id table...")
+    _ch_exec(
+        "CREATE TABLE IF NOT EXISTS _tmp_representative ("
+        "  work_id String"
+        ") ENGINE = MergeTree() ORDER BY work_id"
+    )
+    _ch_exec("TRUNCATE TABLE _tmp_representative")
+    _ch_exec(
+        f"INSERT INTO _tmp_representative "
+        f"SELECT work_id FROM ("
+        f"  SELECT work_id,"
+        f"  row_number() OVER (PARTITION BY content_hash ORDER BY work_id) AS rn"
+        f"  FROM works_export"
+        f"  WHERE {where}"
+        f") WHERE rn = 1"
+    )
+    rep_count = int(_ch_exec("SELECT count() FROM _tmp_representative").strip())
+    logger.info("[Diff] %d representative work_ids (unique content_hashes)", rep_count)
+
+    # New + changed: representative work_ids not yet in LanceDB with matching hash
     logger.info("[Diff] Computing diff via CH JOIN...")
     diff_result = _ch_exec(
-        f"SELECT work_id FROM works_export "
-        f"WHERE {where} "
-        f"AND work_id NOT IN ("
-        f"  SELECT l.work_id FROM _tmp_lance_hashes l "
-        f"  INNER JOIN works_export w ON l.work_id = w.work_id "
+        "SELECT r.work_id FROM _tmp_representative r "
+        "WHERE r.work_id NOT IN ("
+        "  SELECT l.work_id FROM _tmp_lance_hashes l "
+        "  INNER JOIN works_export w ON l.work_id = w.work_id "
         f"  WHERE w.content_hash = l.content_hash AND {where}"
-        f")"
+        ")"
     )
     to_encode_ids = [
         wid.strip() for wid in diff_result.strip().split("\n") if wid.strip()
     ]
 
-    # Total eligible count for skip calculation
-    total_result = _ch_exec(f"SELECT count() FROM works_export WHERE {where}")
-    total = int(total_result.strip())
-    skipped = total - len(to_encode_ids)
+    # Total = representative count; skipped = already in LanceDB with correct hash
+    skipped = rep_count - len(to_encode_ids)
 
-    # Orphans: in LanceDB but not in embedding-eligible works_export
+    # Orphans: in LanceDB but not a representative work_id.
+    # This catches both: (a) works removed from works_export, and
+    # (b) non-representative duplicates from before dedup was added.
     logger.info("[Diff] Computing orphans via CH JOIN...")
     orphan_result = _ch_exec(
         "SELECT l.work_id FROM _tmp_lance_hashes l "
         "WHERE l.work_id NOT IN ("
-        f"  SELECT work_id FROM works_export WHERE {where}"
+        "  SELECT work_id FROM _tmp_representative"
         ")"
     )
     orphan_ids = [
@@ -305,7 +329,7 @@ def _prefetch(encode_batch: int, logger):
 
 def _cleanup_temp(logger):
     """Drop CH temp tables."""
-    for table in ["_tmp_lance_hashes", "_tmp_encode_ids"]:
+    for table in ["_tmp_lance_hashes", "_tmp_encode_ids", "_tmp_representative"]:
         try:
             _ch_exec(f"DROP TABLE IF EXISTS {table}")
         except Exception as exc:

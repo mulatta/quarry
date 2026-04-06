@@ -20,9 +20,24 @@ OPTIMIZE TABLE pm_chemicals FINAL;
 OPTIMIZE TABLE pm_mesh_tree FINAL;
 OPTIMIZE TABLE icite_raw FINAL;
 
-/* 2. works_export: OA works enriched with PubMed + iCite fields */
+/* 2a. Junk content hashes: content identical across ≥5 OA works.
+       Computed from oa_works directly (no PM abstract fallback — irrelevant
+       for boilerplate which has no/empty abstract). ~1.1M hashes covering
+       "Santa Clara" 29K, "DEPRECATED" 8.5K, "Editorial Board", etc. */
 
-CREATE OR REPLACE TABLE works_export
+CREATE OR REPLACE TABLE _junk_hashes
+ENGINE = MergeTree()
+ORDER BY content_hash
+AS
+SELECT BLAKE3(concat(title, '\n', coalesce(abstract, ''))) AS content_hash
+FROM oa_works
+GROUP BY content_hash
+HAVING count() >= 5;
+
+/* 2b. _works_raw: OA works enriched with PubMed + iCite fields (all rows).
+       Intermediate table — filtered into works_export, then dropped. */
+
+CREATE OR REPLACE TABLE _works_raw
 ENGINE = MergeTree()
 ORDER BY work_id
 AS
@@ -77,6 +92,15 @@ SELECT
 FROM oa_works w
 LEFT JOIN pm_papers p ON w.pmid = p.pmid AND w.pmid IS NOT NULL
 LEFT JOIN icite_raw i ON w.pmid = i.pmid AND w.pmid IS NOT NULL;
+
+/* 2c. works_export: _works_raw minus boilerplate junk. */
+
+CREATE OR REPLACE TABLE works_export
+ENGINE = MergeTree()
+ORDER BY work_id
+AS
+SELECT w.* FROM _works_raw w
+LEFT ANTI JOIN _junk_hashes junk ON w.content_hash = junk.content_hash;
 
 /* 3. papers_export: PubMed papers enriched with iCite */
 

@@ -83,11 +83,14 @@ def _ch_query(
     label: str | None = None,
     *,
     grace_hash: bool = False,
+    external_group_by: bool = False,
 ) -> None:
     """Run a single CH query."""
     cmd = _ch_client_cmd()
     if grace_hash:
         cmd += _GRACE_HASH_SETTINGS
+    if external_group_by:
+        cmd += ["--max_bytes_before_external_group_by", "32000000000"]
     run(cmd + ["--query", query], context, label=label or f"[CH] {query}")
 
 
@@ -407,25 +410,46 @@ def ch_transform(context: AssetExecutionContext) -> MaterializeResult:
         content = f.read()
 
     # Tables with large JOINs that need grace_hash to stay within 64GB.
-    _GRACE_HASH_TABLES = {"works_export", "papers_export", "icite_citations"}
+    # Tables with large JOINs that need grace_hash to stay within 64GB.
+    _GRACE_HASH_TABLES = {
+        "_works_raw",  # 3-way LEFT JOIN: oa_works × pm_papers × icite_raw
+        "papers_export",  # LEFT JOIN: pm_papers × icite_raw
+        "icite_citations",  # 2× INNER JOIN: parsed × works_export
+        "merged_citations",  # 2× INNER JOIN paper_ids + ANTI JOIN oa_work_citations
+    }
+    # Large GROUP BY — spill hash table to disk when it exceeds 32GB.
+    _EXTERNAL_GROUP_BY_TABLES = {"_junk_hashes"}
 
     # Extract CREATE OR REPLACE TABLE statements
-    stmts = re.split(r"(?=CREATE OR REPLACE TABLE)", content)
+    stmts = re.split(r"(?=CREATE OR REPLACE (?:TABLE|VIEW))", content)
     for stmt in stmts:
         stmt = stmt.strip()
         if not stmt.startswith("CREATE"):
             continue
+        # CH --query accepts a single statement; trim anything after
+        # the final semicolon (trailing section comments from SQL file).
+        if ";" in stmt:
+            stmt = stmt[: stmt.rindex(";") + 1]
         # Extract table name for logging
-        match = re.match(r"CREATE OR REPLACE TABLE (\S+)", stmt)
+        match = re.match(r"CREATE OR REPLACE (?:TABLE|VIEW) (\S+)", stmt)
         table_name = match.group(1) if match else ""
         label = f"[CH] CREATE {table_name}" if match else "[CH] CREATE TABLE"
         _ch_query(
-            stmt, context, label=label, grace_hash=table_name in _GRACE_HASH_TABLES
+            stmt,
+            context,
+            label=label,
+            grace_hash=table_name in _GRACE_HASH_TABLES,
+            external_group_by=table_name in _EXTERNAL_GROUP_BY_TABLES,
         )
 
-    # merged_citations (38B+ rows ReplacingMergeTree) skips OPTIMIZE FINAL
-    # — too large for 64GB limit. Background merge handles dedup gradually;
-    # minor duplicates in parquet export are harmless for CSR graph.
+    # Drop intermediate table from 2-pass boilerplate filter
+    # Drop intermediate tables from 2-pass boilerplate filter
+    for tmp in ("_works_raw", "_junk_hashes"):
+        _ch_query(
+            f"DROP TABLE IF EXISTS {tmp}",
+            context,
+            label=f"[CH] DROP {tmp}",
+        )
 
     return MaterializeResult(
         metadata={"status": MetadataValue.text("ok")},
