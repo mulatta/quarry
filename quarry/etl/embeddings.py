@@ -315,7 +315,7 @@ def _cleanup_temp(logger):
 # ── Main entry point ──
 
 
-def run(batch_size: int | None = None, limit: int | None = None, logger=None):
+def run(limit: int | None = None, logger=None):
     if logger is None:
         logger = log
     lance = LanceStore(settings.lancedb_uri)
