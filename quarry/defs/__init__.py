@@ -14,6 +14,7 @@ from quarry.assets import (
     search,
     stage,
 )
+from quarry.assets.checks import pg_row_count_check
 from quarry.jobs import (
     build_job,
     embeddings_job,
@@ -33,6 +34,7 @@ defs = Definitions(
     assets=load_assets_from_modules(
         [download, stage, load, export, import_, citations, search],
     ),
+    asset_checks=[pg_row_count_check],
     jobs=[
         build_job,
         load_job,

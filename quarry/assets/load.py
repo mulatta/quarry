@@ -35,6 +35,7 @@ from quarry.assets.download import (
 from quarry.assets.helpers import run, run_parse
 from quarry.assets.stage import mesh_stage
 from quarry.config import settings
+from quarry.resources import PGResource
 
 
 def _ch_client_cmd() -> list[str]:
@@ -759,7 +760,7 @@ _ALL_PG_TABLES = [
     description="CH → PG via CSVWithNames pipe (UNLOGGED + parallel, zero memory).",
     kinds={"clickhouse", "postgres"},
 )
-def pg_load(context: AssetExecutionContext) -> MaterializeResult:
+def pg_load(context: AssetExecutionContext, pg: PGResource) -> MaterializeResult:
     _psql(f"\\i {_SQL_DIR / 'drop_indexes.sql'}", context, label="[PG] dropping indexes")
 
     # SET UNLOGGED — skip WAL during bulk load
@@ -796,8 +797,8 @@ def pg_load(context: AssetExecutionContext) -> MaterializeResult:
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         futures: dict[object, str] = {}
-        for ch, pg, cols in _EXPORT_TABLES:
-            futures[pool.submit(_load_table, ch, pg, cols)] = pg
+        for ch_tbl, pg_tbl, cols in _EXPORT_TABLES:
+            futures[pool.submit(_load_table, ch_tbl, pg_tbl, cols)] = pg_tbl
 
         done = 0
         for future in as_completed(futures):
@@ -833,6 +834,11 @@ def pg_load(context: AssetExecutionContext) -> MaterializeResult:
     # Safe without CONCURRENTLY since no other sessions during bulk load.
     _psql("REINDEX DATABASE quarry", context, label="[PG] REINDEX")
 
-    return MaterializeResult(
-        metadata={"status": MetadataValue.text("ok")},
-    )
+    # Report row counts for key tables via PGResource
+    counts = {}
+    for table in ("works", "papers", "work_citations"):
+        rows = pg.store.query(f"SELECT count(*) AS n FROM {table}")[0]["n"]
+        counts[f"{table}_rows"] = MetadataValue.int(rows)
+        context.log.info(f"[PG] {table}: {rows:,} rows")
+
+    return MaterializeResult(metadata=counts)
