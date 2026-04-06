@@ -135,10 +135,20 @@ SELECT
 FROM pm_mesh_headings m
 INNER JOIN oa_id_crosswalk c ON m.pmid = c.pmid;
 
-/* 5. merged_citations: OA citations + iCite-derived citations (deduped).
-      iCite references field contains space-separated PMIDs.
-      Convert PMID → work_id_int via works_export (which has pmid column).
-      ReplacingMergeTree deduplicates overlapping edges. */
+/* 5. merged_citations: OA citations ∪ iCite-only citations.
+      Filters applied:
+        - Both endpoints must be paper types (article, review, preprint, editorial, letter)
+        - Supplementary files excluded (title starts with "Additional file" / "Supplementary")
+        - iCite edges already in OA are excluded (ANTI JOIN)
+      This removes ~39M non-paper nodes and ~700M+ non-paper edges from the graph. */
+
+/* Allowed work types for citation graph nodes. */
+CREATE OR REPLACE VIEW paper_ids AS
+SELECT work_id_int
+FROM oa_works
+WHERE type IN ('article', 'review', 'preprint', 'editorial', 'letter')
+  AND NOT startsWith(title, 'Additional file')
+  AND NOT startsWith(title, 'Supplementary');
 
 CREATE OR REPLACE TABLE icite_citations
 ENGINE = MergeTree()
@@ -159,17 +169,20 @@ INNER JOIN works_export w_cited  ON parsed.cited_pmid  = w_cited.pmid
 WHERE w_citing.work_id_int != w_cited.work_id_int;
 
 CREATE OR REPLACE TABLE merged_citations
-ENGINE = ReplacingMergeTree()
+ENGINE = MergeTree()
 ORDER BY (citing_id, cited_id)
 AS
-SELECT citing_id, cited_id FROM oa_work_citations
+SELECT oa.citing_id, oa.cited_id
+FROM oa_work_citations oa
+INNER JOIN paper_ids pa ON oa.citing_id = pa.work_id_int
+INNER JOIN paper_ids pb ON oa.cited_id = pb.work_id_int
 UNION ALL
-SELECT citing_id, cited_id FROM icite_citations;
-
-/* NOTE: OPTIMIZE TABLE merged_citations FINAL removed — handled in
-   ch_transform asset post-CREATE step to avoid memory issues with
-   38B+ row merge under 64GB limit. ReplacingMergeTree dedup occurs
-   naturally during background merges or explicit OPTIMIZE. */
+SELECT ic.citing_id, ic.cited_id
+FROM icite_citations ic
+INNER JOIN paper_ids pa ON ic.citing_id = pa.work_id_int
+INNER JOIN paper_ids pb ON ic.cited_id = pb.work_id_int
+LEFT ANTI JOIN oa_work_citations oa
+    ON ic.citing_id = oa.citing_id AND ic.cited_id = oa.cited_id;
 
 /* 6. cited_by_clin_export: iCite clinical citation expansion */
 
