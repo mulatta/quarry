@@ -192,13 +192,13 @@ def _compute_diff_in_ch(logger) -> tuple[list[str], list[str], int]:
     total = int(total_result.strip())
     skipped = total - len(to_encode_ids)
 
-    # Orphans: in lance but not in eligible works_export
+    # Orphans: in LanceDB but not in embedding-eligible works_export
     logger.info("[Diff] Computing orphans via CH JOIN...")
     orphan_result = _ch_exec(
-        f"SELECT l.work_id FROM _tmp_lance_hashes l "
-        f"LEFT JOIN works_export w ON l.work_id = w.work_id "
-        f"WHERE w.work_id IS NULL "
-        f"   OR NOT ({where.replace('tier', 'w.tier').replace('type', 'w.type').replace('abstract', 'w.abstract').replace('title', 'w.title').replace('is_retracted', 'w.is_retracted').replace('language', 'w.language')})"
+        "SELECT l.work_id FROM _tmp_lance_hashes l "
+        "WHERE l.work_id NOT IN ("
+        f"  SELECT work_id FROM works_export WHERE {where}"
+        ")"
     )
     orphan_ids = [
         wid.strip() for wid in orphan_result.strip().split("\n") if wid.strip()
