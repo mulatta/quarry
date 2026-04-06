@@ -4,7 +4,9 @@
 
 USE quarry;
 
-/* 1. Force dedup on all raw tables */
+/* 1. Force dedup on all raw tables.
+   OPTIMIZE FINAL is intentional: batch ELT pipeline requires guaranteed
+   dedup before export to PG.  One-time per pipeline run, not recurring. */
 
 OPTIMIZE TABLE oa_works FINAL;
 OPTIMIZE TABLE oa_work_authors FINAL;
