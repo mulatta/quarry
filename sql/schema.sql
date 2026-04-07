@@ -87,15 +87,23 @@ CREATE TABLE IF NOT EXISTS mesh_tree (
     PRIMARY KEY (descriptor_ui, tree_number)
 );
 
--- All MeSH descriptors used in paper annotations, including those
--- removed from the current MeSH vocabulary (mesh_tree). Built from
--- work_mesh DISTINCT at ETL time. Needed because mesh_tree only has
--- descriptors with current tree_numbers (~25K), but work_mesh contains
--- historical annotations with ~31K distinct descriptors.
-CREATE TABLE IF NOT EXISTS mesh_descriptors (
-    descriptor_ui    TEXT PRIMARY KEY,
-    descriptor_name  TEXT NOT NULL
+-- Unified MeSH search index: all searchable terms for descriptors.
+-- Combines three sources to enable synonym-based lookup:
+--   1. Entry terms from NLM desc*.xml (ConceptList/Term/String) — e.g.,
+--      "A-23187" → D000001 Calcimycin, "PTM" → D011499 (if NLM lists it)
+--   2. Historical descriptors from work_mesh that are no longer in
+--      the current MeSH vocabulary (NLM revises/removes descriptors
+--      but paper annotations persist)
+-- Replaces the previous mesh_descriptors table.
+CREATE TABLE IF NOT EXISTS mesh_lookup (
+    descriptor_ui    TEXT NOT NULL,
+    descriptor_name  TEXT NOT NULL,
+    term             TEXT NOT NULL,
+    source           TEXT NOT NULL,  -- 'entry_term' | 'historical'
+    has_tree         BOOLEAN NOT NULL DEFAULT true
 );
+CREATE INDEX IF NOT EXISTS idx_mesh_lookup_term ON mesh_lookup USING btree (term);
+CREATE INDEX IF NOT EXISTS idx_mesh_lookup_desc ON mesh_lookup USING btree (descriptor_ui);
 
 CREATE TABLE IF NOT EXISTS grants (
     pmid       INTEGER NOT NULL,

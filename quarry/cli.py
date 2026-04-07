@@ -199,12 +199,12 @@ def mesh(
         if entries:
             descriptor_name = entries[0]["descriptor_name"]
         else:
-            # Not in mesh_tree but may exist in work_mesh
+            # Not in mesh_tree — check mesh_lookup (entry terms + historical)
             from psycopg.rows import dict_row
 
             with db.conn.cursor(row_factory=dict_row) as cur:
                 cur.execute(
-                    "SELECT DISTINCT descriptor_name FROM work_mesh "
+                    "SELECT DISTINCT descriptor_name FROM mesh_lookup "
                     "WHERE descriptor_ui = %s LIMIT 1",
                     (descriptor_ui,),
                 )
@@ -352,9 +352,15 @@ _SCHEMA_HELP: dict[str, list[tuple[str, str]]] = {
         ("descriptor_name", "text"),
         ("tree_number", "text"),
     ],
-    "mesh_descriptors": [
-        ("descriptor_ui", "text — all descriptors used in paper annotations"),
-        ("descriptor_name", "text — includes historical descriptors not in mesh_tree"),
+    "mesh_lookup": [
+        ("descriptor_ui", "text"),
+        ("descriptor_name", "text — official MeSH name"),
+        ("term", "text — searchable name (synonym, entry term, abbreviation)"),
+        (
+            "source",
+            "text — 'entry_term' (from desc*.xml) | 'historical' (from work_mesh)",
+        ),
+        ("has_tree", "boolean — true if descriptor has tree_number in current MeSH"),
     ],
     "id_crosswalk": [
         ("work_id", "text"),

@@ -533,6 +533,13 @@ _EXPORT_TABLES: list[tuple[str, str, str]] = [
     ),
     ("oa_id_crosswalk", "id_crosswalk", "work_id, pmid"),
     ("pm_mesh_tree", "mesh_tree", "descriptor_ui, descriptor_name, tree_number"),
+    # mesh_lookup entry terms loaded from CH pm_mesh_terms.
+    # Historical descriptors added in post-load step (requires work_mesh).
+    (
+        "pm_mesh_terms",
+        "mesh_lookup",
+        "descriptor_ui, descriptor_name, term, source, has_tree",
+    ),
     (
         "work_mesh_export",
         "work_mesh",
@@ -785,7 +792,7 @@ def pg_load(context: AssetExecutionContext, pg: PGResource) -> MaterializeResult
         "TRUNCATE papers, authors, mesh_headings, grants, chemicals, "
         "cited_by_clin, works, work_authors, work_topics, work_mesh, "
         "work_citations, work_counts_by_year, id_crosswalk, mesh_tree, "
-        "mesh_descriptors CASCADE",
+        "mesh_lookup CASCADE",
         context,
         label="[PG] truncating all tables",
     )
@@ -845,26 +852,28 @@ def pg_load(context: AssetExecutionContext, pg: PGResource) -> MaterializeResult
     for _, t, _ in _EXPORT_TABLES:
         _psql(f"VACUUM ANALYZE {t}", context, label=f"[PG] VACUUM ANALYZE {t}")
 
-    # mesh_descriptors: cache of all distinct descriptors from work_mesh.
-    # Needed because mesh_tree only contains descriptors with current
-    # tree_numbers (~25K), but work_mesh has historical annotations
-    # with ~31K distinct descriptors (NLM revises MeSH vocabulary over
-    # time, removing tree_numbers but keeping paper annotations).
+    # mesh_lookup: unified search index for MeSH synonym lookup.
+    # Combines two sources:
+    #   1. Entry terms from desc*.xml (via CH pm_mesh_terms → PG COPY)
+    #      — official NLM synonyms, abbreviations, cross-references
+    #   2. Historical descriptors from work_mesh — descriptors whose
+    #      tree_numbers were removed in MeSH revisions but still appear
+    #      in paper annotations (e.g., D011499 Post-Translational, 17K papers)
+    # Replaces the previous mesh_descriptors table.
+    # Note: step 1 (entry terms) is loaded via _EXPORT_TABLES COPY above.
+    # Step 2 (historical) requires work_mesh to be loaded first.
     _psql(
-        "TRUNCATE mesh_descriptors",
+        "INSERT INTO mesh_lookup (descriptor_ui, descriptor_name, term, source, has_tree) "
+        "SELECT DISTINCT wm.descriptor_ui, wm.descriptor_name, wm.descriptor_name, "
+        "'historical', false FROM work_mesh wm "
+        "WHERE NOT EXISTS (SELECT 1 FROM mesh_lookup ml WHERE ml.descriptor_ui = wm.descriptor_ui)",
         context,
-        label="[PG] truncating mesh_descriptors",
+        label="[PG] adding historical descriptors to mesh_lookup",
     )
     _psql(
-        "INSERT INTO mesh_descriptors (descriptor_ui, descriptor_name) "
-        "SELECT DISTINCT descriptor_ui, descriptor_name FROM work_mesh",
+        "VACUUM ANALYZE mesh_lookup",
         context,
-        label="[PG] building mesh_descriptors from work_mesh",
-    )
-    _psql(
-        "VACUUM ANALYZE mesh_descriptors",
-        context,
-        label="[PG] VACUUM ANALYZE mesh_descriptors",
+        label="[PG] VACUUM ANALYZE mesh_lookup",
     )
 
     # REINDEX after bulk COPY to eliminate index bloat from batch insertions.

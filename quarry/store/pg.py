@@ -98,36 +98,28 @@ class PGStore:
             return cur.fetchall()
 
     def mesh_search_by_name(self, name: str, limit: int = 10) -> list[dict]:
-        """Search MeSH descriptors by name (token-AND ILIKE).
+        """Search MeSH descriptors by synonym via mesh_lookup.
 
-        Splits input into tokens and requires all to match, in any order.
-        "fluorescence hybridization" matches "In Situ Hybridization, Fluorescence".
+        Splits input into tokens and matches against the `term` column,
+        which contains both official descriptor names and NLM entry terms
+        (synonyms, abbreviations). Single query covers all sources:
+        - Current vocabulary entry terms (from desc*.xml ConceptList)
+        - Historical descriptors (from work_mesh, no longer in MeSH tree)
 
-        Searches mesh_tree first (current vocabulary with hierarchy),
-        then falls back to mesh_descriptors (all descriptors ever used
-        in paper annotations, including those removed from current MeSH).
+        Example: "post-translational modification" matches entry term for
+        D011499 even though the official name is "Protein Processing,
+        Post-Translational" and it has no tree_number in current MeSH.
         """
         tokens = name.split()
         if not tokens:
             return []
-        conditions = " AND ".join("descriptor_name ILIKE %s" for _ in tokens)
+        conditions = " AND ".join("term ILIKE %s" for _ in tokens)
         params: list = [f"%{t}%" for t in tokens]
         params.append(limit)
         with self.conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 f"SELECT DISTINCT descriptor_ui, descriptor_name "  # noqa: S608
-                f"FROM mesh_tree WHERE {conditions} LIMIT %s",
-                params,
-            )
-            results = cur.fetchall()
-            if results:
-                return results
-            # Fallback: mesh_descriptors includes historical descriptors
-            # not in current mesh_tree (e.g., D011499 Post-Translational
-            # with 17K papers but no tree_number in current MeSH)
-            cur.execute(
-                f"SELECT descriptor_ui, descriptor_name "  # noqa: S608
-                f"FROM mesh_descriptors WHERE {conditions} LIMIT %s",
+                f"FROM mesh_lookup WHERE {conditions} LIMIT %s",
                 params,
             )
             return cur.fetchall()
