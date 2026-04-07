@@ -41,11 +41,9 @@ pub struct BridgeParams {
     /// Type 5: number of shortest paths (Yen's). Default 1. (Phase 2)
     #[allow(dead_code)]
     pub k_paths: usize,
-    /// Type 6: APPR alpha. (not yet implemented)
-    #[allow(dead_code)]
+    /// Type 6: APPR alpha.
     pub alpha: f64,
-    /// Type 6: APPR epsilon. (not yet implemented)
-    #[allow(dead_code)]
+    /// Type 6: APPR epsilon.
     pub epsilon: f64,
     /// Types 3-4: skip neighbors with degree above this threshold.
     /// High-degree nodes have low AA weight and dominate traversal cost.
@@ -116,7 +114,6 @@ pub struct BridgeResult {
     pub coupling_bridges: Vec<ScoredEntry>,
     pub cocitation_bridges: Vec<ScoredEntry>,
     pub path_bridges: Vec<PathEntry>,
-    #[allow(dead_code)]
     pub ppr_bridges: Vec<ScoredEntry>,
     #[allow(dead_code)]
     pub steiner_bridges: Vec<i64>,
@@ -274,7 +271,17 @@ pub fn compute(graph: &Graph, seeds: &[i64], params: &BridgeParams) -> BridgeRes
                 result.stats.shortest_path_length = sp_len;
                 result.path_bridges = entries;
             }
-            // Types 6-7: not yet implemented
+            BridgeType::Ppr => {
+                result.ppr_bridges = ppr_bridges(
+                    graph,
+                    &seed_indices,
+                    &seed_set,
+                    params.alpha,
+                    params.epsilon,
+                    params.limit,
+                );
+            }
+            // Type 7: not yet implemented
             _ => {}
         }
     }
@@ -732,6 +739,82 @@ fn collect_bridge_entries(
     }
 
     (entries, Some(total_dist))
+}
+
+// ---------------------------------------------------------------------------
+// Type 6: ppr_bridges (PPR Product)
+// ---------------------------------------------------------------------------
+
+/// PPR product bridges: geometric mean of per-seed APPR scores.
+///
+/// For each seed, run APPR independently. For nodes scored by ALL seeds,
+/// compute score = (∏ π_i(v))^(1/k). This finds papers structurally
+/// central to all seeds' citation neighborhoods in the global graph.
+fn ppr_bridges(
+    graph: &Graph,
+    seed_indices: &[u32],
+    seed_set: &HashSet<u32>,
+    alpha: f64,
+    epsilon: f64,
+    limit: usize,
+) -> Vec<ScoredEntry> {
+    let k = seed_indices.len();
+
+    // Run APPR for each seed, collecting internal index → score
+    let per_seed: Vec<HashMap<u32, f64>> = seed_indices
+        .iter()
+        .map(|&idx| {
+            let seed_id = graph.id_of(idx);
+            let results = crate::algo::appr::compute(graph, seed_id, alpha, epsilon, None);
+            results
+                .into_iter()
+                .filter_map(|(id, score)| {
+                    let node_idx = graph.resolve(id)?;
+                    Some((node_idx, score))
+                })
+                .collect()
+        })
+        .collect();
+
+    // Find nodes scored by ALL seeds, compute geometric mean
+    // Start from the smallest map to minimize iteration
+    let smallest = per_seed
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, m)| m.len())
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+
+    let mut entries: Vec<ScoredEntry> = per_seed[smallest]
+        .iter()
+        .filter_map(|(&idx, _)| {
+            if seed_set.contains(&idx) {
+                return None; // exclude seeds
+            }
+            let mut scores = Vec::with_capacity(k);
+            for map in &per_seed {
+                match map.get(&idx) {
+                    Some(&s) if s > 0.0 => scores.push(s),
+                    _ => return None, // not scored by all seeds
+                }
+            }
+            let product: f64 = scores.iter().product();
+            let geo_mean = product.powf(1.0 / k as f64);
+            Some(ScoredEntry {
+                work_id: graph.id_of(idx),
+                per_seed_scores: scores,
+                score: geo_mean,
+            })
+        })
+        .collect();
+
+    entries.sort_unstable_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    entries.truncate(limit);
+    entries
 }
 
 // ---------------------------------------------------------------------------

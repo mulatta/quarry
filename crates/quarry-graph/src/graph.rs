@@ -548,8 +548,8 @@ impl Graph {
     ///
     /// Returns (per_type_results, stats) where per_type_results is a dict
     /// with keys: common_refs, common_citers, coupling_bridges, cocitation_bridges.
-    #[allow(clippy::type_complexity)]
-    #[pyo3(signature = (seeds, types=None, limit=100, max_neighbor_degree=10_000, max_path_depth=5))]
+    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
+    #[pyo3(signature = (seeds, types=None, limit=100, max_neighbor_degree=10_000, max_path_depth=5, alpha=0.15, epsilon=1e-6))]
     fn bridge(
         &self,
         py: Python<'_>,
@@ -558,6 +558,8 @@ impl Graph {
         limit: usize,
         max_neighbor_degree: usize,
         max_path_depth: usize,
+        alpha: f64,
+        epsilon: f64,
     ) -> PyResult<(HashMap<String, PyObject>, HashMap<String, PyObject>)> {
         if seeds.len() < 2 {
             return Err(pyo3::exceptions::PyValueError::new_err(
@@ -592,6 +594,8 @@ impl Graph {
             limit,
             max_neighbor_degree,
             max_path_depth,
+            alpha,
+            epsilon,
             ..Default::default()
         };
 
@@ -638,12 +642,21 @@ impl Graph {
             d
         }).collect();
 
+        let ppr: Vec<HashMap<String, PyObject>> = result.ppr_bridges.iter().map(|e| {
+            let mut d = HashMap::new();
+            d.insert("work_id".into(), e.work_id.into_pyobject(py).unwrap().into_any().unbind());
+            d.insert("per_seed_scores".into(), e.per_seed_scores.clone().into_pyobject(py).unwrap().into_any().unbind());
+            d.insert("score".into(), e.score.into_pyobject(py).unwrap().into_any().unbind());
+            d
+        }).collect();
+
         let mut results = HashMap::new();
         results.insert("common_refs".into(), common_refs.into_pyobject(py).unwrap().into_any().unbind());
         results.insert("common_citers".into(), common_citers.into_pyobject(py).unwrap().into_any().unbind());
         results.insert("coupling_bridges".into(), coupling.into_pyobject(py).unwrap().into_any().unbind());
         results.insert("cocitation_bridges".into(), cocitation.into_pyobject(py).unwrap().into_any().unbind());
         results.insert("path_bridges".into(), path.into_pyobject(py).unwrap().into_any().unbind());
+        results.insert("ppr_bridges".into(), ppr.into_pyobject(py).unwrap().into_any().unbind());
 
         // Stats
         let mut stats = HashMap::new();

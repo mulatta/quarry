@@ -161,7 +161,7 @@ def bridge(
         "--type",
         "-t",
         help="Bridge types to compute (default: all). "
-        "Options: common_refs, common_citers, coupling, cocitation, path",
+        "Options: common_refs, common_citers, coupling, cocitation, path, ppr",
     ),
     limit: int = typer.Option(100, "--limit", "-n", help="Max results per type"),
     max_neighbor_degree: int = typer.Option(
@@ -180,6 +180,7 @@ def bridge(
       coupling       — who combined both methods
       cocitation     — what both communities read
       path           — stepping-stone reading path between seeds
+      ppr            — structurally central to both networks (global)
 
     Output: complete JSON with metadata. Use jq/SQL for filtering/sorting.
     """
@@ -244,6 +245,7 @@ def _print_bridge_table(result: dict) -> None:
         ("coupling_bridges", "Coupling Bridges (combined methods)"),
         ("cocitation_bridges", "Cocitation Bridges (community reads)"),
         ("path_bridges", "Path Bridges (stepping stones)"),
+        ("ppr_bridges", "PPR Bridges (structural centrality)"),
     ]
 
     for key, label in _SECTIONS:

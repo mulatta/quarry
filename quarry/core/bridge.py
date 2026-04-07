@@ -24,6 +24,7 @@ _BRIDGE_TYPES = [
     "coupling",
     "cocitation",
     "path",
+    "ppr",
 ]
 
 
@@ -72,6 +73,7 @@ def run_bridge(
         "coupling_bridges",
         "cocitation_bridges",
         "path_bridges",
+        "ppr_bridges",
     ):
         for entry in results.get(key, []):
             all_wids.add(entry["work_id"])
@@ -190,6 +192,7 @@ def run_bridge(
         "coupling_bridges": _enrich_scored(results.get("coupling_bridges", [])),
         "cocitation_bridges": _enrich_scored(results.get("cocitation_bridges", [])),
         "path_bridges": _enrich_path(results.get("path_bridges", [])),
+        "ppr_bridges": _enrich_scored(results.get("ppr_bridges", [])),
         "stats": {
             "seeds": seed_ids,
             "per_seed_ref_count": stats["per_seed_ref_count"],
