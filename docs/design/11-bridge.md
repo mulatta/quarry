@@ -428,22 +428,45 @@ with high k.
 
 | Step | Scope | Status |
 |------|-------|--------|
-| 1 | Rust `bridge()` + common_refs/common_citers | **Done** (Rust only, no Python binding) |
-| 2 | coupling_bridges + cocitation_bridges | **Done** (Rust only, no Python binding) |
+| 1 | Rust `bridge()` + common_refs/common_citers | **Done** |
+| 2 | coupling_bridges + cocitation_bridges | **Done** |
 | 3 | path_bridges (BFS shortest path, k-paths via Yen) | Planned |
 | 4 | ppr_bridges (per-seed APPR product) | Planned |
 | 5 | steiner_bridges (KMB heuristic) | Planned |
-| 6 | Python binding + CLI (steps 1-5) | Planned |
-| 7 | Quality evaluation (abstract review, 3 seed pairs) | Planned |
+| 6 | Python binding + CLI (steps 1-5) | **Done** (Type 1-4; Type 5-7 pending) |
+| 7 | Quality evaluation (abstract review, 3 seed pairs) | **Done** (Type 1-4) |
 
-Step 1 quality evaluation (KOBLAN+SICKLE, EvolvePro+MULTI-evolve,
-3 seed pairs): common_refs noise=0%, common_citers noise=0%.
+### Step 1-2 quality evaluation
 
-Step 2 quality evaluation: coupling noise=0% across all pairs.
-Cocitation finds canonical literature. Medium pair (EvolvePro+PET):
-Type 1-2 returned 0 results, Type 3-4 found 713/309 candidates —
-2-hop traversal unlocks bridges that 1-hop intersection misses.
+KOBLAN+SICKLE, EvolvePro+MULTI-evolve (3 seed pairs):
+common_refs noise=0%, common_citers noise=0%.
+Coupling noise=0% across all pairs. Cocitation finds canonical literature.
+Medium pair (EvolvePro+PET): Type 1-2 returned 0 results, Type 3-4 found
+713/309 candidates — 2-hop traversal unlocks bridges that 1-hop misses.
 `max_neighbor_degree=10,000` prune keeps traversal fast (~0.2s).
+
+### Step 6-7 quality evaluation (CLI end-to-end, 2026-04-07)
+
+Three seed pairs tested via `quarry bridge` CLI:
+
+| Pair | Distance | overlap_refs | Type 1 | Type 2 | Type 3 | Type 4 | Noise |
+|------|----------|-------------|--------|--------|--------|--------|-------|
+| KOBLAN + SICKLE | close | 5/66 (7.6%) | 5 | 75 | 100+ | 100+ | 0% |
+| EVOLVEpro + few-shot | medium | 51/76 (67%) | 51 | 1 | 100+ | 100+ | 0% |
+| EVOLVEpro + KOBLAN | far | 0/76 (0%) | 0 | 1 | 100+ | 100+ | 0% |
+
+Key findings:
+
+- **Close pair**: All 4 types productive. Common citers are review/application
+  papers that genuinely synthesize both fields.
+- **Medium pair**: High ref overlap (67%) — same subfield. Type 1 dominant.
+  Type 2 sparse (1) because both seeds are recent (2024).
+- **Far pair**: Type 1 = 0, Type 2 = 1 (guide RNA prediction — ML+editing
+  crosspoint). Type 3-4 find bridges through CRISPR hub papers. Confirms
+  design prediction: far pairs need embedding candidates (Phase 3).
+- **Performance**: 12-170ms across all pairs.
+- **Distance classification validated**: overlap > 10% → citation bridges
+  sufficient; overlap < 1% → citation bridges sparse, embedding recommended.
 
 ## References
 

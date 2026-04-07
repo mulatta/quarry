@@ -41,8 +41,8 @@ patterns above. See [11-bridge.md](11-bridge.md) for full design.
 | ppr_bridges (Type 6) | Planned | Per-seed APPR geometric mean |
 | steiner_bridges (Type 7) | Planned | KMB heuristic (k ≥ 3 only) |
 
-**Note**: Type 1-4 are Rust-only (`#![allow(dead_code)]`). No Python binding or
-CLI yet — `lib.rs` does not expose `algo::bridge`. See 11-bridge.md Step 6.
+**Note**: Type 1-4 have PyO3 binding (`Graph.bridge()`) and CLI
+(`quarry bridge`). Type 5-7 not yet implemented. See 11-bridge.md.
 
 ## Future Algorithm Candidates
 
