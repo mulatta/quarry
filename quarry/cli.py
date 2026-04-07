@@ -522,6 +522,122 @@ def _print_table(result: dict, *, mesh_summary: bool = False) -> None:
 
 
 @app.command()
+def shrink(
+    seed: str = typer.Argument(
+        ..., help="Seed paper: work_id_int, W<id>, DOI, or https://doi.org/..."
+    ),
+    top_n: int = typer.Option(5, "--top", "-n", help="Number of papers to select"),
+    venue: str = typer.Option(
+        "NCS+",
+        "--venue",
+        "-v",
+        help="Venue preset (NCS+) or comma-separated list",
+    ),
+    limit: int = typer.Option(200, "--limit", help="Internal expand limit"),
+    fmt: str = typer.Option("table", "--format", "-f", help="table|json"),
+):
+    """Find minimum set of top-venue papers covering an expand landscape.
+
+    Runs expand internally, filters to specified venues, then selects
+    papers by greedy weighted citation coverage. Useful for building
+    a concise reading list from top journals.
+
+    Examples:
+      quarry shrink W2042789810                    # top 5 from NCS+
+      quarry shrink W2042789810 --top 10           # more papers
+      quarry shrink W2042789810 --venue "Nature,Science,Cell"
+    """
+    import json
+
+    from quarry.config import settings
+    from quarry.core.shrink import NCS_PLUS, run_shrink
+
+    # Parse venue
+    if venue.upper() == "NCS+":
+        venues = NCS_PLUS
+    else:
+        venues = {v.strip() for v in venue.split(",")}
+
+    try:
+        result = run_shrink(
+            seed=seed,
+            csr_dir=str(settings.csr_dir),
+            pg_conninfo=settings.pg_conninfo,
+            top_n=top_n,
+            venues=venues,
+            expand_limit=limit,
+        )
+    except ValueError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1) from None
+
+    if fmt == "json":
+        typer.echo(json.dumps(result, indent=2, ensure_ascii=False))
+    else:
+        _print_shrink_table(result)
+
+
+def _print_shrink_table(result: dict) -> None:
+    """Print shrink result as a rich table."""
+    from rich.console import Console
+    from rich.table import Table
+    from rich.text import Text
+
+    console = Console()
+    stats = result["stats"]
+    seed_id = result["seed"]["work_id"]
+    selected = result["selected"]
+    coverage_pct = stats["coverage"] * 100
+
+    console.print(
+        f"Shrink: W{seed_id} → {len(selected)} papers "
+        f"(coverage: {coverage_pct:.0f}%, {stats['covered']}/{stats['total_candidates']})  "
+        f"[dim]pool={stats['venue_pool_size']} expand={stats['expand_elapsed_s']}s[/dim]"
+    )
+
+    if stats["venue_pool_size"] == 0:
+        console.print("[yellow]⚠ No papers found in specified venues[/yellow]")
+        return
+
+    table = Table(show_edge=False, pad_edge=False, box=None, expand=True)
+    table.add_column("#", justify="right", style="dim", width=3, no_wrap=True)
+    table.add_column("ex#", justify="right", style="dim", width=4, no_wrap=True)
+    table.add_column("year", justify="right", width=4, no_wrap=True)
+    table.add_column("cited", justify="right", width=6, no_wrap=True)
+    table.add_column("+cov", justify="right", width=5, no_wrap=True)
+    table.add_column("cum%", justify="right", width=5, no_wrap=True)
+    table.add_column("venue", width=15, no_wrap=True, overflow="ellipsis")
+    table.add_column("title", ratio=1, overflow="ellipsis", no_wrap=True)
+
+    for s in selected:
+        year = str(s["year"]) if s.get("year") else "-"
+        cited = (
+            str(s["quality"]["cited_by"])
+            if s.get("quality", {}).get("cited_by") is not None
+            else "-"
+        )
+        cum_pct = f"{s['cumulative_coverage'] * 100:.0f}%"
+        table.add_row(
+            str(s["rank_in_shrink"]),
+            str(s["rank_in_expand"]),
+            year,
+            cited,
+            f"+{s['marginal_count']}",
+            cum_pct,
+            s.get("host_venue") or "-",
+            Text(s.get("title") or "-"),
+        )
+
+    console.print(table)
+
+    uncovered = stats["uncovered"]
+    if uncovered > 0:
+        console.print(
+            f"\n  [dim]Uncovered: {uncovered} papers ({100 - coverage_pct:.0f}%)[/dim]"
+        )
+
+
+@app.command()
 def bridge(
     seeds: list[str] = typer.Argument(
         ...,
