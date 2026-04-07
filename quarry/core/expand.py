@@ -135,6 +135,7 @@ def run_expand(
             "doi": meta.get("doi"),
             "title": meta.get("title"),
             "year": meta.get("pub_year"),
+            "host_venue": meta.get("host_venue"),
             "relation": p["relation"],
             "scores": {
                 "fused": round(p["fused_score"], 6),
@@ -218,7 +219,7 @@ def _enrich_metadata(
     try:
         cols = (
             "work_id_int, title, pub_year, cited_by_count, doi, "
-            "fwci, citation_normalized_percentile, rcr"
+            "fwci, citation_normalized_percentile, rcr, host_venue"
         )
         if include_abstract:
             cols += ", abstract"
@@ -238,9 +239,10 @@ def _enrich_metadata(
                     "fwci": float(row[5]) if row[5] is not None else None,
                     "cnp": float(row[6]) if row[6] is not None else None,
                     "rcr": float(row[7]) if row[7] is not None else None,
+                    "host_venue": row[8],
                 }
                 if include_abstract:
-                    entry["abstract"] = row[8] or ""
+                    entry["abstract"] = row[9] or ""
                 result[row[0]] = entry
             return result
     except Exception:

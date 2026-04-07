@@ -483,6 +483,7 @@ def _print_table(result: dict, *, mesh_summary: bool = False) -> None:
     table.add_column("cited", justify="right", width=6, no_wrap=True)
     table.add_column("score", justify="right", width=8, no_wrap=True)
     table.add_column("work_id", width=13, no_wrap=True)
+    table.add_column("venue", width=15, no_wrap=True, overflow="ellipsis")
     table.add_column("title", ratio=1, overflow="ellipsis", no_wrap=True)
 
     for p in papers:
@@ -492,6 +493,7 @@ def _print_table(result: dict, *, mesh_summary: bool = False) -> None:
             if p.get("quality", {}).get("cited_by") is not None
             else "-"
         )
+        venue = p.get("host_venue") or "-"
         table.add_row(
             str(p["rank"]),
             p["relation"],
@@ -499,6 +501,7 @@ def _print_table(result: dict, *, mesh_summary: bool = False) -> None:
             cited,
             f"{p['scores']['fused']:.6f}",
             f"W{p['work_id']}",
+            venue,
             Text(p["title"] or "-"),
         )
 
