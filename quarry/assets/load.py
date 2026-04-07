@@ -329,15 +329,25 @@ def ch_load_pm(context: AssetExecutionContext) -> MaterializeResult:
     kinds={"clickhouse"},
 )
 def ch_load_mesh(context: AssetExecutionContext) -> MaterializeResult:
-    mesh_parquet = settings.mesh_parquet_dir / "mesh_tree.parquet"
-    if not mesh_parquet.exists():
-        context.log.warning(f"MeSH Parquet not found: {mesh_parquet}, skipping")
+    mesh_tree_parquet = settings.mesh_parquet_dir / "mesh_tree.parquet"
+    mesh_terms_parquet = settings.mesh_parquet_dir / "mesh_terms.parquet"
+
+    if not mesh_tree_parquet.exists():
+        context.log.warning(f"MeSH Parquet not found: {mesh_tree_parquet}, skipping")
         return MaterializeResult(metadata={"status": MetadataValue.text("skipped")})
-    _ch_load_tables(
-        ["pm_mesh_tree"],
-        [("pm_mesh_tree", str(mesh_parquet), "Parquet")],
-        context,
-    )
+
+    tables_to_truncate = ["pm_mesh_tree"]
+    loads = [("pm_mesh_tree", str(mesh_tree_parquet), "Parquet")]
+
+    if mesh_terms_parquet.exists():
+        tables_to_truncate.append("pm_mesh_terms")
+        loads.append(("pm_mesh_terms", str(mesh_terms_parquet), "Parquet"))
+    else:
+        context.log.warning(
+            f"MeSH terms Parquet not found: {mesh_terms_parquet}, skipping terms"
+        )
+
+    _ch_load_tables(tables_to_truncate, loads, context)
     return MaterializeResult(metadata={"status": MetadataValue.text("ok")})
 
 
@@ -384,6 +394,7 @@ def ch_transform(context: AssetExecutionContext) -> MaterializeResult:
         "pm_grants",
         "pm_chemicals",
         "pm_mesh_tree",
+        "pm_mesh_terms",
         "icite_raw",
     ]
 
@@ -533,10 +544,10 @@ _EXPORT_TABLES: list[tuple[str, str, str]] = [
     ),
     ("oa_id_crosswalk", "id_crosswalk", "work_id, pmid"),
     ("pm_mesh_tree", "mesh_tree", "descriptor_ui, descriptor_name, tree_number"),
-    # mesh_lookup entry terms loaded from CH pm_mesh_terms.
-    # Historical descriptors added in post-load step (requires work_mesh).
+    # mesh_lookup entry terms: CH mesh_lookup_export adds source/has_tree columns.
+    # Historical descriptors (has_tree=false) added in post-load step.
     (
-        "pm_mesh_terms",
+        "mesh_lookup_export",
         "mesh_lookup",
         "descriptor_ui, descriptor_name, term, source, has_tree",
     ),

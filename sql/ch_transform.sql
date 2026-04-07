@@ -161,6 +161,23 @@ SELECT
 FROM pm_mesh_headings m
 INNER JOIN oa_id_crosswalk c ON m.pmid = c.pmid;
 
+/* 4b. mesh_lookup_export: entry terms with source/has_tree for PG mesh_lookup.
+       Maps pm_mesh_terms (parquet schema) to PG mesh_lookup schema.
+       has_tree = true for all entry terms (from current MeSH vocabulary).
+       Historical descriptors (has_tree=false) added in pg_load post-step. */
+
+CREATE OR REPLACE TABLE mesh_lookup_export
+ENGINE = MergeTree()
+ORDER BY (descriptor_ui, term)
+AS
+SELECT
+    descriptor_ui,
+    descriptor_name,
+    term,
+    'entry_term' AS source,
+    true         AS has_tree
+FROM pm_mesh_terms;
+
 /* 5. merged_citations: OA citations ∪ iCite-only citations.
       Filters applied:
         - Both endpoints must be paper types (article, review, preprint, editorial, letter)
