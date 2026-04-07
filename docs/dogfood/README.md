@@ -17,6 +17,7 @@ Scores are 5 dimensions × 1-5 scale = max 25.
 | 2026-04-08 | bridger | [protein directed evolution](2026-04-08-protein-directed-evolution.md) | 22/25 | -2 | steiner bridge missing in 3-seed, empty type gives no explanation |
 | 2026-04-08 | bridger | [protein evolution regression](2026-04-08-protein-evolution-regression.md) | 25/25 | +3 | S6 regression: all 3 friction points resolved, pairwise sp matrix |
 | 2026-04-08 | surveyor | [shrink venue comparison](2026-04-08-shrink-venue-comparison.md) | 23/25 | -2 | NCS+ = custom for NCS-concentrated fields; venue preset needed |
+| 2026-04-08 | surveyor | [protein engineering](2026-04-08-protein-engineering.md) | 19/25 | -4 | mesh search misses exact descriptors, S1 drill-down loop validated |
 
 Scenario coverage and priorities: [scenarios.md](scenarios.md)
 
