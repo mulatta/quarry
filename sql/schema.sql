@@ -87,6 +87,16 @@ CREATE TABLE IF NOT EXISTS mesh_tree (
     PRIMARY KEY (descriptor_ui, tree_number)
 );
 
+-- All MeSH descriptors used in paper annotations, including those
+-- removed from the current MeSH vocabulary (mesh_tree). Built from
+-- work_mesh DISTINCT at ETL time. Needed because mesh_tree only has
+-- descriptors with current tree_numbers (~25K), but work_mesh contains
+-- historical annotations with ~31K distinct descriptors.
+CREATE TABLE IF NOT EXISTS mesh_descriptors (
+    descriptor_ui    TEXT PRIMARY KEY,
+    descriptor_name  TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS grants (
     pmid       INTEGER NOT NULL,
     grant_id   TEXT,

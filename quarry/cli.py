@@ -352,6 +352,10 @@ _SCHEMA_HELP: dict[str, list[tuple[str, str]]] = {
         ("descriptor_name", "text"),
         ("tree_number", "text"),
     ],
+    "mesh_descriptors": [
+        ("descriptor_ui", "text — all descriptors used in paper annotations"),
+        ("descriptor_name", "text — includes historical descriptors not in mesh_tree"),
+    ],
     "id_crosswalk": [
         ("work_id", "text"),
         ("pmid", "integer"),
