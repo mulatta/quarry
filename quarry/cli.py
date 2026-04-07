@@ -534,6 +534,16 @@ def shrink(
         help="Venue preset (NCS+) or comma-separated list",
     ),
     limit: int = typer.Option(200, "--limit", help="Internal expand limit"),
+    no_foundation: bool = typer.Option(
+        False,
+        "--no-foundation",
+        help="Exclude foundation papers from pool (surfaces recent trends)",
+    ),
+    exclude_ids: str = typer.Option(
+        None,
+        "--exclude",
+        help="Comma-separated work_ids to exclude (e.g. W2336828812,W2766599608)",
+    ),
     fmt: str = typer.Option("table", "--format", "-f", help="table|json"),
 ):
     """Find minimum set of top-venue papers covering an expand landscape.
@@ -542,9 +552,13 @@ def shrink(
     papers by greedy weighted citation coverage. Useful for building
     a concise reading list from top journals.
 
+    In centralized fields where one foundational paper dominates coverage,
+    use --no-foundation to surface recent follow-up trends instead.
+
     Examples:
       quarry shrink W2042789810                    # top 5 from NCS+
       quarry shrink W2042789810 --top 10           # more papers
+      quarry shrink W2042789810 --no-foundation    # skip foundations
       quarry shrink W2042789810 --venue "Nature,Science,Cell"
     """
     import json
@@ -558,6 +572,16 @@ def shrink(
     else:
         venues = {v.strip() for v in venue.split(",")}
 
+    # Parse exclude list
+    exclude: set[int] = set()
+    if exclude_ids:
+        for wid_str in exclude_ids.split(","):
+            wid_str = wid_str.strip().upper()
+            if wid_str.startswith("W") and wid_str[1:].isdigit():
+                exclude.add(int(wid_str[1:]))
+            elif wid_str.isdigit():
+                exclude.add(int(wid_str))
+
     try:
         result = run_shrink(
             seed=seed,
@@ -566,6 +590,8 @@ def shrink(
             top_n=top_n,
             venues=venues,
             expand_limit=limit,
+            no_foundation=no_foundation,
+            exclude=exclude,
         )
     except ValueError as e:
         typer.echo(f"Error: {e}", err=True)
@@ -594,6 +620,9 @@ def _print_shrink_table(result: dict) -> None:
         f"(coverage: {coverage_pct:.0f}%, {stats['covered']}/{stats['total_candidates']})  "
         f"[dim]pool={stats['venue_pool_size']} expand={stats['expand_elapsed_s']}s[/dim]"
     )
+
+    if stats.get("centralization_warning"):
+        console.print(f"[yellow]⚠ {stats['centralization_warning']}[/yellow]")
 
     if stats["venue_pool_size"] == 0:
         console.print("[yellow]⚠ No papers found in specified venues[/yellow]")
