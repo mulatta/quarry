@@ -58,6 +58,14 @@ Warns when top-1 paper covers >80% (centralized field).
 Find papers connecting two or more seeds. Returns 7 bridge types
 (for 2 seeds; steiner activates at 3+).
 
+Header shows pairwise shortest path for each seed pair:
+`sp: W...↔W...=1  W...↔W...=∞` (∞ = no directed path within depth).
+Use this to assess seed compatibility — many ∞ pairs means seeds
+are directionally disconnected (consider expand instead of bridge).
+
+Empty bridge types show a diagnostic reason (e.g., "no steiner tree
+(2/3 pairs unreachable)").
+
 Options: `--type <type>` (filter to specific type), `--limit N`,
 `--format table|json|detail`, `--max-path-depth N`, `--alpha`, `--epsilon`
 

@@ -234,6 +234,7 @@ def run_bridge(
             "overlap_refs": stats["overlap_refs"],
             "overlap_citers": stats["overlap_citers"],
             "shortest_path_length": stats.get("shortest_path_length"),
+            "pairwise_sp": stats.get("pairwise_sp", []),
             "path_quality_warning": (
                 "sp >= 6: long citation chain, path_bridges may include off-topic papers"
                 if (stats.get("shortest_path_length") or 0) >= 6
