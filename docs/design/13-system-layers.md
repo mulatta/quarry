@@ -47,6 +47,7 @@ quarry vsearch    — vector similarity search (embedding ANN)
 quarry info       — single/multi paper metadata lookup (AD-8)
 quarry mesh       — MeSH-based paper discovery + tree browsing (AD-9)
 quarry expand     — single-seed APPR + coupling/cocitation subgraph
+quarry shrink     — minimum covering set from top venues (AD-10)
 quarry bridge     — multi-seed bridge discovery (7 types)
 quarry sql        — read-only PG query (development only, see AD-8)
 quarry mcp-server — start MCP server
