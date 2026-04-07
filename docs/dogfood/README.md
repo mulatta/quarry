@@ -14,6 +14,7 @@ Scores are 5 dimensions × 1-5 scale = max 25.
 | 2026-04-07 | bridger | [FISH → spatial transcriptomics](2026-04-07-spatial-transcriptomics.md) | 21/25 | +5 | AD-10: shrink needed |
 | 2026-04-07 | surveyor | [ABE + PTM × CRISPR](2026-04-07-abe-ptm-crispr.md) | 22/25 | +1 | shrink centralization, mesh_lookup |
 | 2026-04-08 | reader | [RNA degrader landscape](2026-04-08-rna-degrader-landscape.md) | 24/25 | +2 | reader persona validated, custom venue essential for chem bio |
+| 2026-04-08 | bridger | [protein directed evolution](2026-04-08-protein-directed-evolution.md) | 22/25 | -2 | steiner bridge missing in 3-seed, empty type gives no explanation |
 
 Scenario coverage and priorities: [scenarios.md](scenarios.md)
 

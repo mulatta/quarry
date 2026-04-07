@@ -10,8 +10,8 @@ scenarios:
   N2: { status: blocked, blocker: embedding, desc: "Start from vsearch" }
   N3: { status: blocked, blocker: FTS, desc: "Search vs mesh comparison" }
   # bridger
-  B1: { status: open,    priority: P1, desc: "3-seed steiner bridge" }
-  B2: { status: open,    priority: P3, desc: "Close bridge (same field)" }
+  B1: { status: done,    session: S6, desc: "3-seed steiner bridge" }
+  B2: { status: partial, session: S6, desc: "Close bridge (same field)" }
   B3: { status: open,    priority: P2, desc: "Far-field bridge (sp>10)" }
   # surveyor
   S1: { status: partial, session: "S2,S4", priority: P2, desc: "mesh-summary → drill-down loop" }
