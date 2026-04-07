@@ -39,10 +39,10 @@ patterns above. See [11-bridge.md](11-bridge.md) for full design.
 | cocitation_bridges (Type 4) | Done | Cross-seed co-citation, product scoring |
 | path_bridges (Type 5) | Done | Directed BFS (forward from src, reverse from dst) |
 | ppr_bridges (Type 6) | Done | Per-seed APPR geometric mean |
-| steiner_bridges (Type 7) | Planned | KMB heuristic (k ≥ 3 only) |
+| steiner_bridges (Type 7) | Done | KMB heuristic, directed BFS (k ≥ 3 only) |
 
-**Note**: Type 1-6 have PyO3 binding (`Graph.bridge()`) and CLI
-(`quarry bridge`). Type 7 not yet implemented. See 11-bridge.md.
+**Note**: All 7 bridge types implemented with PyO3 binding and CLI.
+See 11-bridge.md for quality evaluation and usage guidance.
 
 ## Future Algorithm Candidates
 

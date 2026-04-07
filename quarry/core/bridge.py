@@ -81,6 +81,9 @@ def run_bridge(
     ):
         for entry in results.get(key, []):
             all_wids.add(entry["work_id"])
+    # steiner_bridges is a flat list of work_ids
+    for wid in results.get("steiner_bridges", []):
+        all_wids.add(wid)
 
     metadata = _enrich_metadata(
         list(all_wids), pg_conninfo, include_abstract=include_abstract
@@ -179,6 +182,27 @@ def run_bridge(
             out.append(entry)
         return out
 
+    def _enrich_steiner(work_ids: list[int]) -> list[dict]:
+        out = []
+        for wid in work_ids:
+            meta = metadata.get(wid, {})
+            entry: dict[str, Any] = {
+                "work_id": wid,
+                "title": meta.get("title"),
+                "doi": meta.get("doi"),
+                "year": meta.get("pub_year"),
+                "quality": {
+                    "cited_by": meta.get("cited_by_count"),
+                    "cnp": meta.get("cnp"),
+                    "fwci": meta.get("fwci"),
+                    "rcr": meta.get("rcr"),
+                },
+            }
+            if include_abstract:
+                entry["abstract"] = meta.get("abstract")
+            out.append(entry)
+        return out
+
     return {
         "meta": {
             "quarry_version": "0.2.0",
@@ -197,6 +221,7 @@ def run_bridge(
         "cocitation_bridges": _enrich_scored(results.get("cocitation_bridges", [])),
         "path_bridges": _enrich_path(results.get("path_bridges", [])),
         "ppr_bridges": _enrich_scored(results.get("ppr_bridges", [])),
+        "steiner_bridges": _enrich_steiner(results.get("steiner_bridges", [])),
         "stats": {
             "seeds": seed_ids,
             "per_seed_ref_count": stats["per_seed_ref_count"],

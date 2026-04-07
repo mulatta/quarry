@@ -256,6 +256,7 @@ def _print_bridge_table(result: dict) -> None:
         ("cocitation_bridges", "Cocitation Bridges (community reads)"),
         ("path_bridges", "Path Bridges (stepping stones)"),
         ("ppr_bridges", "PPR Bridges (structural centrality)"),
+        ("steiner_bridges", "Steiner Bridges (minimal connecting set, k≥3)"),
     ]
 
     for key, label in _SECTIONS:
@@ -267,6 +268,7 @@ def _print_bridge_table(result: dict) -> None:
 
         is_path = "hop_from" in entries[0]
         is_scored = "score" in entries[0]
+        is_simple = "aa_weight" not in entries[0] and not is_scored and not is_path
 
         table = Table(show_edge=False, pad_edge=False, box=None, expand=True)
         table.add_column("#", justify="right", style="dim", width=4, no_wrap=True)
@@ -277,7 +279,7 @@ def _print_bridge_table(result: dict) -> None:
             table.add_column("paths", justify="right", width=6, no_wrap=True)
         elif is_scored:
             table.add_column("score", justify="right", width=10, no_wrap=True)
-        else:
+        elif not is_simple:
             table.add_column("aa", justify="right", width=8, no_wrap=True)
 
         table.add_column("work_id", width=13, no_wrap=True)
@@ -292,6 +294,13 @@ def _print_bridge_table(result: dict) -> None:
                     year,
                     hops,
                     str(e["path_count"]),
+                    f"W{e['work_id']}",
+                    Text(e.get("title") or "-"),
+                )
+            elif is_simple:
+                table.add_row(
+                    str(i + 1),
+                    year,
                     f"W{e['work_id']}",
                     Text(e.get("title") or "-"),
                 )
