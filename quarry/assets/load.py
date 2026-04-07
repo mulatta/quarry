@@ -325,7 +325,7 @@ def ch_load_pm(context: AssetExecutionContext) -> MaterializeResult:
 @asset(
     group_name="load",
     deps=[ch_init, mesh_stage],
-    description="MeSH Parquet → CH: pm_mesh_tree.",
+    description="MeSH Parquet → CH: pm_mesh_tree + pm_mesh_terms.",
     kinds={"clickhouse"},
 )
 def ch_load_mesh(context: AssetExecutionContext) -> MaterializeResult:
