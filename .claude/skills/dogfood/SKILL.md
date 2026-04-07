@@ -65,3 +65,26 @@ Key behaviors:
 
 After exploration, read `references/evaluation.md` and produce the
 full friction report with 5-dimension ratings.
+
+## Persist Results
+
+After producing the evaluation, save it to a permanent record.
+This enables cross-session comparison and score trend tracking.
+
+1. **Generate a slug** from the topic: lowercase, hyphens, max 40 chars.
+   Example: "cytidine deaminase discovery" → `cytidine-deaminase`
+
+1. **Write the session file** to `docs/dogfood/YYYY-MM-DD-{slug}.md`
+   using the template in `references/evaluation.md` (see "Persistence
+   Format" section). Include YAML frontmatter with scores and metadata.
+
+1. **Update the index** at `docs/dogfood/README.md`: add a row to the
+   session table with date, persona, topic, total score, and link.
+
+1. **Cross-reference**: if the session led to design decisions (AD-\*),
+   add the `design_refs` field in frontmatter. AD docs should link
+   back using: `See [dogfood session](../../docs/dogfood/{filename})`.
+
+The session file must be **self-contained** — readable as a standalone
+document without needing the conversation that produced it. Include
+the full friction log, command sequence, and research findings.
