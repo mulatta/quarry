@@ -525,18 +525,25 @@ New pg.py method: `top_mesh_by_work_ids(work_ids, limit)`.
 
 ### Schema Assessment
 
-Current schema and indexes are sufficient:
+| Table | Rows | Purpose |
+|-------|------|---------|
+| `mesh_tree` | 65K | Hierarchy (tree_number). Current MeSH vocabulary only |
+| `mesh_lookup` | 272K | Synonym search index. Entry terms from desc\*.xml (267K) + historical descriptors from work_mesh (5.7K) |
+| `work_mesh` | 379M | Paper ↔ MeSH annotation (unchanged) |
 
 | Index | Covers |
 |-------|--------|
 | `idx_work_mesh_wid` btree(work_id) | info --mesh, expand mesh-summary |
 | `idx_work_mesh_desc` btree(descriptor_ui) | mesh paper discovery |
+| `idx_mesh_lookup_term` btree(term) | mesh name search (single query) |
+| `idx_mesh_lookup_desc` btree(descriptor_ui) | mesh UI lookup fallback |
 
-Optional improvement: composite index `(descriptor_ui, is_major_topic)`
-eliminates in-memory filter. Not required — current performance is
-acceptable for realistic descriptor cardinalities (\<50K papers).
+mesh_lookup replaces the previous mesh_descriptors table (AD-9
+post-implementation). Built from two sources at ELT time:
 
-No denormalization needed. No schema redesign needed.
+1. Entry terms: desc\*.xml → quarry-parse → mesh_terms.parquet →
+   CH pm_mesh_terms → mesh_lookup_export (adds source/has_tree) → PG
+1. Historical: work_mesh DISTINCT WHERE NOT IN mesh_lookup → INSERT
 
 ### Ontology Strategy
 
@@ -553,8 +560,10 @@ so MeSH is a natural fit for enrichment and discovery.
 | UMLS | 3.5M concepts, but paper mapping still goes through MeSH. Marginal gain vs complexity |
 | SNOMED/OMIM | Clinical focus, not research paper discovery |
 
-UMLS's main advantage (synonym expansion) is better served by
-embedding similarity. Re-evaluate after Phase 3 embedding is live.
+UMLS's main advantage (synonym expansion) is now partially addressed
+by NLM entry terms in mesh_lookup (267K terms for 25K descriptors).
+Remaining gap: cross-ontology mapping (MeSH ↔ GO ↔ SNOMED).
+Re-evaluate after Phase 3 embedding is live.
 
 #### MeSH in L2 Content Layer (Phase 3)
 
@@ -576,13 +585,17 @@ misses what MeSH catches (or vice versa) at the graph traversal level.
 
 ### Implementation Notes
 
-- `info --mesh`: no new pg.py method, direct query in CLI
-- `quarry mesh`: wraps existing `mesh_search_by_name()` + new
-  `get_top_works_by_mesh()`
-- `quarry mesh --tree`: wraps existing `mesh_by_ui()` +
-  `mesh_descendants()` + new `mesh_parent()`
-- `expand --mesh-summary`: new `top_mesh_by_work_ids()` (work_id
-  based, current `top_mesh()` is pmid-based)
+- `info --mesh`: `get_work_mesh()` in pg.py
+- `quarry mesh`: `mesh_search_by_name()` queries mesh_lookup (single
+  table, token-AND ILIKE on `term` column). Covers NLM entry terms
+  - historical descriptors in one query. Falls back to mesh_lookup
+    by descriptor_ui for UI-based lookups.
+- `quarry mesh --tree`: `mesh_by_ui()` + `mesh_descendants()` +
+  `mesh_parent()`
+- `expand --mesh-summary`: `top_mesh_by_work_ids()`
+- ELT pipeline: desc\*.xml → Rust quarry-parse (MeshTerm struct) →
+  mesh_terms.parquet → CH pm_mesh_terms → mesh_lookup_export →
+  PG mesh_lookup. Historical descriptors added in pg_load post-step.
 
 ### Post-implementation: Dogfood Findings (session 3)
 
