@@ -14,7 +14,7 @@ use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
 
 use crate::build::oa_json::{OaAuthor, OaCitation, OaCountByYear, OaCrosswalk, OaTopic, OaWork};
-use crate::parse::mesh::MeshEntry;
+use crate::parse::mesh::{MeshEntry, MeshTerm};
 use crate::parse::xml::{Author, Chemical, Grant, MeshHeading, Paper};
 
 /// Parse "YYYY-MM-DD" to days since epoch for Arrow Date32.
@@ -453,6 +453,28 @@ pub fn write_mesh_tree(entries: &[MeshEntry], path: &Path) -> Result<usize, Box<
         Arc::new(StringArray::from_iter_values(entries.iter().map(|e| e.descriptor_ui.as_str()))),
         Arc::new(StringArray::from_iter_values(entries.iter().map(|e| e.descriptor_name.as_str()))),
         Arc::new(StringArray::from_iter_values(entries.iter().map(|e| e.tree_number.as_str()))),
+    ])?;
+
+    write_batch(path, &batch)
+}
+
+pub fn write_mesh_terms(terms: &[MeshTerm], path: &Path) -> Result<usize, Box<dyn std::error::Error>> {
+    if terms.is_empty() {
+        return Ok(0);
+    }
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("descriptor_ui", DataType::Utf8, false),
+        Field::new("descriptor_name", DataType::Utf8, false),
+        Field::new("term", DataType::Utf8, false),
+        Field::new("is_preferred", DataType::Boolean, false),
+    ]));
+
+    let batch = RecordBatch::try_new(schema, vec![
+        Arc::new(StringArray::from_iter_values(terms.iter().map(|t| t.descriptor_ui.as_str()))),
+        Arc::new(StringArray::from_iter_values(terms.iter().map(|t| t.descriptor_name.as_str()))),
+        Arc::new(StringArray::from_iter_values(terms.iter().map(|t| t.term.as_str()))),
+        Arc::new(BooleanArray::from(terms.iter().map(|t| t.is_preferred).collect::<Vec<_>>())),
     ])?;
 
     write_batch(path, &batch)

@@ -117,13 +117,24 @@ fn run(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
             xml_path,
             output_dir,
         } => {
-            let entries = mesh::parse_mesh_xml(xml_path)?;
-            let n = entries.len();
-            eprintln!("mesh: parsed {n} entries from {}", xml_path.display());
+            let result = mesh::parse_mesh_xml(xml_path)?;
+            eprintln!(
+                "mesh: parsed {} tree entries, {} term entries from {}",
+                result.tree_entries.len(),
+                result.term_entries.len(),
+                xml_path.display()
+            );
 
-            let out_path = output_dir.join("mesh_tree.parquet");
-            let rows = parquet_writer::write_mesh_tree(&entries, &out_path)?;
-            println!("{}", serde_json::json!({"rows_written": rows}));
+            let tree_path = output_dir.join("mesh_tree.parquet");
+            let tree_rows = parquet_writer::write_mesh_tree(&result.tree_entries, &tree_path)?;
+
+            let terms_path = output_dir.join("mesh_terms.parquet");
+            let term_rows = parquet_writer::write_mesh_terms(&result.term_entries, &terms_path)?;
+
+            println!("{}", serde_json::json!({
+                "tree_rows": tree_rows,
+                "term_rows": term_rows
+            }));
         }
     }
     Ok(())
