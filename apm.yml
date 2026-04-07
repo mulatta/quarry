@@ -6,6 +6,7 @@ dependencies:
   apm:
     - ClickHouse/agent-skills
     - actionbook/rust-skills
+    - anthropics/skills/skills/skill-creator
     - dagster-io/skills#v0.0.12
   mcp: []
 scripts: {}

@@ -1,5 +1,5 @@
 lockfile_version: '1'
-generated_at: '2026-04-06T12:51:59.822428+00:00'
+generated_at: '2026-04-07T08:41:50.562992+00:00'
 apm_version: 0.8.10
 dependencies:
 - repo_url: ClickHouse/agent-skills
@@ -16,6 +16,15 @@ dependencies:
   deployed_files:
   - .claude/hooks/rust-skills/.claude/hooks/rust-skill-eval-hook.sh
   content_hash: sha256:a3a6082eb77407e7dec8ad1b150667cac5b9411da74f41beb56aac00c6e536a7
+- repo_url: anthropics/skills
+  host: github.com
+  resolved_commit: 98669c11ca63e9c81c11501e1437e5c47b556621
+  virtual_path: skills/skill-creator
+  is_virtual: true
+  package_type: claude_skill
+  deployed_files:
+  - .claude/skills/skill-creator
+  content_hash: sha256:ad480cdd4a4b5886cb7d35c2055d4b9005babe15d80ace54d90f4259f3bf3257
 - repo_url: dagster-io/skills
   host: github.com
   resolved_commit: 51575d218c1d9cee8d3f45f74faf2fe9e8ce2b50
