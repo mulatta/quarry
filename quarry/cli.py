@@ -170,6 +170,14 @@ def bridge(
     max_path_depth: int = typer.Option(
         5, "--max-path-depth", help="Max BFS depth for path bridges (Type 5)"
     ),
+    alpha: float = typer.Option(
+        0.15, "--alpha", help="APPR teleport probability (Type 6)"
+    ),
+    epsilon: float = typer.Option(
+        1e-6,
+        "--epsilon",
+        help="APPR precision threshold (Type 6, lower = wider search)",
+    ),
     fmt: str = typer.Option("table", "--format", "-f", help="table|json|detail"),
 ):
     """Discover bridge papers connecting two or more seeds.
@@ -202,6 +210,8 @@ def bridge(
             limit=limit,
             max_neighbor_degree=max_neighbor_degree,
             max_path_depth=max_path_depth,
+            alpha=alpha,
+            epsilon=epsilon,
             include_abstract=(fmt == "detail"),
         )
     except ValueError as e:

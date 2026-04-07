@@ -213,9 +213,10 @@ neighborhoods in the global graph.
 
 **Question answered**: "What papers are important in both fields' networks?"
 
-**Distinction from Types 1-4**: Types 1-4 are local (1-2 hop neighborhood).
-Type 5 is global but deterministic (path). Type 6 is global and probabilistic
-(random walk).
+**Distinction from Types 1-5**: Types 1-4 are local (1-2 hop neighborhood).
+Type 5 is global but deterministic (directed path). Type 6 is global and
+probabilistic (random walk) — finds structurally important papers even
+without direct citation relationships to seeds.
 
 **Computation**:
 
@@ -229,13 +230,35 @@ For each node v scored by ALL seeds:
 Exclude seeds. Sort descending. Truncate to limit.
 ```
 
-**Cost**: O(k/ε), ~1s per seed.
+**Cost**: O(k/ε) per seed, ~500ms total for k=2 with default params.
+
+**Parameters**:
+
+- `--alpha` (default 0.15): teleport probability. Higher = more seed-local.
+- `--epsilon` (default 1e-6): precision threshold. Lower = wider exploration.
+
+Parameter sensitivity (validated across 5 seed pairs, α×ε sweep):
+
+| ε | result count | unique vs T1-5 | time | use case |
+|---|-------------|----------------|------|----------|
+| 1e-5 | 0-50 | low | \<10ms | fast preview |
+| **1e-6** | **15-200** | **20-50%** | **~500ms** | **default — balanced** |
+| 1e-7 | 200 (cap) | 15-97% | ~1s | far pairs needing wider search |
+
+α=0.15 is stable across all pair distances. ε has stronger impact:
+for far pairs with few results at default ε, lowering to 1e-7 expands
+the search at the cost of ~2× runtime.
+
+**Best use case**: medium-distance pairs (same broad field, different
+subfields). Close pairs overlap 77%+ with Type 1-4. Far pairs may need
+ε=1e-7 for sufficient results. Medium pairs produce 20-35% unique
+bridges at default parameters — papers like field-defining reviews,
+seminal methods, and cross-subfield benchmarks that Type 1-4 misses.
 
 **k > 2**: Natural extension — geometric mean of k scores.
 
-**Phase 3**: Embedding midpoint ANN may subsume this for far pairs. PPR
-product remains valuable for close/medium pairs where citation structure
-is informative.
+**Phase 3**: Embedding midpoint ANN may complement PPR for far pairs
+where even ε=1e-7 produces sparse results.
 
 **Origin**: Haveliwala (2002) personalized PageRank; Lofgren et al. (2016)
 PPR product ≈ meeting probability of independent random walks.
@@ -447,10 +470,10 @@ with high k.
 | 1 | Rust `bridge()` + common_refs/common_citers | **Done** |
 | 2 | coupling_bridges + cocitation_bridges | **Done** |
 | 3 | path_bridges (directed BFS) | **Done** |
-| 4 | ppr_bridges (per-seed APPR product) | Planned |
+| 4 | ppr_bridges (per-seed APPR product) | **Done** |
 | 5 | steiner_bridges (KMB heuristic) | Planned |
-| 6 | Python binding + CLI (steps 1-5) | **Done** (Type 1-5; Type 6-7 pending) |
-| 7 | Quality evaluation (abstract review, 3 seed pairs) | **Done** (Type 1-5) |
+| 6 | Python binding + CLI (steps 1-5) | **Done** (Type 1-6; Type 7 pending) |
+| 7 | Quality evaluation (abstract review, 3 seed pairs) | **Done** (Type 1-6) |
 
 ### Step 1-2 quality evaluation
 
