@@ -165,16 +165,7 @@ impl Graph {
         self.rev.neighbors(idx)
     }
 
-    /// Call `f` for each undirected neighbor (fwd ∪ rev). No allocation.
-    /// Duplicates possible if node appears in both directions — caller handles.
-    pub(crate) fn for_each_undirected<F: FnMut(u32)>(&self, idx: u32, mut f: F) {
-        for &nb in self.fwd_neighbors(idx) {
-            f(nb);
-        }
-        for &nb in self.rev_neighbors(idx) {
-            f(nb);
-        }
-    }
+
 
     pub(crate) fn fwd_indptr(&self) -> &[u64] {
         self.fwd.indptr()

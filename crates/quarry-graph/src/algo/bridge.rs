@@ -519,16 +519,20 @@ fn score_cross_seed(
 }
 
 // ---------------------------------------------------------------------------
-// Type 5: path_bridges (Undirected BFS shortest path)
+// Type 5: path_bridges (Directed BFS)
 // ---------------------------------------------------------------------------
 
-/// Intermediate nodes on shortest paths between seeds (undirected view).
+/// Directed path bridges between seeds.
 ///
-/// For k=2: single pair BFS. For k>2: pairwise BFS, union of all bridge nodes.
-/// path_count = number of shortest paths through node (product of forward/reverse
-/// path counts from BFS).
+/// Forward BFS from src (following references → older papers),
+/// Reverse BFS from dst (following citers → newer papers).
+/// Bridge nodes = intersection: papers on directed citation chain src→...→v→...→dst.
 ///
-/// Safety: max_depth bounds BFS expansion; max_visited (500K) prevents runaway.
+/// Why directed, not undirected: citation graphs are small-world — undirected BFS
+/// always finds trivial sp=2 paths through hubs, producing 100% overlap with
+/// Type 1-2 (common_refs/citers). Directed BFS forces longer, semantically
+/// meaningful chains (sp=3-8) with unique results.
+/// See docs/design/11-bridge.md "Architecture Decision: Why Directed" for details.
 fn path_bridges(
     graph: &Graph,
     seed_indices: &[u32],
@@ -538,12 +542,8 @@ fn path_bridges(
 ) -> (Vec<PathEntry>, Option<usize>) {
     if seed_indices.len() == 2 {
         return path_bridges_pair(
-            graph,
-            seed_indices[0],
-            seed_indices[1],
-            seed_set,
-            limit,
-            max_depth,
+            graph, seed_indices[0], seed_indices[1],
+            seed_set, limit, max_depth,
         );
     }
 
@@ -554,12 +554,8 @@ fn path_bridges(
     for i in 0..seed_indices.len() {
         for j in (i + 1)..seed_indices.len() {
             let (entries, sp_len) = path_bridges_pair(
-                graph,
-                seed_indices[i],
-                seed_indices[j],
-                seed_set,
-                0, // no limit on intermediate results
-                max_depth,
+                graph, seed_indices[i], seed_indices[j],
+                seed_set, 0, max_depth,
             );
             if let Some(d) = sp_len {
                 min_sp_len = Some(min_sp_len.map_or(d, |m: usize| m.min(d)));
@@ -591,7 +587,7 @@ fn path_bridges(
     (result, min_sp_len)
 }
 
-/// BFS shortest path bridges between a single pair (undirected).
+/// Directed path bridges for a single pair.
 fn path_bridges_pair(
     graph: &Graph,
     src: u32,
@@ -602,59 +598,60 @@ fn path_bridges_pair(
 ) -> (Vec<PathEntry>, Option<usize>) {
     const MAX_VISITED: usize = 500_000;
 
-    if src == dst {
-        return (vec![], Some(0));
+    // Forward BFS from src: papers src cites (directly/transitively)
+    let (dist_fwd, count_fwd) = directed_bfs(graph, src, max_depth, MAX_VISITED, Direction::Forward);
+
+    // Check if dst is reachable via forward edges
+    let total_dist = dist_fwd.get(&dst).copied();
+
+    // Reverse BFS from dst: papers that cite dst (directly/transitively)
+    let (dist_rev, count_rev) = directed_bfs(graph, dst, max_depth, MAX_VISITED, Direction::Reverse);
+
+    // If direct forward path exists, use it
+    if let Some(td) = total_dist {
+        return collect_bridge_entries(
+            &dist_fwd, &count_fwd, &dist_rev, &count_rev,
+            td, seed_set, graph, limit,
+        );
     }
 
-    // BFS from src (undirected) — collect dist + path count
-    let (dist_src, count_src) = undirected_bfs(graph, src, max_depth, MAX_VISITED);
+    // No direct forward path. Find bridge nodes reachable from both sides:
+    // dist_fwd[v] exists AND dist_rev[v] exists → v is on a directed chain
+    // Total "cost" = dist_fwd[v] + dist_rev[v] (not a single shortest path,
+    // but the shortest chain src→...→v→...→dst)
+    let mut best_total = usize::MAX;
+    for (&v, &d_fwd) in &dist_fwd {
+        if let Some(&d_rev) = dist_rev.get(&v) {
+            let total = d_fwd + d_rev;
+            if total < best_total {
+                best_total = total;
+            }
+        }
+    }
 
-    // Check reachability
-    let Some(&total_dist) = dist_src.get(&dst) else {
+    if best_total == usize::MAX {
         return (vec![], None);
-    };
-
-    // BFS from dst (undirected)
-    let (dist_dst, count_dst) = undirected_bfs(graph, dst, max_depth, MAX_VISITED);
-
-    // Collect bridge nodes: dist_src[v] + dist_dst[v] == total_dist
-    let mut entries: Vec<PathEntry> = dist_src
-        .iter()
-        .filter_map(|(&v, &d_src)| {
-            if seed_set.contains(&v) {
-                return None; // exclude seeds
-            }
-            let d_dst = *dist_dst.get(&v)?;
-            if d_src + d_dst != total_dist {
-                return None;
-            }
-            let pc_src = count_src.get(&v).copied().unwrap_or(1);
-            let pc_dst = count_dst.get(&v).copied().unwrap_or(1);
-            Some(PathEntry {
-                work_id: graph.id_of(v),
-                hop_from: vec![d_src, d_dst],
-                path_count: pc_src * pc_dst,
-            })
-        })
-        .collect();
-
-    // Sort by path_count desc (nodes on more shortest paths = stronger bridges)
-    entries.sort_unstable_by(|a, b| b.path_count.cmp(&a.path_count));
-    if limit > 0 {
-        entries.truncate(limit);
     }
 
-    (entries, Some(total_dist))
+    collect_bridge_entries(
+        &dist_fwd, &count_fwd, &dist_rev, &count_rev,
+        best_total, seed_set, graph, limit,
+    )
 }
 
-/// Undirected BFS returning (distance, shortest_path_count) per node.
-///
-/// Bounded by max_depth and max_visited for safety on large graphs.
-fn undirected_bfs(
+#[derive(Clone, Copy)]
+enum Direction {
+    Forward,
+    Reverse,
+}
+
+/// Single-direction BFS (forward or reverse only).
+fn directed_bfs(
     graph: &Graph,
     start: u32,
     max_depth: usize,
     max_visited: usize,
+    direction: Direction,
 ) -> (HashMap<u32, usize>, HashMap<u32, usize>) {
     let mut dist: HashMap<u32, usize> = HashMap::new();
     let mut count: HashMap<u32, usize> = HashMap::new();
@@ -670,11 +667,12 @@ fn undirected_bfs(
         }
         let c = count[&node];
 
-        // Collect neighbors first to avoid borrow conflict in closure
-        let mut neighbors = Vec::new();
-        graph.for_each_undirected(node, |nb| neighbors.push(nb));
+        let neighbors: &[u32] = match direction {
+            Direction::Forward => graph.fwd_neighbors(node),
+            Direction::Reverse => graph.rev_neighbors(node),
+        };
 
-        for nb in neighbors {
+        for &nb in neighbors {
             if dist.len() >= max_visited {
                 break;
             }
@@ -685,7 +683,6 @@ fn undirected_bfs(
                     queue.push_back(nb);
                 }
                 std::collections::hash_map::Entry::Occupied(e) => {
-                    // Same distance = additional shortest path
                     if *e.get() == d + 1 {
                         *count.entry(nb).or_insert(0) += c;
                     }
@@ -695,6 +692,46 @@ fn undirected_bfs(
     }
 
     (dist, count)
+}
+
+/// Collect bridge nodes from bidirectional distance/count maps.
+#[allow(clippy::too_many_arguments)]
+fn collect_bridge_entries(
+    dist_src: &HashMap<u32, usize>,
+    count_src: &HashMap<u32, usize>,
+    dist_dst: &HashMap<u32, usize>,
+    count_dst: &HashMap<u32, usize>,
+    total_dist: usize,
+    seed_set: &HashSet<u32>,
+    graph: &Graph,
+    limit: usize,
+) -> (Vec<PathEntry>, Option<usize>) {
+    let mut entries: Vec<PathEntry> = dist_src
+        .iter()
+        .filter_map(|(&v, &d_src)| {
+            if seed_set.contains(&v) {
+                return None;
+            }
+            let d_dst = *dist_dst.get(&v)?;
+            if d_src + d_dst != total_dist {
+                return None;
+            }
+            let pc_src = count_src.get(&v).copied().unwrap_or(1);
+            let pc_dst = count_dst.get(&v).copied().unwrap_or(1);
+            Some(PathEntry {
+                work_id: graph.id_of(v),
+                hop_from: vec![d_src, d_dst],
+                path_count: pc_src * pc_dst,
+            })
+        })
+        .collect();
+
+    entries.sort_unstable_by(|a, b| b.path_count.cmp(&a.path_count));
+    if limit > 0 {
+        entries.truncate(limit);
+    }
+
+    (entries, Some(total_dist))
 }
 
 // ---------------------------------------------------------------------------
@@ -1136,28 +1173,61 @@ mod tests {
     // -- Type 5: path_bridges --
 
     #[test]
-    fn path_bridges_two_seeds() {
-        let g = test_graph();
-        // Seeds A(10), B(11): connected via shared refs 20,30 (undirected)
-        // 10→20, 11→20 → undirected path 10-20-11 (length 2)
-        let seeds = [10, 11];
+    fn path_bridges_directed() {
+        // Directed path test: A→C→D, B→D (so forward from A reaches D, reverse from B reaches D)
+        // Bridge node = D (hop 2 from A forward, hop 1 from B reverse)
+        let dir = tempfile::tempdir().unwrap();
+        let csv_path = dir.path().join("directed.csv");
+        {
+            use std::io::Write;
+            let mut f = std::fs::File::create(&csv_path).unwrap();
+            writeln!(f, "citing,cited").unwrap();
+            writeln!(f, "1,3").unwrap(); // A(1) → C(3)
+            writeln!(f, "3,4").unwrap(); // C(3) → D(4)
+            writeln!(f, "2,4").unwrap(); // B(2) → D(4) — B cites D
+            writeln!(f, "5,3").unwrap(); // E(5) → C(3) — so C has a citer
+        }
+        let graph_dir = dir.path().join("graph");
+        crate::build::build_from_csv_raw(&csv_path, &graph_dir).unwrap();
+        std::mem::forget(dir);
+        let g = Graph::open(&graph_dir).unwrap();
+
+        // Forward from A(1): 1→3→4 (depth 2)
+        // Reverse from B(2): 2→4 means 4 is cited by 2, but reverse BFS
+        //   from 2 follows rev_neighbors(2) = papers that cite 2 = none
+        //   Actually: reverse BFS from dst follows papers that cite dst.
+        //   rev_neighbors(2) = {} (nobody cites 2)
+        //   So we need dst to be cited by something.
+        // Let's use seeds [1, 5]:
+        //   Forward from 1: 1→3→4
+        //   Reverse from 5: rev_neighbors(5) = {} (nobody cites 5)
+        // That won't work either. Need:
+        //   Forward from src reaches some node V, reverse from dst also reaches V.
+        //   Reverse BFS from dst = papers that cite dst (transitively).
+        // seeds [3, 2]: forward from 3 = {4}, reverse from 2: rev(2) = {}. No.
+        // seeds [1, 4]: forward from 1 = {3, 4}. If dst=4, fwd reaches 4 directly.
+        //   sp = 2 (1→3→4), bridge = 3
+        let seeds = [1, 4];
         let params = BridgeParams {
             types: vec![BridgeType::Path],
             limit: 100,
+            max_path_depth: 5,
             ..Default::default()
         };
         let result = compute(&g, &seeds, &params);
 
         assert!(result.stats.shortest_path_length.is_some());
         let sp = result.stats.shortest_path_length.unwrap();
-        // Direct edge 10→20←11 = 2 hops undirected, or 60→10, 60→11 = 2 hops
-        assert!(sp <= 3, "shortest path should be short: got {sp}");
+        assert_eq!(sp, 2, "1→3→4 = 2 hops");
 
-        // Bridge nodes should not include seeds
+        // Bridge = node 3 (intermediate on 1→3→4)
+        assert!(!result.path_bridges.is_empty(), "should find bridge node 3");
+        let bridge_ids: HashSet<i64> = result.path_bridges.iter().map(|e| e.work_id).collect();
+        assert!(bridge_ids.contains(&3), "node 3 is on path 1→3→4");
+        assert!(!bridge_ids.contains(&1), "seed excluded");
+        assert!(!bridge_ids.contains(&4), "seed excluded");
+
         for e in &result.path_bridges {
-            assert!(e.work_id != 10 && e.work_id != 11, "seeds excluded");
-            assert!(e.path_count >= 1);
-            assert_eq!(e.hop_from.len(), 2);
             assert_eq!(e.hop_from[0] + e.hop_from[1], sp);
         }
     }

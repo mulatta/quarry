@@ -232,6 +232,11 @@ def _print_bridge_table(result: dict) -> None:
         f"[dim]refs overlap={stats['overlap_refs']} "
         f"citers overlap={stats['overlap_citers']}{sp_info}[/dim]"
     )
+    if sp_len is not None and sp_len >= 6:
+        console.print(
+            f"[yellow]⚠ sp={sp_len}: long citation chain — "
+            f"path_bridges may include off-topic papers[/yellow]"
+        )
 
     _SECTIONS = [
         ("common_refs", "Common Refs (shared foundation)"),
