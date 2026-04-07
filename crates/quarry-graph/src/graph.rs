@@ -657,6 +657,7 @@ impl Graph {
         results.insert("cocitation_bridges".into(), cocitation.into_pyobject(py).unwrap().into_any().unbind());
         results.insert("path_bridges".into(), path.into_pyobject(py).unwrap().into_any().unbind());
         results.insert("ppr_bridges".into(), ppr.into_pyobject(py).unwrap().into_any().unbind());
+        results.insert("steiner_bridges".into(), result.steiner_bridges.into_pyobject(py).unwrap().into_any().unbind());
 
         // Stats
         let mut stats = HashMap::new();

@@ -115,7 +115,6 @@ pub struct BridgeResult {
     pub cocitation_bridges: Vec<ScoredEntry>,
     pub path_bridges: Vec<PathEntry>,
     pub ppr_bridges: Vec<ScoredEntry>,
-    #[allow(dead_code)]
     pub steiner_bridges: Vec<i64>,
 }
 
@@ -281,8 +280,14 @@ pub fn compute(graph: &Graph, seeds: &[i64], params: &BridgeParams) -> BridgeRes
                     params.limit,
                 );
             }
-            // Type 7: not yet implemented
-            _ => {}
+            BridgeType::Steiner => {
+                result.steiner_bridges = steiner_bridges(
+                    graph,
+                    &seed_indices,
+                    &seed_set,
+                    params.max_path_depth,
+                );
+            }
         }
     }
 
@@ -815,6 +820,258 @@ fn ppr_bridges(
     });
     entries.truncate(limit);
     entries
+}
+
+// ---------------------------------------------------------------------------
+// Type 7: steiner_bridges (Steiner Tree — k ≥ 3)
+// ---------------------------------------------------------------------------
+
+/// Steiner tree bridges: internal nodes of the minimum Steiner tree
+/// connecting all seeds. Uses KMB heuristic (2-approximation).
+///
+/// Algorithm:
+/// 1. All-pairs directed BFS among k seeds → distance matrix
+/// 2. Prim's MST on the complete seed graph (∞ = unreachable)
+/// 3. Replace each MST edge with actual shortest path nodes
+/// 4. Prune non-seed leaves
+/// 5. Return internal non-seed nodes
+fn steiner_bridges(
+    graph: &Graph,
+    seed_indices: &[u32],
+    seed_set: &HashSet<u32>,
+    max_depth: usize,
+) -> Vec<i64> {
+    let k = seed_indices.len();
+    if k < 3 {
+        return vec![];
+    }
+
+    const MAX_VISITED: usize = 500_000;
+
+    // Step 1: All-pairs directed BFS
+    // For each seed, run forward BFS and collect distances + parents
+    let bfs_results: Vec<(HashMap<u32, usize>, HashMap<u32, u32>)> = seed_indices
+        .iter()
+        .map(|&idx| directed_bfs_with_parent(graph, idx, max_depth, MAX_VISITED, Direction::Forward))
+        .collect();
+
+    // Also run reverse BFS from each seed (for bidirectional path finding)
+    let bfs_rev_results: Vec<(HashMap<u32, usize>, HashMap<u32, u32>)> = seed_indices
+        .iter()
+        .map(|&idx| directed_bfs_with_parent(graph, idx, max_depth, MAX_VISITED, Direction::Reverse))
+        .collect();
+
+    // Build distance matrix: dist[i][j] = shortest directed path from seed_i to seed_j
+    // Try both: fwd from i reaching j, OR fwd from i meeting rev from j
+    let mut dist_matrix: Vec<Vec<usize>> = vec![vec![usize::MAX; k]; k];
+    for i in 0..k {
+        dist_matrix[i][i] = 0;
+        for j in 0..k {
+            if i == j {
+                continue;
+            }
+            // Direct forward: fwd BFS from i reaches j
+            if let Some(&d) = bfs_results[i].0.get(&seed_indices[j]) {
+                dist_matrix[i][j] = dist_matrix[i][j].min(d);
+            }
+            // Bidirectional: fwd from i + rev from j meet at some node
+            let (ref dist_fwd, _) = bfs_results[i];
+            let (ref dist_rev, _) = bfs_rev_results[j];
+            for (&v, &d_fwd) in dist_fwd {
+                if let Some(&d_rev) = dist_rev.get(&v) {
+                    dist_matrix[i][j] = dist_matrix[i][j].min(d_fwd + d_rev);
+                }
+            }
+        }
+    }
+
+    // Step 2: Prim's MST on seed complete graph
+    // Use minimum of dist[i][j] and dist[j][i] as undirected edge weight
+    let mst_edges = prim_mst(&dist_matrix);
+
+    // Step 3: Replace MST edges with actual path nodes
+    let mut tree_nodes: HashSet<u32> = HashSet::new();
+    for &(i, j) in &mst_edges {
+        // Find the best meeting point and collect all nodes on the path
+        let nodes = reconstruct_steiner_path(
+            &bfs_results[i],
+            &bfs_rev_results[j],
+            &bfs_results[j],
+            &bfs_rev_results[i],
+            seed_indices[i],
+            seed_indices[j],
+        );
+        tree_nodes.extend(nodes);
+    }
+
+    // Step 4-5: Return non-seed internal nodes
+    let mut result: Vec<i64> = tree_nodes
+        .into_iter()
+        .filter(|n| !seed_set.contains(n))
+        .map(|n| graph.id_of(n))
+        .collect();
+    result.sort_unstable();
+    result
+}
+
+/// BFS with parent tracking for path reconstruction.
+fn directed_bfs_with_parent(
+    graph: &Graph,
+    start: u32,
+    max_depth: usize,
+    max_visited: usize,
+    direction: Direction,
+) -> (HashMap<u32, usize>, HashMap<u32, u32>) {
+    let mut dist: HashMap<u32, usize> = HashMap::new();
+    let mut parent: HashMap<u32, u32> = HashMap::new();
+    dist.insert(start, 0);
+    let mut queue = VecDeque::new();
+    queue.push_back(start);
+
+    while let Some(node) = queue.pop_front() {
+        let d = dist[&node];
+        if d >= max_depth {
+            continue;
+        }
+
+        let neighbors: &[u32] = match direction {
+            Direction::Forward => graph.fwd_neighbors(node),
+            Direction::Reverse => graph.rev_neighbors(node),
+        };
+
+        for &nb in neighbors {
+            if dist.len() >= max_visited {
+                break;
+            }
+            if let std::collections::hash_map::Entry::Vacant(e) = dist.entry(nb) {
+                e.insert(d + 1);
+                parent.insert(nb, node);
+                queue.push_back(nb);
+            }
+        }
+    }
+
+    (dist, parent)
+}
+
+/// Prim's MST on a k×k distance matrix. Returns list of (i, j) edges.
+/// Unreachable pairs (usize::MAX) are skipped.
+fn prim_mst(dist: &[Vec<usize>]) -> Vec<(usize, usize)> {
+    let k = dist.len();
+    if k == 0 {
+        return vec![];
+    }
+
+    let mut in_tree = vec![false; k];
+    let mut min_edge = vec![(usize::MAX, 0usize); k]; // (cost, from)
+    let mut edges = Vec::with_capacity(k - 1);
+
+    in_tree[0] = true;
+    for j in 1..k {
+        let w = dist[0][j].min(dist[j][0]); // undirected weight
+        min_edge[j] = (w, 0);
+    }
+
+    for _ in 0..k - 1 {
+        // Find cheapest edge to a node not yet in tree
+        let mut best = usize::MAX;
+        let mut best_node = 0;
+        for j in 0..k {
+            if !in_tree[j] && min_edge[j].0 < best {
+                best = min_edge[j].0;
+                best_node = j;
+            }
+        }
+
+        if best == usize::MAX {
+            break; // remaining nodes unreachable
+        }
+
+        let from = min_edge[best_node].1;
+        in_tree[best_node] = true;
+        edges.push((from, best_node));
+
+        // Update min_edge for remaining nodes
+        for j in 0..k {
+            if !in_tree[j] {
+                let w = dist[best_node][j].min(dist[j][best_node]);
+                if w < min_edge[j].0 {
+                    min_edge[j] = (w, best_node);
+                }
+            }
+        }
+    }
+
+    edges
+}
+
+/// Reconstruct path nodes between two seeds using BFS results.
+/// Tries both directions (fwd_i→j and fwd_j→i) and picks the shorter one.
+fn reconstruct_steiner_path(
+    bfs_fwd_i: &(HashMap<u32, usize>, HashMap<u32, u32>),
+    bfs_rev_j: &(HashMap<u32, usize>, HashMap<u32, u32>),
+    bfs_fwd_j: &(HashMap<u32, usize>, HashMap<u32, u32>),
+    bfs_rev_i: &(HashMap<u32, usize>, HashMap<u32, u32>),
+    src: u32,
+    dst: u32,
+) -> Vec<u32> {
+    // Try direction 1: fwd from src meeting rev from dst
+    let path1 = find_meeting_path(&bfs_fwd_i.0, &bfs_fwd_i.1, &bfs_rev_j.0, &bfs_rev_j.1, src, dst);
+    // Try direction 2: fwd from dst meeting rev from src
+    let path2 = find_meeting_path(&bfs_fwd_j.0, &bfs_fwd_j.1, &bfs_rev_i.0, &bfs_rev_i.1, dst, src);
+
+    match (path1, path2) {
+        (Some(p1), Some(p2)) => {
+            if p1.len() <= p2.len() { p1 } else { p2 }
+        }
+        (Some(p), None) | (None, Some(p)) => p,
+        (None, None) => vec![],
+    }
+}
+
+/// Find the best meeting point between forward and reverse BFS, return path nodes.
+fn find_meeting_path(
+    dist_fwd: &HashMap<u32, usize>,
+    parent_fwd: &HashMap<u32, u32>,
+    dist_rev: &HashMap<u32, usize>,
+    parent_rev: &HashMap<u32, u32>,
+    src: u32,
+    dst: u32,
+) -> Option<Vec<u32>> {
+    // Find meeting point with minimum total distance
+    let mut best_total = usize::MAX;
+    let mut best_meet = None;
+
+    for (&v, &d_fwd) in dist_fwd {
+        if let Some(&d_rev) = dist_rev.get(&v) {
+            let total = d_fwd + d_rev;
+            if total < best_total {
+                best_total = total;
+                best_meet = Some(v);
+            }
+        }
+    }
+
+    let meet = best_meet?;
+
+    // Trace path: src → ... → meet (via parent_fwd)
+    let mut nodes = Vec::new();
+    let mut cur = meet;
+    while cur != src {
+        nodes.push(cur);
+        cur = *parent_fwd.get(&cur)?;
+    }
+    nodes.push(src);
+    nodes.reverse();
+
+    // Trace path: meet → ... → dst (via parent_rev)
+    cur = meet;
+    while cur != dst {
+        cur = *parent_rev.get(&cur)?;
+        nodes.push(cur);
+    }
+
+    Some(nodes)
 }
 
 // ---------------------------------------------------------------------------
