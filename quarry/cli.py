@@ -405,6 +405,9 @@ def expand(
         "fused", "--mode", "-m", help="fused (focused) | separated (broad)"
     ),
     fmt: str = typer.Option("table", "--format", "-f", help="table|json|detail"),
+    mesh_summary: bool = typer.Option(
+        False, "--mesh-summary", help="Show MeSH topic distribution of results"
+    ),
     alpha: float = typer.Option(0.15, "--alpha", help="APPR teleport probability"),
     epsilon: float = typer.Option(1e-6, "--epsilon", help="APPR precision threshold"),
 ):
@@ -437,12 +440,26 @@ def expand(
         raise typer.Exit(1) from None
 
     if fmt in ("json", "detail"):
+        if mesh_summary:
+            result["mesh_summary"] = _get_mesh_summary(result)
         typer.echo(json.dumps(result, indent=2, ensure_ascii=False))
     else:
-        _print_table(result)
+        _print_table(result, mesh_summary=mesh_summary)
 
 
-def _print_table(result: dict) -> None:
+def _get_mesh_summary(result: dict) -> list[dict]:
+    """Compute MeSH topic distribution for expand/bridge results."""
+    from quarry.config import settings
+    from quarry.store.pg import PGStore
+
+    work_ids = [f"W{p['work_id']}" for p in result.get("papers", [])]
+    if not work_ids:
+        return []
+    db = PGStore(settings.pg_conninfo)
+    return db.top_mesh_by_work_ids(work_ids, limit=10)
+
+
+def _print_table(result: dict, *, mesh_summary: bool = False) -> None:
     """Print expand result as a rich table."""
     from rich.console import Console
     from rich.table import Table
@@ -451,6 +468,7 @@ def _print_table(result: dict) -> None:
     stats = result["stats"]
     seed_id = result["seed"]["work_id"]
     papers = result["papers"]
+    total = len(papers)
 
     console = Console()
     console.print(
@@ -485,6 +503,19 @@ def _print_table(result: dict) -> None:
         )
 
     console.print(table)
+
+    if mesh_summary:
+        summary = _get_mesh_summary(result)
+        if summary:
+            console.print(
+                f"\n[bold]MeSH summary[/bold] (major topics, top {len(summary)})"
+            )
+            max_cnt = summary[0]["cnt"] if summary else 1
+            for s in summary:
+                bar = "█" * int(20 * s["cnt"] / max_cnt)
+                console.print(
+                    f"  {s['descriptor_name']:<40} {s['cnt']:>3}/{total}  {bar}"
+                )
 
 
 @app.command()
