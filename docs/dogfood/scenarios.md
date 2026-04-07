@@ -15,7 +15,7 @@ scenarios:
   B3: { status: open,    priority: P2, desc: "Far-field bridge (sp>10)" }
   # surveyor
   S1: { status: partial, session: "S2,S4", priority: P2, desc: "mesh-summary → drill-down loop" }
-  S2: { status: partial, session: S5, priority: P3, desc: "Shrink venue comparison" }
+  S2: { status: done,    session: S8, desc: "Shrink venue comparison" }
   S3: { status: open,    priority: P2, desc: "Chronological lineage + bridge chain" }
 ---
 
