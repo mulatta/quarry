@@ -127,6 +127,7 @@ leave-one-out, symmetry, expert judgment. See: [09-evaluation.md](09-evaluation.
 | 1a | APPR (push-based) | **Done** |
 | 1b | expand(fused/separated) + AA coupling/cocite + wRRF + CLI | **Done** |
 | 2a | Bridge discovery (7 types: LCA, CD, coupling, cocite, path, PPR, Steiner) | Design confirmed — [design](11-bridge.md) |
+| 2a+ | CLI `info` command + expand/bridge output enrichment (DOI, venue, cited_by) | Planned — [AD-8](10-architecture-decisions.md#ad-8-info-command-and-sql-lifecycle) |
 | 2b | MCP server expand tool | Planned (deferred) |
 | 3 | Content (embedding, BM25) + embedding bridge candidates + HKPR re-eval | After embeddings |
 | 4 | Temporal | Long-term |
