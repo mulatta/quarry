@@ -846,7 +846,7 @@ def pg_load(context: AssetExecutionContext, pg: PGResource) -> MaterializeResult
 
     # REINDEX after bulk COPY to eliminate index bloat from batch insertions.
     # Safe without CONCURRENTLY since no other sessions during bulk load.
-    _psql("REINDEX DATABASE quarry", context, label="[PG] REINDEX")
+    _psql("REINDEX SCHEMA public", context, label="[PG] REINDEX")
 
     # Report row counts for key tables via PGResource
     counts = {}
