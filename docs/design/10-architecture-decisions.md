@@ -583,3 +583,81 @@ misses what MeSH catches (or vice versa) at the graph traversal level.
   `mesh_descendants()` + new `mesh_parent()`
 - `expand --mesh-summary`: new `top_mesh_by_work_ids()` (work_id
   based, current `top_mesh()` is pmid-based)
+
+### Post-implementation: Dogfood Findings (session 3)
+
+Bridger session (FISH → spatial transcriptomics) validated AD-9
+features and identified further improvements:
+
+1. **MeSH token matching**: `mesh "in situ hybridization fluorescence"`
+   failed because ILIKE requires exact substring. Fix: split input
+   into tokens, AND-combine ILIKE. MeSH has only 25K entries so
+   multi-ILIKE is instant. MeSH embedding (25K vectors) deferred —
+   token matching sufficient for short descriptor names.
+
+1. **host_venue in expand/bridge output**: lineage quality assessment
+   requires knowing the journal. Currently only available via `info`
+   or `sql`. Fix: add `host_venue` to PG enrichment in
+   `core/expand.py` `_enrich_metadata()`, display in table output.
+
+1. **`quarry shrink` (planned)**: minimum covering set of high-quality
+   papers. Given expand results, find N papers from top venues that
+   maximize citation coverage of the full result set. Subsumes the
+   rejected `expand --venue` filter. See AD-10 for design.
+
+## AD-10: `shrink` — Minimum Covering Paper Set (Planned)
+
+**Date**: 2026-04-07
+**Status**: Design
+
+### Context
+
+Dogfood session 3 (FISH → spatial transcriptomics) showed that expand
+returns 200 papers but the user wants a reading list of 5-10 papers
+from top journals that cover the full lineage. Manual filtering is
+tedious; `expand --venue` is a subset of this need.
+
+### Problem
+
+Given expand(seed, limit=200) → candidates, find the smallest subset
+S ⊂ candidates such that:
+
+1. All papers in S are from specified venues (NCS+)
+1. S "covers" the full candidate set via citations
+
+### Algorithm (Greedy Set Cover)
+
+```
+shrink(seed, top_n=5, venues=["Nature","Science","Cell",...]):
+    candidates = expand(seed, limit=200)
+    pool = [c for c in candidates if c.venue in venues]
+    covered = set()
+    selected = []
+
+    for _ in range(top_n):
+        best = max(pool, key=|refs(p) ∩ candidates ∪ citers(p) ∩ candidates| - covered|)
+        selected.append(best)
+        covered |= (refs(best) ∩ candidates) ∪ (citers(best) ∩ candidates)
+        pool.remove(best)
+
+    return selected, coverage=len(covered)/len(candidates)
+```
+
+Coverage = `|refs(paper) ∩ candidates| + |citers(paper) ∩ candidates|`
+weighted by rank in expand results (higher rank = more important to
+cover). Uses existing `graph.neighbors()` — no new Rust code.
+
+### Open Questions
+
+- Coverage definition: refs ∩ candidates only? Or also MeSH overlap?
+- Should coverage include the paper itself? (trivially yes)
+- Venue list: hardcoded NCS+ or user-specified?
+- What if NCS+ pool is empty? Fall back to top-cited?
+- Output: selected papers + coverage % + uncovered papers?
+
+### Implementation Plan
+
+1. Add `host_venue` to expand/bridge enrichment (prerequisite)
+1. Implement coverage calculation in Python (graph.neighbors() call)
+1. `quarry shrink` CLI with `--top N`, `--venue` params
+1. Evaluate: does greedy coverage correlate with expert reading lists?

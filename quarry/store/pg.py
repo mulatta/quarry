@@ -98,12 +98,22 @@ class PGStore:
             return cur.fetchall()
 
     def mesh_search_by_name(self, name: str, limit: int = 10) -> list[dict]:
-        """Search MeSH descriptors by name (ILIKE, parameterized)."""
+        """Search MeSH descriptors by name (token-AND ILIKE).
+
+        Splits input into tokens and requires all to match, in any order.
+        "fluorescence hybridization" matches "In Situ Hybridization, Fluorescence".
+        """
+        tokens = name.split()
+        if not tokens:
+            return []
+        conditions = " AND ".join("descriptor_name ILIKE %s" for _ in tokens)
+        params: list = [f"%{t}%" for t in tokens]
+        params.append(limit)
         with self.conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
-                "SELECT DISTINCT descriptor_ui, descriptor_name "
-                "FROM mesh_tree WHERE descriptor_name ILIKE %s LIMIT %s",
-                (f"%{name}%", limit),
+                f"SELECT DISTINCT descriptor_ui, descriptor_name "  # noqa: S608
+                f"FROM mesh_tree WHERE {conditions} LIMIT %s",
+                params,
             )
             return cur.fetchall()
 
