@@ -343,10 +343,12 @@ class TestDagsterPipeline:
         from dagster import AssetKey, Definitions, load_assets_from_modules
 
         from quarry.assets import download, load, stage
+        from quarry.resources import PGResource
 
         # Load only ELT assets (skip search/citations that need quarry_core)
         defs = Definitions(
             assets=load_assets_from_modules([download, stage, load]),
+            resources={"pg": PGResource()},
         )
 
         # Ensure Dagster logs are visible in pytest output
