@@ -100,19 +100,19 @@ pub fn parse_mesh_xml(path: &Path) -> Result<MeshParseResult, Box<dyn std::error
             },
             Ok(Event::Text(ref e)) => match capture {
                 Capture::DescriptorUI => {
-                    current_ui = e.unescape().unwrap_or_default().trim().to_string();
+                    current_ui = e.unescape()?.trim().to_string();
                 }
                 Capture::DescriptorNameString => {
-                    current_name = e.unescape().unwrap_or_default().trim().to_string();
+                    current_name = e.unescape()?.trim().to_string();
                 }
                 Capture::TreeNumber => {
-                    let tn = e.unescape().unwrap_or_default().trim().to_string();
+                    let tn = e.unescape()?.trim().to_string();
                     if !tn.is_empty() {
                         current_trees.push(tn);
                     }
                 }
                 Capture::TermString => {
-                    let term = e.unescape().unwrap_or_default().trim().to_string();
+                    let term = e.unescape()?.trim().to_string();
                     if !term.is_empty() {
                         current_terms.push((term, current_term_is_preferred));
                     }
@@ -131,21 +131,26 @@ pub fn parse_mesh_xml(path: &Path) -> Result<MeshParseResult, Box<dyn std::error
                 b"Term" => in_term = false,
                 b"DescriptorRecord" => {
                     if !current_ui.is_empty() && !current_name.is_empty() {
-                        for tn in &current_trees {
+                        // drain() moves owned values out, avoiding clone.
+                        // current_trees/current_terms are emptied and ready
+                        // for the next DescriptorRecord.
+                        for tn in current_trees.drain(..) {
                             tree_entries.push(MeshEntry {
                                 descriptor_ui: current_ui.clone(),
                                 descriptor_name: current_name.clone(),
-                                tree_number: tn.clone(),
+                                tree_number: tn,
                             });
                         }
-                        for (term, is_pref) in &current_terms {
+                        for (term, is_pref) in current_terms.drain(..) {
                             term_entries.push(MeshTerm {
                                 descriptor_ui: current_ui.clone(),
                                 descriptor_name: current_name.clone(),
-                                term: term.clone(),
-                                is_preferred: *is_pref,
+                                term,
+                                is_preferred: is_pref,
                             });
                         }
+                        // ui/name still cloned per entry — acceptable at
+                        // this scale (25K descriptors, <1s total parse).
                     }
                     in_descriptor = false;
                     in_descriptor_name = false;
