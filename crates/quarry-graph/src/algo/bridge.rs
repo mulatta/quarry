@@ -11,7 +11,7 @@
 //!
 //! See docs/design/11-bridge.md for full design rationale.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
 
 use crate::graph::Graph;
@@ -38,15 +38,20 @@ pub struct BridgeParams {
     pub types: Vec<BridgeType>,
     /// Max results per type.
     pub limit: usize,
-    /// Type 5: number of shortest paths (Yen's). Default 1.
+    /// Type 5: number of shortest paths (Yen's). Default 1. (Phase 2)
+    #[allow(dead_code)]
     pub k_paths: usize,
-    /// Type 6: APPR alpha.
+    /// Type 6: APPR alpha. (not yet implemented)
+    #[allow(dead_code)]
     pub alpha: f64,
-    /// Type 6: APPR epsilon.
+    /// Type 6: APPR epsilon. (not yet implemented)
+    #[allow(dead_code)]
     pub epsilon: f64,
     /// Types 3-4: skip neighbors with degree above this threshold.
     /// High-degree nodes have low AA weight and dominate traversal cost.
     pub max_neighbor_degree: usize,
+    /// Type 5: max BFS depth for path search. Default 5.
+    pub max_path_depth: usize,
 }
 
 impl Default for BridgeParams {
@@ -58,6 +63,7 @@ impl Default for BridgeParams {
             alpha: 0.15,
             epsilon: 1e-6,
             max_neighbor_degree: 10_000,
+            max_path_depth: 5,
         }
     }
 }
@@ -110,7 +116,9 @@ pub struct BridgeResult {
     pub coupling_bridges: Vec<ScoredEntry>,
     pub cocitation_bridges: Vec<ScoredEntry>,
     pub path_bridges: Vec<PathEntry>,
+    #[allow(dead_code)]
     pub ppr_bridges: Vec<ScoredEntry>,
+    #[allow(dead_code)]
     pub steiner_bridges: Vec<i64>,
 }
 
@@ -255,7 +263,18 @@ pub fn compute(graph: &Graph, seeds: &[i64], params: &BridgeParams) -> BridgeRes
                     params.max_neighbor_degree,
                 );
             }
-            // Types 5-7: not yet implemented
+            BridgeType::Path => {
+                let (entries, sp_len) = path_bridges(
+                    graph,
+                    &seed_indices,
+                    &seed_set,
+                    params.limit,
+                    params.max_path_depth,
+                );
+                result.stats.shortest_path_length = sp_len;
+                result.path_bridges = entries;
+            }
+            // Types 6-7: not yet implemented
             _ => {}
         }
     }
@@ -497,6 +516,185 @@ fn score_cross_seed(
     });
     entries.truncate(limit);
     entries
+}
+
+// ---------------------------------------------------------------------------
+// Type 5: path_bridges (Undirected BFS shortest path)
+// ---------------------------------------------------------------------------
+
+/// Intermediate nodes on shortest paths between seeds (undirected view).
+///
+/// For k=2: single pair BFS. For k>2: pairwise BFS, union of all bridge nodes.
+/// path_count = number of shortest paths through node (product of forward/reverse
+/// path counts from BFS).
+///
+/// Safety: max_depth bounds BFS expansion; max_visited (500K) prevents runaway.
+fn path_bridges(
+    graph: &Graph,
+    seed_indices: &[u32],
+    seed_set: &HashSet<u32>,
+    limit: usize,
+    max_depth: usize,
+) -> (Vec<PathEntry>, Option<usize>) {
+    if seed_indices.len() == 2 {
+        return path_bridges_pair(
+            graph,
+            seed_indices[0],
+            seed_indices[1],
+            seed_set,
+            limit,
+            max_depth,
+        );
+    }
+
+    // k > 2: pairwise, merge results
+    let mut merged: HashMap<u32, (Vec<usize>, usize)> = HashMap::new();
+    let mut min_sp_len: Option<usize> = None;
+
+    for i in 0..seed_indices.len() {
+        for j in (i + 1)..seed_indices.len() {
+            let (entries, sp_len) = path_bridges_pair(
+                graph,
+                seed_indices[i],
+                seed_indices[j],
+                seed_set,
+                0, // no limit on intermediate results
+                max_depth,
+            );
+            if let Some(d) = sp_len {
+                min_sp_len = Some(min_sp_len.map_or(d, |m: usize| m.min(d)));
+            }
+            for e in entries {
+                let idx = graph.resolve(e.work_id).unwrap();
+                merged
+                    .entry(idx)
+                    .and_modify(|(_, count)| *count += e.path_count)
+                    .or_insert((e.hop_from, e.path_count));
+            }
+        }
+    }
+
+    let mut result: Vec<PathEntry> = merged
+        .into_iter()
+        .map(|(idx, (hop_from, path_count))| PathEntry {
+            work_id: graph.id_of(idx),
+            hop_from,
+            path_count,
+        })
+        .collect();
+
+    result.sort_unstable_by(|a, b| b.path_count.cmp(&a.path_count));
+    if limit > 0 {
+        result.truncate(limit);
+    }
+
+    (result, min_sp_len)
+}
+
+/// BFS shortest path bridges between a single pair (undirected).
+fn path_bridges_pair(
+    graph: &Graph,
+    src: u32,
+    dst: u32,
+    seed_set: &HashSet<u32>,
+    limit: usize,
+    max_depth: usize,
+) -> (Vec<PathEntry>, Option<usize>) {
+    const MAX_VISITED: usize = 500_000;
+
+    if src == dst {
+        return (vec![], Some(0));
+    }
+
+    // BFS from src (undirected) — collect dist + path count
+    let (dist_src, count_src) = undirected_bfs(graph, src, max_depth, MAX_VISITED);
+
+    // Check reachability
+    let Some(&total_dist) = dist_src.get(&dst) else {
+        return (vec![], None);
+    };
+
+    // BFS from dst (undirected)
+    let (dist_dst, count_dst) = undirected_bfs(graph, dst, max_depth, MAX_VISITED);
+
+    // Collect bridge nodes: dist_src[v] + dist_dst[v] == total_dist
+    let mut entries: Vec<PathEntry> = dist_src
+        .iter()
+        .filter_map(|(&v, &d_src)| {
+            if seed_set.contains(&v) {
+                return None; // exclude seeds
+            }
+            let d_dst = *dist_dst.get(&v)?;
+            if d_src + d_dst != total_dist {
+                return None;
+            }
+            let pc_src = count_src.get(&v).copied().unwrap_or(1);
+            let pc_dst = count_dst.get(&v).copied().unwrap_or(1);
+            Some(PathEntry {
+                work_id: graph.id_of(v),
+                hop_from: vec![d_src, d_dst],
+                path_count: pc_src * pc_dst,
+            })
+        })
+        .collect();
+
+    // Sort by path_count desc (nodes on more shortest paths = stronger bridges)
+    entries.sort_unstable_by(|a, b| b.path_count.cmp(&a.path_count));
+    if limit > 0 {
+        entries.truncate(limit);
+    }
+
+    (entries, Some(total_dist))
+}
+
+/// Undirected BFS returning (distance, shortest_path_count) per node.
+///
+/// Bounded by max_depth and max_visited for safety on large graphs.
+fn undirected_bfs(
+    graph: &Graph,
+    start: u32,
+    max_depth: usize,
+    max_visited: usize,
+) -> (HashMap<u32, usize>, HashMap<u32, usize>) {
+    let mut dist: HashMap<u32, usize> = HashMap::new();
+    let mut count: HashMap<u32, usize> = HashMap::new();
+    dist.insert(start, 0);
+    count.insert(start, 1);
+    let mut queue = VecDeque::new();
+    queue.push_back(start);
+
+    while let Some(node) = queue.pop_front() {
+        let d = dist[&node];
+        if d >= max_depth {
+            continue;
+        }
+        let c = count[&node];
+
+        // Collect neighbors first to avoid borrow conflict in closure
+        let mut neighbors = Vec::new();
+        graph.for_each_undirected(node, |nb| neighbors.push(nb));
+
+        for nb in neighbors {
+            if dist.len() >= max_visited {
+                break;
+            }
+            match dist.entry(nb) {
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    e.insert(d + 1);
+                    count.insert(nb, c);
+                    queue.push_back(nb);
+                }
+                std::collections::hash_map::Entry::Occupied(e) => {
+                    // Same distance = additional shortest path
+                    if *e.get() == d + 1 {
+                        *count.entry(nb).or_insert(0) += c;
+                    }
+                }
+            }
+        }
+    }
+
+    (dist, count)
 }
 
 // ---------------------------------------------------------------------------
@@ -933,6 +1131,63 @@ mod tests {
         for e in &result.coupling_bridges {
             assert!(e.score > 0.0);
         }
+    }
+
+    // -- Type 5: path_bridges --
+
+    #[test]
+    fn path_bridges_two_seeds() {
+        let g = test_graph();
+        // Seeds A(10), B(11): connected via shared refs 20,30 (undirected)
+        // 10→20, 11→20 → undirected path 10-20-11 (length 2)
+        let seeds = [10, 11];
+        let params = BridgeParams {
+            types: vec![BridgeType::Path],
+            limit: 100,
+            ..Default::default()
+        };
+        let result = compute(&g, &seeds, &params);
+
+        assert!(result.stats.shortest_path_length.is_some());
+        let sp = result.stats.shortest_path_length.unwrap();
+        // Direct edge 10→20←11 = 2 hops undirected, or 60→10, 60→11 = 2 hops
+        assert!(sp <= 3, "shortest path should be short: got {sp}");
+
+        // Bridge nodes should not include seeds
+        for e in &result.path_bridges {
+            assert!(e.work_id != 10 && e.work_id != 11, "seeds excluded");
+            assert!(e.path_count >= 1);
+            assert_eq!(e.hop_from.len(), 2);
+            assert_eq!(e.hop_from[0] + e.hop_from[1], sp);
+        }
+    }
+
+    #[test]
+    fn path_bridges_unreachable() {
+        // Disconnected nodes
+        let dir = tempfile::tempdir().unwrap();
+        let csv_path = dir.path().join("disconn.csv");
+        {
+            use std::io::Write;
+            let mut f = std::fs::File::create(&csv_path).unwrap();
+            writeln!(f, "citing,cited").unwrap();
+            writeln!(f, "1,2").unwrap();
+            writeln!(f, "3,4").unwrap(); // separate component
+        }
+        let graph_dir = dir.path().join("graph");
+        crate::build::build_from_csv_raw(&csv_path, &graph_dir).unwrap();
+        std::mem::forget(dir);
+        let g = Graph::open(&graph_dir).unwrap();
+
+        let seeds = [1, 4]; // different components
+        let params = BridgeParams {
+            types: vec![BridgeType::Path],
+            max_path_depth: 10,
+            ..Default::default()
+        };
+        let result = compute(&g, &seeds, &params);
+        assert!(result.path_bridges.is_empty());
+        assert!(result.stats.shortest_path_length.is_none());
     }
 
     // -- Integration tests (require real CSR graph) --
