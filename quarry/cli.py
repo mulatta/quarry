@@ -750,6 +750,22 @@ def bridge(
         _print_bridge_table(result)
 
 
+def _empty_bridge_reason(key: str, result: dict) -> str | None:
+    """Return a human-readable reason why a bridge type is empty, or None."""
+    k = len(result.get("seeds", []))
+    sp = result.get("stats", {}).get("shortest_path_length")
+
+    if key == "steiner_bridges":
+        if k < 3:
+            return "requires 3+ seeds"
+        return "no intermediate nodes found (seeds may be directly connected)"
+    if key == "path_bridges":
+        if sp == 1:
+            return "seeds directly connected (sp=1), no stepping stones"
+        return "no path found within max depth"
+    return None
+
+
 def _print_bridge_table(result: dict) -> None:
     """Print bridge result as rich tables, one per type."""
     from rich.console import Console
@@ -763,11 +779,17 @@ def _print_bridge_table(result: dict) -> None:
     seed_strs = [f"W{s['work_id']}" for s in result["seeds"]]
     sp_len = stats.get("shortest_path_length")
     sp_info = f" sp={sp_len}" if sp_len is not None else ""
+    # Only show overlap when common_refs/common_citers were computed
+    has_common = bool(result.get("common_refs")) or bool(result.get("common_citers"))
+    overlap_info = (
+        f"refs overlap={stats['overlap_refs']} citers overlap={stats['overlap_citers']}"
+        if has_common or (stats["overlap_refs"] > 0 or stats["overlap_citers"] > 0)
+        else ""
+    )
     console.print(
         f"Bridge: {' ↔ '.join(seed_strs)}  "
         f"({stats['elapsed_s']}s)  "
-        f"[dim]refs overlap={stats['overlap_refs']} "
-        f"citers overlap={stats['overlap_citers']}{sp_info}[/dim]"
+        f"[dim]{overlap_info}{sp_info}[/dim]"
     )
     if sp_len is not None and sp_len >= 6:
         console.print(
@@ -785,9 +807,27 @@ def _print_bridge_table(result: dict) -> None:
         ("steiner_bridges", "Steiner Bridges (minimal connecting set, k≥3)"),
     ]
 
+    # Map result keys to param type names for filtering
+    _KEY_TO_TYPE = {
+        "common_refs": "common_refs",
+        "common_citers": "common_citers",
+        "coupling_bridges": "coupling",
+        "cocitation_bridges": "cocitation",
+        "path_bridges": "path",
+        "ppr_bridges": "ppr",
+        "steiner_bridges": "steiner",
+    }
+    requested_types = set(result.get("params", {}).get("types", []))
+
     for key, label in _SECTIONS:
         entries = result.get(key, [])
+        type_name = _KEY_TO_TYPE.get(key, "")
+        was_requested = type_name in requested_types
         if not entries:
+            if was_requested:
+                reason = _empty_bridge_reason(key, result)
+                if reason:
+                    console.print(f"\n[dim]{label}  — {reason}[/dim]")
             continue
 
         console.print(f"\n[bold]{label}[/bold]  ({len(entries)})")

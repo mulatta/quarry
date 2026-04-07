@@ -214,7 +214,8 @@ def run_bridge(
         },
         "seeds": seed_infos,
         "params": {
-            "types": types or _BRIDGE_TYPES,
+            "types": types
+            or (_BRIDGE_TYPES + (["steiner"] if len(seed_ids) >= 3 else [])),
             "limit": limit,
             "max_neighbor_degree": max_neighbor_degree,
             "max_path_depth": max_path_depth,
