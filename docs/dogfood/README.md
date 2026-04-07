@@ -16,6 +16,7 @@ Scores are 5 dimensions × 1-5 scale = max 25.
 | 2026-04-08 | reader | [RNA degrader landscape](2026-04-08-rna-degrader-landscape.md) | 24/25 | +2 | reader persona validated, custom venue essential for chem bio |
 | 2026-04-08 | bridger | [protein directed evolution](2026-04-08-protein-directed-evolution.md) | 22/25 | -2 | steiner bridge missing in 3-seed, empty type gives no explanation |
 | 2026-04-08 | bridger | [protein evolution regression](2026-04-08-protein-evolution-regression.md) | 25/25 | +3 | S6 regression: all 3 friction points resolved, pairwise sp matrix |
+| 2026-04-08 | surveyor | [shrink venue comparison](2026-04-08-shrink-venue-comparison.md) | 23/25 | -2 | NCS+ = custom for NCS-concentrated fields; venue preset needed |
 
 Scenario coverage and priorities: [scenarios.md](scenarios.md)
 
