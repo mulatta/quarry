@@ -784,7 +784,8 @@ def pg_load(context: AssetExecutionContext, pg: PGResource) -> MaterializeResult
     _psql(
         "TRUNCATE papers, authors, mesh_headings, grants, chemicals, "
         "cited_by_clin, works, work_authors, work_topics, work_mesh, "
-        "work_citations, work_counts_by_year, id_crosswalk, mesh_tree CASCADE",
+        "work_citations, work_counts_by_year, id_crosswalk, mesh_tree, "
+        "mesh_descriptors CASCADE",
         context,
         label="[PG] truncating all tables",
     )
@@ -843,6 +844,28 @@ def pg_load(context: AssetExecutionContext, pg: PGResource) -> MaterializeResult
     _psql("VACUUM ANALYZE works", context, label="[PG] VACUUM ANALYZE works")
     for _, t, _ in _EXPORT_TABLES:
         _psql(f"VACUUM ANALYZE {t}", context, label=f"[PG] VACUUM ANALYZE {t}")
+
+    # mesh_descriptors: cache of all distinct descriptors from work_mesh.
+    # Needed because mesh_tree only contains descriptors with current
+    # tree_numbers (~25K), but work_mesh has historical annotations
+    # with ~31K distinct descriptors (NLM revises MeSH vocabulary over
+    # time, removing tree_numbers but keeping paper annotations).
+    _psql(
+        "TRUNCATE mesh_descriptors",
+        context,
+        label="[PG] truncating mesh_descriptors",
+    )
+    _psql(
+        "INSERT INTO mesh_descriptors (descriptor_ui, descriptor_name) "
+        "SELECT DISTINCT descriptor_ui, descriptor_name FROM work_mesh",
+        context,
+        label="[PG] building mesh_descriptors from work_mesh",
+    )
+    _psql(
+        "VACUUM ANALYZE mesh_descriptors",
+        context,
+        label="[PG] VACUUM ANALYZE mesh_descriptors",
+    )
 
     # REINDEX after bulk COPY to eliminate index bloat from batch insertions.
     # Safe without CONCURRENTLY since no other sessions during bulk load.

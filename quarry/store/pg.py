@@ -102,6 +102,10 @@ class PGStore:
 
         Splits input into tokens and requires all to match, in any order.
         "fluorescence hybridization" matches "In Situ Hybridization, Fluorescence".
+
+        Searches mesh_tree first (current vocabulary with hierarchy),
+        then falls back to mesh_descriptors (all descriptors ever used
+        in paper annotations, including those removed from current MeSH).
         """
         tokens = name.split()
         if not tokens:
@@ -113,6 +117,17 @@ class PGStore:
             cur.execute(
                 f"SELECT DISTINCT descriptor_ui, descriptor_name "  # noqa: S608
                 f"FROM mesh_tree WHERE {conditions} LIMIT %s",
+                params,
+            )
+            results = cur.fetchall()
+            if results:
+                return results
+            # Fallback: mesh_descriptors includes historical descriptors
+            # not in current mesh_tree (e.g., D011499 Post-Translational
+            # with 17K papers but no tree_number in current MeSH)
+            cur.execute(
+                f"SELECT descriptor_ui, descriptor_name "  # noqa: S608
+                f"FROM mesh_descriptors WHERE {conditions} LIMIT %s",
                 params,
             )
             return cur.fetchall()
