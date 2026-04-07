@@ -28,5 +28,10 @@ tests/data/
 
 
 # agents
-.claude/*
 apm_modules/
+.claude/*
+!.claude/CLAUDE.md
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/dogfood/
+!.claude/skills/dogfood/**
