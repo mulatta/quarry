@@ -151,6 +151,123 @@ def _print_table(result: dict) -> None:
 
 
 @app.command()
+def bridge(
+    seeds: list[str] = typer.Argument(
+        ...,
+        help="Two or more seed papers: work_id_int, W<id>, DOI, or https://doi.org/...",
+    ),
+    types: list[str] = typer.Option(
+        None,
+        "--type",
+        "-t",
+        help="Bridge types to compute (default: all). "
+        "Options: common_refs, common_citers, coupling, cocitation",
+    ),
+    limit: int = typer.Option(100, "--limit", "-n", help="Max results per type"),
+    max_neighbor_degree: int = typer.Option(
+        10_000, "--max-degree", help="Prune neighbors above this degree (Type 3-4)"
+    ),
+    fmt: str = typer.Option("table", "--format", "-f", help="table|json|detail"),
+):
+    """Discover bridge papers connecting two or more seeds.
+
+    Each bridge type answers a different structural question:
+      common_refs    — shared intellectual foundation
+      common_citers  — who already synthesized both
+      coupling       — who combined both methods
+      cocitation     — what both communities read
+
+    Output: complete JSON with metadata. Use jq/SQL for filtering/sorting.
+    """
+    import json
+
+    from quarry.config import settings
+    from quarry.core.bridge import run_bridge
+
+    if len(seeds) < 2:
+        typer.echo("Error: bridge requires at least 2 seeds", err=True)
+        raise typer.Exit(1)
+
+    try:
+        result = run_bridge(
+            seeds=seeds,
+            csr_dir=str(settings.csr_dir),
+            pg_conninfo=settings.pg_conninfo,
+            types=types or None,
+            limit=limit,
+            max_neighbor_degree=max_neighbor_degree,
+            include_abstract=(fmt == "detail"),
+        )
+    except ValueError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1) from None
+
+    if fmt in ("json", "detail"):
+        typer.echo(json.dumps(result, indent=2, ensure_ascii=False))
+    else:
+        _print_bridge_table(result)
+
+
+def _print_bridge_table(result: dict) -> None:
+    """Print bridge result as rich tables, one per type."""
+    from rich.console import Console
+    from rich.table import Table
+    from rich.text import Text
+
+    console = Console()
+    stats = result["stats"]
+
+    # Header
+    seed_strs = [f"W{s['work_id']}" for s in result["seeds"]]
+    console.print(
+        f"Bridge: {' ↔ '.join(seed_strs)}  "
+        f"({stats['elapsed_s']}s)  "
+        f"[dim]refs overlap={stats['overlap_refs']} "
+        f"citers overlap={stats['overlap_citers']}[/dim]"
+    )
+
+    _SECTIONS = [
+        ("common_refs", "Common Refs (shared foundation)"),
+        ("common_citers", "Common Citers (synthesis papers)"),
+        ("coupling_bridges", "Coupling Bridges (combined methods)"),
+        ("cocitation_bridges", "Cocitation Bridges (community reads)"),
+    ]
+
+    for key, label in _SECTIONS:
+        entries = result.get(key, [])
+        if not entries:
+            continue
+
+        console.print(f"\n[bold]{label}[/bold]  ({len(entries)})")
+
+        table = Table(show_edge=False, pad_edge=False, box=None, expand=True)
+        table.add_column("#", justify="right", style="dim", width=4, no_wrap=True)
+        table.add_column("year", justify="right", width=4, no_wrap=True)
+
+        is_scored = "score" in entries[0]
+        if is_scored:
+            table.add_column("score", justify="right", width=10, no_wrap=True)
+        else:
+            table.add_column("aa", justify="right", width=8, no_wrap=True)
+
+        table.add_column("work_id", width=13, no_wrap=True)
+        table.add_column("title", ratio=1, overflow="ellipsis", no_wrap=True)
+
+        for i, e in enumerate(entries):
+            year = str(e["year"]) if e.get("year") else "-"
+            score_col = f"{e['score']:.6f}" if is_scored else f"{e['aa_weight']:.4f}"
+            table.add_row(
+                str(i + 1),
+                year,
+                score_col,
+                f"W{e['work_id']}",
+                Text(e.get("title") or "-"),
+            )
+
+        console.print(table)
+
+
+@app.command()
 def mcp_server():
     """Start MCP server."""
     from quarry.mcp.server import main

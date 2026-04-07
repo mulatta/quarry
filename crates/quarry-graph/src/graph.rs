@@ -542,6 +542,108 @@ impl Graph {
         Ok((papers, stats))
     }
 
+    /// Multi-seed bridge discovery (Type 1-4).
+    ///
+    /// Returns (per_type_results, stats) where per_type_results is a dict
+    /// with keys: common_refs, common_citers, coupling_bridges, cocitation_bridges.
+    #[allow(clippy::type_complexity)]
+    #[pyo3(signature = (seeds, types=None, limit=100, max_neighbor_degree=10_000))]
+    fn bridge(
+        &self,
+        py: Python<'_>,
+        seeds: Vec<i64>,
+        types: Option<Vec<String>>,
+        limit: usize,
+        max_neighbor_degree: usize,
+    ) -> PyResult<(HashMap<String, PyObject>, HashMap<String, PyObject>)> {
+        if seeds.len() < 2 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "bridge requires at least 2 seeds",
+            ));
+        }
+
+        let bridge_types = match types {
+            Some(ts) => {
+                let mut parsed = Vec::with_capacity(ts.len());
+                for t in &ts {
+                    parsed.push(match t.as_str() {
+                        "common_refs" => algo::bridge::BridgeType::CommonRefs,
+                        "common_citers" => algo::bridge::BridgeType::CommonCiters,
+                        "coupling" => algo::bridge::BridgeType::Coupling,
+                        "cocitation" => algo::bridge::BridgeType::Cocitation,
+                        "path" => algo::bridge::BridgeType::Path,
+                        "ppr" => algo::bridge::BridgeType::Ppr,
+                        "steiner" => algo::bridge::BridgeType::Steiner,
+                        _ => return Err(pyo3::exceptions::PyValueError::new_err(
+                            format!("unknown bridge type '{t}'"),
+                        )),
+                    });
+                }
+                parsed
+            }
+            None => vec![],
+        };
+
+        let params = algo::bridge::BridgeParams {
+            types: bridge_types,
+            limit,
+            max_neighbor_degree,
+            ..Default::default()
+        };
+
+        let result = py.allow_threads(|| algo::bridge::compute(self, &seeds, &params));
+
+        // Convert to Python dicts
+        let common_refs: Vec<HashMap<String, PyObject>> = result.common_refs.iter().map(|e| {
+            let mut d = HashMap::new();
+            d.insert("work_id".into(), e.work_id.into_pyobject(py).unwrap().into_any().unbind());
+            d.insert("aa_weight".into(), e.aa_weight.into_pyobject(py).unwrap().into_any().unbind());
+            d.insert("seed_count".into(), e.seed_count.into_pyobject(py).unwrap().into_any().unbind());
+            d
+        }).collect();
+
+        let common_citers: Vec<HashMap<String, PyObject>> = result.common_citers.iter().map(|e| {
+            let mut d = HashMap::new();
+            d.insert("work_id".into(), e.work_id.into_pyobject(py).unwrap().into_any().unbind());
+            d.insert("aa_weight".into(), e.aa_weight.into_pyobject(py).unwrap().into_any().unbind());
+            d.insert("seed_count".into(), e.seed_count.into_pyobject(py).unwrap().into_any().unbind());
+            d
+        }).collect();
+
+        let coupling: Vec<HashMap<String, PyObject>> = result.coupling_bridges.iter().map(|e| {
+            let mut d = HashMap::new();
+            d.insert("work_id".into(), e.work_id.into_pyobject(py).unwrap().into_any().unbind());
+            d.insert("per_seed_scores".into(), e.per_seed_scores.clone().into_pyobject(py).unwrap().into_any().unbind());
+            d.insert("score".into(), e.score.into_pyobject(py).unwrap().into_any().unbind());
+            d
+        }).collect();
+
+        let cocitation: Vec<HashMap<String, PyObject>> = result.cocitation_bridges.iter().map(|e| {
+            let mut d = HashMap::new();
+            d.insert("work_id".into(), e.work_id.into_pyobject(py).unwrap().into_any().unbind());
+            d.insert("per_seed_scores".into(), e.per_seed_scores.clone().into_pyobject(py).unwrap().into_any().unbind());
+            d.insert("score".into(), e.score.into_pyobject(py).unwrap().into_any().unbind());
+            d
+        }).collect();
+
+        let mut results = HashMap::new();
+        results.insert("common_refs".into(), common_refs.into_pyobject(py).unwrap().into_any().unbind());
+        results.insert("common_citers".into(), common_citers.into_pyobject(py).unwrap().into_any().unbind());
+        results.insert("coupling_bridges".into(), coupling.into_pyobject(py).unwrap().into_any().unbind());
+        results.insert("cocitation_bridges".into(), cocitation.into_pyobject(py).unwrap().into_any().unbind());
+
+        // Stats
+        let mut stats = HashMap::new();
+        stats.insert("seeds".into(), result.seeds.into_pyobject(py).unwrap().into_any().unbind());
+        stats.insert("per_seed_ref_count".into(), result.stats.per_seed_ref_count.into_pyobject(py).unwrap().into_any().unbind());
+        stats.insert("per_seed_citer_count".into(), result.stats.per_seed_citer_count.into_pyobject(py).unwrap().into_any().unbind());
+        stats.insert("overlap_refs".into(), (result.stats.overlap_refs as u64).into_pyobject(py).unwrap().into_any().unbind());
+        stats.insert("overlap_citers".into(), (result.stats.overlap_citers as u64).into_pyobject(py).unwrap().into_any().unbind());
+        stats.insert("elapsed_ms".into(), result.stats.elapsed_ms.into_pyobject(py).unwrap().into_any().unbind());
+
+        Ok((results, stats))
+    }
+
     /// Weakly connected components via atomic union-find.
     fn wcc(&self, py: Python<'_>) -> PyResult<Vec<(i64, u32)>> {
         py.allow_threads(|| Ok(algo::wcc::compute(self)))

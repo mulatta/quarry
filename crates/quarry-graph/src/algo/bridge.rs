@@ -1,6 +1,3 @@
-// No PyO3 binding yet — entire module appears unused to the compiler.
-#![allow(dead_code)]
-
 //! Bridge discovery: find papers connecting two or more seeds.
 //!
 //! 7 independent bridge types, each answering a different question:
