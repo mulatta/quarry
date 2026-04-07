@@ -30,6 +30,7 @@ tests/data/
 # agents
 apm_modules/
 .claude/*
+!CLAUDE.md
 !.claude/CLAUDE.md
 !.claude/skills/
 .claude/skills/*
