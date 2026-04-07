@@ -1,6 +1,15 @@
-______________________________________________________________________
-
-## name: dogfood description: Dogfood the quarry CLI by role-playing a research persona. Use this skill when testing quarry CLI UX, evaluating CLI workflows, finding friction points in the paper exploration experience, or when the user says "dogfood", "test quarry UX", "try quarry as a researcher", or "CLI friction test". Supports 4 personas — newbie, reader, bridger, surveyor.
+---
+name: dogfood
+description: >-
+  Dogfood the quarry CLI by role-playing a research persona.
+  Use this skill when testing quarry CLI UX, evaluating CLI workflows,
+  finding friction points in the paper exploration experience, or when
+  the user says "dogfood", "test quarry UX", "try quarry as a researcher",
+  or "CLI friction test". Also trigger when the user asks to find papers,
+  explore a research topic, build a reading list, or trace a technology
+  lineage using quarry — these are implicit dogfood opportunities.
+  Supports 4 personas — newbie, reader, bridger, surveyor.
+---
 
 # quarry CLI Dogfood
 
