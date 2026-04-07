@@ -33,11 +33,11 @@ def search(
 
 
 @app.command()
-def similar(
+def vsearch(
     work_id: str = typer.Argument(..., help="OpenAlex work ID"),
     limit: int = typer.Option(20, "--limit", "-n"),
 ):
-    """Find similar papers by embedding."""
+    """Vector search: find similar papers by embedding."""
     from quarry.search.hybrid import HybridSearcher
     from quarry.store.pg import PGStore
     from quarry.config import settings
