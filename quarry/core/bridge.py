@@ -37,6 +37,8 @@ def run_bridge(
     limit: int = 100,
     max_neighbor_degree: int = 10_000,
     max_path_depth: int = 5,
+    alpha: float = 0.15,
+    epsilon: float = 1e-6,
     include_abstract: bool = False,
 ) -> dict[str, Any]:
     """Run bridge pipeline: resolve → compute → enrich → assemble.
@@ -62,6 +64,8 @@ def run_bridge(
         limit=limit,
         max_neighbor_degree=max_neighbor_degree,
         max_path_depth=max_path_depth,
+        alpha=alpha,
+        epsilon=epsilon,
     )
     elapsed = time.perf_counter() - t0
 
