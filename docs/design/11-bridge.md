@@ -154,10 +154,11 @@ Co-citation = "both communities pay attention to C".
 
 ______________________________________________________________________
 
-### Type 5: path_bridges (Shortest Path / K-Shortest Paths)
+### Type 5: path_bridges (Directed Shortest Path)
 
-**Definition**: Intermediate nodes on the shortest path(s) between seeds
-in the undirected citation graph.
+**Definition**: Intermediate nodes on the shortest directed citation
+chain between seeds: forward BFS from src (references), reverse BFS
+from dst (citers), bridge = intersection.
 
 **Meaning**: Stepping-stone papers — "read these in order to get from A to B".
 
@@ -166,25 +167,40 @@ in the undirected citation graph.
 **Example**: progeria BE → ABE method → CRISPR review → gene therapy →
 sickle cell BE. The intermediate papers form a narrative chain.
 
+**Architecture Decision: Why Directed (not undirected)**
+
+Undirected BFS was evaluated first and rejected. Citation graphs are
+small-world: undirected BFS always finds trivial sp=2 paths through
+high-degree hubs, producing 100% overlap with Type 1-2 (common_refs/citers).
+Tested across 9 seed pairs with parameter sweep (hub pruning threshold
+500-50K, Dijkstra with AA edge weight) — all produced sp=2, 0% unique.
+Directed BFS forces longer chains (sp=3-8) that follow actual citation
+direction, producing 80-100% unique results vs Type 1-4.
+
 **Computation**:
 
 ```
-k=1: BFS on undirected view (fwd + rev), trace path
-k>1: Yen's algorithm for k-shortest simple paths
-     Nodes appearing in multiple paths = restricted betweenness bridges
+1. Forward BFS from src (fwd_neighbors, max_depth)
+2. Reverse BFS from dst (rev_neighbors, max_depth)
+3. Find minimum total_dist where dist_fwd[v] + dist_rev[v] is minimized
+4. Collect bridge nodes where dist_fwd[v] + dist_rev[v] == total_dist
+5. path_count = count_fwd[v] × count_rev[v]
 ```
 
-**Cost**: k=1: O(V+E) worst case, typically a few hops. k>1: O(k × V²) on
-reachable subgraph.
+**Cost**: O(V+E) bounded by max_depth (default 5) and max_visited (500K).
+Typical: 30-400ms.
 
-**Parameters**: `--k-paths N` (default 1). When k > 1, each node gets a
-`path_count` field (number of distinct shortest paths passing through it).
+**Parameters**: `--max-path-depth N` (default 5). Determines max BFS
+expansion from each side. Effective sp range = 2 × max_path_depth.
 
-**k > 2 seeds**: Pairwise shortest paths. For unified multi-seed paths,
-see Type 7 (Steiner tree).
+**sp quality**: sp 3-5 produces high-quality bridges. sp ≥ 6 may include
+off-topic papers (long chains traverse multiple fields). CLI and JSON
+output include a warning when sp ≥ 6.
 
-**Phase 3**: When no citation path exists (far pair), embedding provides
-an "implicit path" — semantic stepping stones.
+**k > 2 seeds**: Pairwise directed paths, merged by path_count.
+
+**Phase 3**: When no directed path exists (very far pair), embedding
+provides an "implicit path" — semantic stepping stones.
 
 ______________________________________________________________________
 
@@ -430,11 +446,11 @@ with high k.
 |------|-------|--------|
 | 1 | Rust `bridge()` + common_refs/common_citers | **Done** |
 | 2 | coupling_bridges + cocitation_bridges | **Done** |
-| 3 | path_bridges (BFS shortest path, k-paths via Yen) | Planned |
+| 3 | path_bridges (directed BFS) | **Done** |
 | 4 | ppr_bridges (per-seed APPR product) | Planned |
 | 5 | steiner_bridges (KMB heuristic) | Planned |
-| 6 | Python binding + CLI (steps 1-5) | **Done** (Type 1-4; Type 5-7 pending) |
-| 7 | Quality evaluation (abstract review, 3 seed pairs) | **Done** (Type 1-4) |
+| 6 | Python binding + CLI (steps 1-5) | **Done** (Type 1-5; Type 6-7 pending) |
+| 7 | Quality evaluation (abstract review, 3 seed pairs) | **Done** (Type 1-5) |
 
 ### Step 1-2 quality evaluation
 
