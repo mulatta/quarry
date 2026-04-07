@@ -32,6 +32,21 @@ Seed formats: `W<id>`, integer work_id, DOI, `https://doi.org/...`
 Options: `--limit N`, `--mode fused|separated`, `--format table|json|detail`,
 `--alpha`, `--epsilon`
 
+### quarry shrink \<seed>
+
+Find minimum set of high-quality papers that cover an expand
+landscape. Runs expand internally, filters to top venues, selects
+papers by greedy weighted citation coverage.
+
+```
+quarry shrink W2042789810                    # default: top 5, NCS+
+quarry shrink W2042789810 --top 10           # more papers
+quarry shrink W2042789810 --venue "Nature,Science,Cell"  # custom venues
+```
+
+Options: `--top N` (default 5), `--venue NCS+|<list>` (default NCS+),
+`--limit N` (expand limit, default 200), `--format table|json`
+
 ### quarry bridge <seed1> <seed2> [seed3...]
 
 Find papers connecting two or more seeds. Returns 7 bridge types

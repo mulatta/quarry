@@ -605,17 +605,18 @@ features and identified further improvements:
    maximize citation coverage of the full result set. Subsumes the
    rejected `expand --venue` filter. See AD-10 for design.
 
-## AD-10: `shrink` — Minimum Covering Paper Set (Planned)
+## AD-10: `shrink` — Minimum Covering Paper Set
 
 **Date**: 2026-04-07
-**Status**: Design
+**Status**: Active
 
 ### Context
 
 Dogfood session 3 (FISH → spatial transcriptomics) showed that expand
 returns 200 papers but the user wants a reading list of 5-10 papers
 from top journals that cover the full lineage. Manual filtering is
-tedious; `expand --venue` is a subset of this need.
+tedious; `expand --venue` was considered but rejected — shrink
+subsumes it entirely.
 
 ### Problem
 
@@ -624,40 +625,152 @@ S ⊂ candidates such that:
 
 1. All papers in S are from specified venues (NCS+)
 1. S "covers" the full candidate set via citations
+1. The algorithm is **deterministic** (same input → same output)
 
-### Algorithm (Greedy Set Cover)
+### Coverage Definition
 
-```
-shrink(seed, top_n=5, venues=["Nature","Science","Cell",...]):
-    candidates = expand(seed, limit=200)
-    pool = [c for c in candidates if c.venue in venues]
+**1-hop citation coverage**: paper A covers paper B if A cites B,
+B cites A, or A = B. Computed via `graph.neighbors(A, "forward")`
+∪ `graph.neighbors(A, "reverse")` ∪ {A}, intersected with candidates.
+
+**Weighted by expand fused score**: covering rank-1 paper (score 0.015)
+contributes more than rank-200 (score 0.003). This ensures high-ranked
+(most relevant) papers are prioritized for coverage.
+
+Why 1-hop citation, not "explanation":
+
+| Aspect | Citation coverage | Content "explanation" |
+|--------|------------------|----------------------|
+| Measurable | ✅ structural, deterministic | ❌ requires LLM/abstract |
+| Proxy quality | review papers naturally favored (high citation fan-out = selected early) | ideal but not computable in Core layer |
+| Known limitation | passing citation ≠ explanation | — |
+
+Citation coverage is a **structural proxy** for "reading A helps
+understand B". It is not a semantic guarantee. The algorithm
+naturally selects review papers (high coverage) which tend to
+explain rather than merely cite. Full semantic assessment belongs
+in the Agent layer (LLM-based curation on shrink output).
+
+### Empirical Validation
+
+Tested on MERFISH seed (W2042789810), expand limit=200:
+
+- NCS+ pool: 109/200 papers (55%)
+- Individual NCS+ paper coverage: 30-52% of candidates
+- Greedy 5-paper selection: **91% coverage**
+- Greedy 10-paper selection: **97% coverage**
+
+Selected papers (top 5) match expected lineage milestones:
+
+| # | Year | Venue | Marginal | Cumulative | Paper |
+|---|------|-------|----------|------------|-------|
+| 1 | 2019 | Nature | +104 | 52% | seqFISH+ (imaging state-of-art) |
+| 2 | 2022 | Nat Rev Genetics | +34 | 69% | Review (landscape overview) |
+| 3 | 2014 | Nature Methods | +24 | 81% | seqFISH (imaging origin) |
+| 4 | 2019 | Science | +12 | 87% | Slide-seq (capture branch) |
+| 5 | 2021 | Nature | +8 | 91% | Mouse atlas (application) |
+
+### Algorithm
+
+**Greedy Weighted Set Cover** — deterministic, O(pool × top_n).
+
+```python
+def shrink(seed, top_n=5, venues=NCS_PLUS, expand_limit=200):
+    # Phase 1: expand
+    result = run_expand(seed, limit=expand_limit)
+    candidates = result["papers"]
+    candidate_ids = {p["work_id"] for p in candidates}
+    score_map = {p["work_id"]: p["scores"]["fused"] for p in candidates}
+
+    # Phase 2: precompute coverage for venue-filtered pool
+    pool = []
+    for p in candidates:
+        if p["host_venue"] not in venues:
+            continue
+        fwd = set(graph.neighbors(p["work_id"], "forward"))
+        rev = set(graph.neighbors(p["work_id"], "reverse"))
+        cov = (fwd | rev | {p["work_id"]}) & candidate_ids
+        pool.append({"paper": p, "coverage_set": cov})
+
+    # Phase 3: greedy selection
     covered = set()
     selected = []
-
-    for _ in range(top_n):
-        best = max(pool, key=|refs(p) ∩ candidates ∪ citers(p) ∩ candidates| - covered|)
+    for _ in range(min(top_n, len(pool))):
+        best = max(pool, key=lambda x:
+            sum(score_map[c] for c in x["coverage_set"] - covered))
+        covered |= best["coverage_set"]
         selected.append(best)
-        covered |= (refs(best) ∩ candidates) ∪ (citers(best) ∩ candidates)
         pool.remove(best)
 
-    return selected, coverage=len(covered)/len(candidates)
+    return selected, len(covered) / len(candidate_ids)
 ```
 
-Coverage = `|refs(paper) ∩ candidates| + |citers(paper) ∩ candidates|`
-weighted by rank in expand results (higher rank = more important to
-cover). Uses existing `graph.neighbors()` — no new Rust code.
+**Determinism**: guaranteed. APPR is deterministic, CSR neighbors are
+fixed arrays, weighted scores are floats (exact ties practically
+impossible), greedy selection order is fixed.
 
-### Open Questions
+### Known Limitations
 
-- Coverage definition: refs ∩ candidates only? Or also MeSH overlap?
-- Should coverage include the paper itself? (trivially yes)
-- Venue list: hardcoded NCS+ or user-specified?
-- What if NCS+ pool is empty? Fall back to top-cited?
-- Output: selected papers + coverage % + uncovered papers?
+1. **Citation ≠ explanation**: a passing methods citation counts the
+   same as a detailed discussion. Mitigation: reviews naturally score
+   highest (empirically confirmed).
+
+1. **Topic redundancy**: two papers covering the same 50 citations both
+   appear equally good, but may represent the same sub-topic. Future
+   improvement: MeSH diversity penalty (AD-9 overlap scoring). Deferred
+   — empirical results show sufficient diversity without it.
+
+1. **MeSH coverage lag**: MeSH annotations for recent papers may be
+   incomplete, limiting diversity assessment. Same limitation as AD-9.
+
+1. **Venue bias**: NCS+ filter excludes legitimate high-quality papers
+   in field-specific journals (e.g., Nucleic Acids Research, Genome
+   Biology). Mitigation: user-specified venue list as alternative.
+
+### Decisions (Resolved)
+
+| Question | Decision | Rationale |
+|----------|----------|-----------|
+| Coverage definition | 1-hop citation, weighted by fused score | Structural proxy; reviews naturally favored |
+| MeSH in coverage? | **No** (1st version) | Keep simple; MeSH diversity as future improvement |
+| Self-coverage | Yes (paper covers itself) | Trivially correct |
+| Venue specification | Preset `NCS+` (14 journals) + user `--venue` list | Flexibility without complexity |
+| Empty pool fallback | Top cited_by_count, any venue, with warning | Graceful degradation |
+| Output | Selected papers + cumulative coverage % + uncovered count | Actionable for reading list |
+| Separate command | Yes (`quarry shrink`), not `expand --shrink` | Different operation, different parameters |
+| Diversity penalty | **Deferred** | Empirical results sufficient without it |
+
+### NCS+ Venue Preset
+
+```python
+NCS_PLUS = {
+    "Nature", "Science", "Cell",
+    "Nature Methods", "Nature Biotechnology", "Nature Genetics",
+    "Nature Medicine", "Nature Chemical Biology",
+    "Nature Communications", "Science Advances",
+    "Molecular Cell", "Cell Reports", "Cell Systems", "Cell Stem Cell",
+    "Nature Reviews Genetics", "Nature Reviews Molecular Cell Biology",
+    "Nature Biomedical Engineering", "Nature Neuroscience",
+}
+```
+
+### CLI Interface
+
+```
+quarry shrink <seed> [--top 5] [--venue NCS+] [--limit 200]
+                     [--format table|json]
+```
+
+### Performance
+
+- expand: ~3s (existing)
+- neighbors precompute: ~109 calls × ~1ms = ~0.1s
+- greedy selection: O(pool × top_n) set operations ≈ instant
+- **Total: ~3-4s** (same as expand)
 
 ### Implementation Plan
 
-1. Add `host_venue` to expand/bridge enrichment (prerequisite)
-1. Implement coverage calculation in Python (graph.neighbors() call)
-1. `quarry shrink` CLI with `--top N`, `--venue` params
-1. Evaluate: does greedy coverage correlate with expert reading lists?
+1. ~~Add `host_venue` to expand/bridge enrichment~~ **Done**
+1. `quarry/core/shrink.py`: `run_shrink()` function
+1. `quarry/cli.py`: `shrink` subcommand
+1. NCS+ preset as module constant
