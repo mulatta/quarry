@@ -402,8 +402,10 @@ class TestDagsterPipeline:
         for d in sorted(tier_dirs):
             n = len(list(d.glob("*.parquet")))
             print(f"  {d.name}/: {n} files")
-        assert len(flat_files) == 13, (  # 12 original + work_counts_by_year
-            f"Expected 13 flat parquet files, got {len(flat_files)}"
+        assert (
+            len(flat_files) == 14
+        ), (  # 12 original + work_counts_by_year + mesh_terms
+            f"Expected 14 flat parquet files, got {len(flat_files)}"
         )
         assert len(tier_dirs) > 0, "Expected hive tier directories"
         assert len(works_files) > 0, "Expected works bucket parquet files"
