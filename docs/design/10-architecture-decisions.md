@@ -367,3 +367,75 @@ Trades Type 3 coverage (60-70%) for 4x size reduction.
 
 PG/CH metadata can be replaced by OA API + iCite API at runtime.
 CSR is the sole irreplaceable local asset.
+
+## AD-8: `info` Command and `sql` Lifecycle
+
+**Date**: 2026-04-07
+**Status**: Active
+
+### Context
+
+Dogfood session (surveyor persona: cytidine deaminase discovery for base
+editors) revealed that `quarry sql` is used for two distinct purposes:
+
+1. **Seed discovery**: finding papers by keyword before expand/bridge
+1. **Metadata lookup**: getting DOI, venue, cited_by_count for papers
+   found by expand/bridge
+
+Purpose (1) is properly served by `search` when FTS + embedding are
+available. Purpose (2) has no dedicated command — users must write raw
+SQL with unknown schema, causing repeated friction:
+
+- Schema guessing (`publication_year` → `UndefinedColumn` error)
+- Copy-paste work_id from expand output → sql query → repeat
+- 5 out of 13 commands in the session were metadata lookups via sql
+
+MCP already has `get_paper` tool for single-paper lookup. CLI has no
+equivalent.
+
+### Decision
+
+**Add `quarry info <work_id>` CLI command.**
+
+```
+quarry info W4382247824
+quarry info W4382247824 W4413279334   # multiple
+```
+
+Output: work_id, title, pub_year, doi, host_venue, cited_by_count,
+oa_status, rcr, abstract (truncated unless --full).
+
+Implementation: thin wrapper around PG parameterized query (same as
+MCP `get_paper`). No raw SQL, no injection surface.
+
+### `sql` Lifecycle
+
+`sql` is a development escape hatch, not a user-facing feature.
+
+| Phase | `sql` status | Rationale |
+|-------|-------------|-----------|
+| 1-2 (CLI) | **Keep** | Developer debugging, ad-hoc exploration |
+| 3 (Server) | **Do not expose** via API | Injection surface, no parameterization |
+
+`sql --schema` added as convenience for development phase. Both `sql`
+and `--schema` are removed when Server API replaces CLI as primary
+interface. Server exposes only parameterized endpoints: `info`,
+`expand`, `bridge`, `search`.
+
+### `expand`/`bridge` Output Enrichment
+
+Separate from `info`: add DOI, host_venue, cited_by_count to
+expand/bridge table output. This eliminates the most common
+`sql` usage pattern (metadata lookup after expand).
+
+Implementation: these fields are already fetched in PG enrichment
+step (`core/expand.py`, `core/bridge.py`). Change is output-only:
+add columns to `--format table`, include in JSON output.
+
+### Alternatives Considered
+
+| Alternative | Why not |
+|-------------|---------|
+| Only enrich expand/bridge output | Doesn't cover standalone lookup ("what is W4382247824?") |
+| Keep sql as the only lookup method | Schema guessing, injection risk, bad UX |
+| Add `quarry schema` as separate command | Unnecessary if `sql --schema` exists; both are dev-only anyway |

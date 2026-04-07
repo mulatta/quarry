@@ -44,14 +44,18 @@ produce complete data. Agent and SKILL make judgment calls.
 ```
 quarry search     — hybrid search (BM25 + ANN + reranker)
 quarry vsearch    — vector similarity search (embedding ANN)
-quarry sql        — read-only PG query
+quarry info       — single/multi paper metadata lookup (AD-8)
 quarry expand     — single-seed APPR + coupling/cocitation subgraph
 quarry bridge     — multi-seed bridge discovery (7 types)
+quarry sql        — read-only PG query (development only, see AD-8)
 quarry mcp-server — start MCP server
 ```
 
 Note: `similar` renamed to `vsearch` — clarifies that this is
 vector search, not content similarity.
+
+Note: `sql` is a development escape hatch; not exposed in Server
+API (Phase 3). `info` is the safe, parameterized alternative.
 
 ## MCP Tools
 
@@ -82,7 +86,8 @@ vector search, not content similarity.
 |-----|---------------|---------------|-----|
 | search | search_papers | — | Aligned |
 | vsearch | similar_papers | — | Aligned (rename) |
-| sql | query_metadata | — | Aligned |
+| info | get_paper | — | **Add CLI wrapper** (AD-8) |
+| sql | query_metadata | — | Dev-only; **not exposed in Server API** (AD-8) |
 | expand | expand_citations (**mismatch**) | expand (**APPR**) | Fix: add APPR expand, keep N-hop as expand_citations |
 | bridge | ❌ | bridge | Add |
 | — | find_path | — | CLI not needed (available via bridge Type 5) |

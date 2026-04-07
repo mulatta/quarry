@@ -43,10 +43,20 @@ Options: `--type <type>` (filter to specific type), `--limit N`,
 Bridge types: common_refs, common_citers, coupling, cocitation,
 path, ppr, steiner (k>=3 only)
 
+### quarry info \<work_id> [work_id2 ...]
+
+Lookup metadata for one or more papers. Returns work_id, title,
+pub_year, doi, host_venue, cited_by_count, oa_status, rcr,
+abstract (truncated).
+
+Options: `--full` (show full abstract), `--format json`
+
 ### quarry sql "<SELECT query>"
 
-Execute read-only SQL against PostgreSQL metadata. Useful for
-looking up specific papers, checking fields, or ad-hoc analysis.
+Execute read-only SQL against PostgreSQL metadata. Development-only
+escape hatch for ad-hoc queries. Will not be exposed in Server API.
+
+Options: `--schema <table>` (show column names and types)
 
 Tables: works, papers, work_citations, work_authors, work_topics,
 work_mesh, authors, mesh_headings, mesh_tree, id_crosswalk
