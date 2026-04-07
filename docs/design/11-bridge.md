@@ -94,6 +94,7 @@ HSC therapy protocols (B's world).
 
 ```
 For each ref r in refs(A):
+    Skip if indegree(r) > max_neighbor_degree   # prune hubs (default 10,000)
     For each citer C of r:
         overlap_A(C) += AA_weight(r)
 Filter to candidates where overlap_A > 0
@@ -105,7 +106,8 @@ score(C) = overlap_A(C) × overlap_B(C)
 Return candidates where score > 0
 ```
 
-**Cost**: O(Σ indegree(ref)), ~100ms.
+**Cost**: O(Σ indegree(ref)), ~100ms. `max_neighbor_degree` prune keeps
+traversal fast by skipping high-indegree hub refs (low AA weight, high cost).
 
 **k > 2**: `score = Π overlap_i` over all seeds.
 
@@ -129,6 +131,7 @@ reference C.
 
 ```
 For each citer c of A:
+    Skip if outdegree(c) > max_neighbor_degree   # prune review papers (default 10,000)
     For each paper C cited by c:
         overlap_A(C) += AA_weight(c)
 
@@ -138,7 +141,8 @@ For each candidate C:
 score(C) = overlap_A(C) × overlap_B(C)
 ```
 
-**Cost**: O(Σ outdegree(citer)), ~100ms.
+**Cost**: O(Σ outdegree(citer)), ~100ms. `max_neighbor_degree` prune skips
+review papers with excessive outdegree (low AA weight, high traversal cost).
 
 **Distinction from coupling**: Coupling = "author of C combined both worlds".
 Co-citation = "both communities pay attention to C".
@@ -440,7 +444,6 @@ Cocitation finds canonical literature. Medium pair (EvolvePro+PET):
 Type 1-2 returned 0 results, Type 3-4 found 713/309 candidates —
 2-hop traversal unlocks bridges that 1-hop intersection misses.
 `max_neighbor_degree=10,000` prune keeps traversal fast (~0.2s).
-See `.claude/outputs/bridge_eval*.py` for scripts.
 
 ## References
 
