@@ -305,14 +305,34 @@ steiner_bridges(A,B,C)
 6. Internal non-seed nodes = Steiner bridges
 ```
 
-**Cost**: O(k² × V) for all-pairs BFS among k seeds.
+**Cost**: O(k² × V) for all-pairs directed BFS among k seeds. ~400-760ms
+for k=3 with max_path_depth=5.
 
 **k = 2**: Identical to shortest path (Type 5). Skipped; use path_bridges.
 
 **k ≥ 3**: Distinct from pairwise paths. Activated automatically.
 
+**Implementation**: Uses directed BFS (same as Type 5) for all-pairs
+distance computation. Bidirectional meeting: forward from seed_i +
+reverse from seed_j to find shortest chain even when no direct
+forward path exists.
+
+**Quality evaluation** (4 triple combinations):
+
+| Combination | Steiner nodes | unique vs T5 | noise |
+|-------------|--------------|-------------|-------|
+| close-3 (BE 3종) | 5 | 100% | some (plant editing chain) |
+| medium-3 (protein eng 3종) | 6 | 67% | **0%** |
+| mixed-3 (BE+protein+scRNA) | 4 | 50% | low |
+| far-3 (AlphaFold+CAR-T+spatial) | 9 | 100% | **high** |
+
+**Best use case**: medium-distance k≥3 (same broad field, different
+subfields). Far-3 produces noise similar to Type 5 sp≥6 — long
+citation chains traverse unrelated fields.
+
 **Phase 3**: Embedding-based "semantic Steiner" — find papers that minimize
-semantic distance to all seeds, even without citation paths.
+semantic distance to all seeds, even without citation paths. Expected to
+reduce noise for far-distance triples.
 
 **Origin**: Steiner tree problem (Karp 1972, NP-hard). KMB heuristic gives
 2-approximation in polynomial time.
@@ -439,6 +459,57 @@ Distance classification (free — computed as byproduct of bridge):
 - overlap 1-10%: citation bridges + caution
 - overlap < 1%: citation bridges sparse, recommend embedding (Phase 3)
 
+## Seed Quality Criteria
+
+Bridge result quality depends heavily on seed selection. No existing
+bibliometric tool provides seed quality feedback (Sjogarde 2024 confirms
+seed sensitivity is "highly variable and unpredictable"). The criteria
+below are derived from evaluation across 9+ seed pairs and literature
+review (CoCites validation, Bisociative KD, Inciteful 150K limit).
+
+### Per-seed criteria
+
+| Criterion | Measure | Good | Warning | Impact |
+|-----------|---------|------|---------|--------|
+| Citation count | rev_neighbors(seed) | 50-5000 | \<5: unstable network / >10K: hub noise | T1-4 coverage, noise level |
+| Reference count | fwd_neighbors(seed) | 20+ | \<10: coupling/cocitation ineffective | T3-4 require shared refs |
+| Paper type | metadata | original research | review: overly broad coupling | review refs=hundreds → T3-4 dominated |
+| Publication year | metadata | 2015+ | \<2005: dated network / >2024: too few citers | T2 needs citers, T5 needs forward chain |
+
+### Pair-level criteria
+
+| Criterion | Measure | Interpretation |
+|-----------|---------|----------------|
+| Ref overlap | refs(A) ∩ refs(B) / min(refs) | >10%: T1-2 productive, \<1%: T1-2 sparse |
+| Citer overlap | citers(A) ∩ citers(B) / min(citers) | >5%: T2 productive, =0: no one combined yet |
+| Directed distance (sp) | directed BFS | 3-5: T5 quality high, ≥6: T5 noise risk |
+| Reachability | BFS within max_depth | None: T5/T7 impossible, use T6 (PPR) |
+
+### Type-specific seed sensitivity
+
+| Type | Sensitivity | Best seed profile |
+|------|------------|-------------------|
+| 1-2 (refs/citers) | low | ref/citer ≥ 20 |
+| 3-4 (coupling/cocitation) | low | ref/citer ≥ 20, not review |
+| 5 (path) | **high** | same era (±5yr), medium distance |
+| 6 (PPR) | **lowest** | any — most robust to poor seeds |
+| 7 (steiner) | **high** | medium distance, k≥3 same broad field |
+
+When seed quality is uncertain, Type 6 (PPR) is the most reliable
+bridge type due to its global random walk nature.
+
+### Cross-domain bridge seed selection
+
+From LBD literature (Swanson's ABC model, Bisociative KD):
+
+- **Niche papers > mainstream**: outlier papers in a subfield carry
+  more distinctive bridge terms than canonical reviews
+- **Sufficient but not excessive citation**: hub papers (>10K citers)
+  connect to everything, losing discriminative power
+- **Complementary reference worlds**: seeds should cite different
+  literatures — if refs(A) ≈ refs(B), coupling bridges are trivially
+  the same papers both cite
+
 ## k-Scalability
 
 Type 1-2 use `seed_count ≥ 2` threshold (papers shared by any pair).
@@ -471,9 +542,9 @@ with high k.
 | 2 | coupling_bridges + cocitation_bridges | **Done** |
 | 3 | path_bridges (directed BFS) | **Done** |
 | 4 | ppr_bridges (per-seed APPR product) | **Done** |
-| 5 | steiner_bridges (KMB heuristic) | Planned |
-| 6 | Python binding + CLI (steps 1-5) | **Done** (Type 1-6; Type 7 pending) |
-| 7 | Quality evaluation (abstract review, 3 seed pairs) | **Done** (Type 1-6) |
+| 5 | steiner_bridges (KMB heuristic) | **Done** |
+| 6 | Python binding + CLI (steps 1-5) | **Done** (Type 1-7) |
+| 7 | Quality evaluation (abstract review, 3 seed pairs) | **Done** (Type 1-7) |
 
 ### Step 1-2 quality evaluation
 
