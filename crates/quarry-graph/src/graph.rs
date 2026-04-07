@@ -667,6 +667,9 @@ impl Graph {
         stats.insert("overlap_refs".into(), (result.stats.overlap_refs as u64).into_pyobject(py).unwrap().into_any().unbind());
         stats.insert("overlap_citers".into(), (result.stats.overlap_citers as u64).into_pyobject(py).unwrap().into_any().unbind());
         stats.insert("shortest_path_length".into(), result.stats.shortest_path_length.into_pyobject(py).unwrap().into_any().unbind());
+        // Pairwise sp as list of [i, j, sp_or_None]
+        let pairwise: Vec<(usize, usize, Option<usize>)> = result.stats.pairwise_sp;
+        stats.insert("pairwise_sp".into(), pairwise.into_pyobject(py).unwrap().into_any().unbind());
         stats.insert("elapsed_ms".into(), result.stats.elapsed_ms.into_pyobject(py).unwrap().into_any().unbind());
 
         Ok((results, stats))

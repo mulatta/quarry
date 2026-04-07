@@ -758,7 +758,11 @@ def _empty_bridge_reason(key: str, result: dict) -> str | None:
     if key == "steiner_bridges":
         if k < 3:
             return "requires 3+ seeds"
-        return "no intermediate nodes found (seeds may be directly connected)"
+        pairwise = result.get("stats", {}).get("pairwise_sp", [])
+        unreachable = sum(1 for _, _, s in pairwise if s is None)
+        if unreachable:
+            return f"no steiner tree ({unreachable}/{len(pairwise)} pairs unreachable)"
+        return "no intermediate nodes (all pairs directly connected)"
     if key == "path_bridges":
         if sp == 1:
             return "seeds directly connected (sp=1), no stepping stones"
@@ -778,7 +782,6 @@ def _print_bridge_table(result: dict) -> None:
     # Header
     seed_strs = [f"W{s['work_id']}" for s in result["seeds"]]
     sp_len = stats.get("shortest_path_length")
-    sp_info = f" sp={sp_len}" if sp_len is not None else ""
     # Only show overlap when common_refs/common_citers were computed
     has_common = bool(result.get("common_refs")) or bool(result.get("common_citers"))
     overlap_info = (
@@ -786,6 +789,19 @@ def _print_bridge_table(result: dict) -> None:
         if has_common or (stats["overlap_refs"] > 0 or stats["overlap_citers"] > 0)
         else ""
     )
+    # Pairwise sp matrix
+    pairwise_sp = stats.get("pairwise_sp", [])
+    if pairwise_sp:
+        sp_parts = []
+        for i, j, sp in pairwise_sp:
+            si = seed_strs[i] if i < len(seed_strs) else f"#{i}"
+            sj = seed_strs[j] if j < len(seed_strs) else f"#{j}"
+            sp_parts.append(f"{si}↔{sj}={sp if sp is not None else '∞'}")
+        sp_info = " sp: " + "  ".join(sp_parts)
+    elif sp_len is not None:
+        sp_info = f" sp={sp_len}"
+    else:
+        sp_info = ""
     console.print(
         f"Bridge: {' ↔ '.join(seed_strs)}  "
         f"({stats['elapsed_s']}s)  "

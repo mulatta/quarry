@@ -101,6 +101,9 @@ pub struct BridgeStats {
     pub overlap_refs: usize,
     pub overlap_citers: usize,
     pub shortest_path_length: Option<usize>,
+    /// Pairwise shortest path lengths: Vec<(seed_i_idx, seed_j_idx, sp)>.
+    /// Always computed for k ≥ 2.
+    pub pairwise_sp: Vec<(usize, usize, Option<usize>)>,
     pub elapsed_ms: u64,
 }
 
@@ -224,6 +227,15 @@ pub fn compute(graph: &Graph, seeds: &[i64], params: &BridgeParams) -> BridgeRes
     // Stats: neighbor counts
     result.stats.per_seed_ref_count = neighbors.refs.iter().map(|s| s.len()).collect();
     result.stats.per_seed_citer_count = neighbors.citers.iter().map(|s| s.len()).collect();
+
+    // Pairwise shortest path (lightweight BFS, max_depth from params)
+    let k = seed_indices.len();
+    for i in 0..k {
+        for j in (i + 1)..k {
+            let sp = shortest_path_length(graph, seed_indices[i], seed_indices[j], params.max_path_depth);
+            result.stats.pairwise_sp.push((i, j, sp));
+        }
+    }
 
     for &ty in &types {
         match ty {
@@ -912,6 +924,30 @@ fn steiner_bridges(
         .collect();
     result.sort_unstable();
     result
+}
+
+/// Shortest path length between two nodes.
+/// Uses forward BFS from src + reverse BFS from dst, same approach as path_bridges.
+/// Returns None if no path within max_depth.
+fn shortest_path_length(graph: &Graph, src: u32, dst: u32, max_depth: usize) -> Option<usize> {
+    if src == dst {
+        return Some(0);
+    }
+    const MAX_VISITED: usize = 200_000;
+    let (dist_fwd, _) = directed_bfs(graph, src, max_depth, MAX_VISITED, Direction::Forward);
+    // Direct forward path
+    if let Some(&d) = dist_fwd.get(&dst) {
+        return Some(d);
+    }
+    let (dist_rev, _) = directed_bfs(graph, dst, max_depth, MAX_VISITED, Direction::Reverse);
+    // Meeting point
+    let mut best = usize::MAX;
+    for (&v, &d_fwd) in &dist_fwd {
+        if let Some(&d_rev) = dist_rev.get(&v) {
+            best = best.min(d_fwd + d_rev);
+        }
+    }
+    if best < usize::MAX { Some(best) } else { None }
 }
 
 /// BFS with parent tracking for path reconstruction.

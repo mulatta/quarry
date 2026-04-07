@@ -401,6 +401,7 @@ quarry bridge W1234 W5678 --format table
     "overlap_refs": 15,
     "overlap_citers": 8,
     "shortest_path_length": 4,
+    "pairwise_sp": [[0, 1, 4]],
     "elapsed_ms": 230
   },
   "common_refs": [
@@ -424,6 +425,21 @@ quarry bridge W1234 W5678 --format table
   "steiner_bridges": []
 }
 ```
+
+### Pairwise SP Matrix
+
+`pairwise_sp` provides directed shortest path for every seed pair,
+always computed regardless of which bridge types are requested.
+Format: `[[i, j, sp], ...]` where `sp` is null if unreachable.
+
+CLI displays as: `sp: W...↔W...=1  W...↔W...=∞`
+
+Purpose: seed compatibility assessment. Many unreachable pairs
+indicate seeds are directionally disconnected — bridge results
+will be limited; expand may be more appropriate.
+
+Added after dogfood S6 revealed that users could not tell why
+steiner/path returned empty results. See S6/S7 session reports.
 
 ## Phase 3 Extension Points
 
