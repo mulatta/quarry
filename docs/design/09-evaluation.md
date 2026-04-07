@@ -71,12 +71,12 @@ Result: table of metric × algorithm × seed
 
 For 2-3 seed papers, manually label top 50 results:
 
-| Label              | Definition                                   |
+| Label | Definition |
 | ------------------ | -------------------------------------------- |
-| **relevant**       | Directly related to seed's research question |
-| **methodological** | Related tool/technique, not topic            |
-| **background**     | Broad field context, not specific            |
-| **noise**          | Unrelated, should not appear                 |
+| **relevant** | Directly related to seed's research question |
+| **methodological** | Related tool/technique, not topic |
+| **background** | Broad field context, not specific |
+| **noise** | Unrelated, should not appear |
 
 Compute: precision@k = relevant / k, noise_rate = noise / k.
 
@@ -256,22 +256,22 @@ for seed in EVAL_SEEDS:
 
 Diverse set covering:
 
-| Criterion                  | Reason                                                          |
+| Criterion | Reason |
 | -------------------------- | --------------------------------------------------------------- |
-| Different fields           | PET enzymology, cancer biology, crystallography                 |
-| Different citation counts  | low (c<50), medium (c:100-1000), high (c>5000)                  |
-| Different years            | recent (2024-2025), established (2015-2020), classic (pre-2010) |
-| Different reference counts | few refs (<20), many refs (>100)                                |
-| Review vs research article | Different citation patterns                                     |
+| Different fields | PET enzymology, cancer biology, crystallography |
+| Different citation counts | low (c\<50), medium (c:100-1000), high (c>5000) |
+| Different years | recent (2024-2025), established (2015-2020), classic (pre-2010) |
+| Different reference counts | few refs (\<20), many refs (>100) |
+| Review vs research article | Different citation patterns |
 
 ## Success Criteria
 
-| Metric                          | Minimum | Good |
+| Metric | Minimum | Good |
 | ------------------------------- | ------- | ---- |
-| recall@200 (reference recovery) | >0.5    | >0.7 |
-| LOO recovery rate               | >0.3    | >0.5 |
-| symmetry rate                   | >0.5    | >0.7 |
-| S2 top-10 coverage              | >0.3    | >0.6 |
-| OA related coverage             | >0.5    | >0.8 |
-| noise rate (expert)             | <0.2    | <0.1 |
-| elapsed time                    | <5s     | <2s  |
+| recall@200 (reference recovery) | >0.5 | >0.7 |
+| LOO recovery rate | >0.3 | >0.5 |
+| symmetry rate | >0.5 | >0.7 |
+| S2 top-10 coverage | >0.3 | >0.6 |
+| OA related coverage | >0.5 | >0.8 |
+| noise rate (expert) | \<0.2 | \<0.1 |
+| elapsed time | \<5s | \<2s |

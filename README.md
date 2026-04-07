@@ -36,10 +36,10 @@ icite_sync ──────────────────┘            
 ### Stages
 
 1. **Download** — `aws s3 sync` (OA), FTP (PubMed, MeSH), figshare (iCite)
-2. **Parse** — `quarry-parse` (Rust): gz JSONL / XML → Parquet (Hive partitioned)
-3. **Load** — Parquet / CSV → ClickHouse (ReplacingMergeTree for dedup)
-4. **Transform** — CH: `OPTIMIZE FINAL` + enriched export tables (OA×PubMed×iCite JOIN)
-5. **Serve** — CH export → PG COPY (serving DB), LanceDB embeddings, CSR citation graph
+1. **Parse** — `quarry-parse` (Rust): gz JSONL / XML → Parquet (Hive partitioned)
+1. **Load** — Parquet / CSV → ClickHouse (ReplacingMergeTree for dedup)
+1. **Transform** — CH: `OPTIMIZE FINAL` + enriched export tables (OA×PubMed×iCite JOIN)
+1. **Serve** — CH export → PG COPY (serving DB), LanceDB embeddings, CSR citation graph
 
 ### Key Design Decisions
 

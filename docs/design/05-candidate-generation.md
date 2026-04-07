@@ -40,6 +40,7 @@ return estimate  // sparse: only touched nodes have entries
 ```
 
 Key properties:
+
 - **Local**: only visits nodes reachable from seed with significant score
 - **Deterministic**: same seed → same result
 - **Bounded**: O(1/ε) total work regardless of graph size (182M nodes irrelevant)
@@ -71,6 +72,7 @@ pub fn appr(
 
 APPR is called internally by `expand()`. Direct Python binding also available
 for debugging/testing:
+
 ```python
 graph.appr(seed, alpha=0.15, epsilon=1e-6, top_k=None) -> list[tuple[int, float]]
 ```
@@ -81,12 +83,14 @@ Relation tags (foundation/follow-up/lateral) serve direction use cases.
 ## Verified Results
 
 PET depolymerase paper (Seo 2025, α=0.15, ε=1e-6):
+
 - 2,366 nodes scored in 1.45s
 - Top 20: all PET enzyme papers, no off-topic
 - Seed score: 44.1% of total mass
 - Hub suppression working (no generic high-citation papers)
 
 5-seed evaluation (PET, base editing, PLM evolution, glycosylase BE, aptamer):
+
 - All seeds produce on-topic results
 - APPR alone recovers 81-97% of seed references in top 200
 - Lateral papers (via coupling/cocitation fusion) are all on-topic across all seeds

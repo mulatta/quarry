@@ -35,10 +35,12 @@ causes 10-20% ref recovery loss as coupling candidates flood the results.
 ### Handling Missing Signals
 
 If a paper appears in APPR but not in coupling/cocitation:
+
 - That signal simply contributes 0 to the sum
 - RRF gracefully degrades — remaining signals still produce valid ranking
 
 Papers appearing in coupling/cocitation but NOT in APPR:
+
 - These are "lateral" candidates — no structural proximity but bibliometric similarity
 - Included in output with only coupling/cocitation score contributing
 

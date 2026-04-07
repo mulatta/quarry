@@ -10,6 +10,7 @@
 ### Context
 
 `quarry expand` has two layers:
+
 - **Graph computation** (APPR, coupling, cocitation, wRRF, bridge): Rust, ~1s
 - **Metadata enrichment** (PG lookup, JSON assembly, relation tagging): Python, ~50ms
 
@@ -26,6 +27,7 @@ The Python CLI is ~200 lines of thin wrapper around Rust .so (via PyO3).
 ### Migration Triggers (Phase 2)
 
 Migrate to pure Rust CLI when **any** of these occur:
+
 - MCP server needs `expand()` → logic duplication becomes real
 - Output schema has downstream consumers that need type safety
 - Python dependency (pydantic, psycopg, rich) becomes deployment burden
@@ -132,18 +134,21 @@ bidirectional APPR (both). Compared top-200 results with title+abstract review.
 ### Findings
 
 **Forward-only APPR problems:**
+
 - Includes upstream generic tools (PHENIX, Bradford assay, Cytoscape, ColabFold)
   that seeds happen to cite — **noise, not ancestry**
 - Loses all direct-topic recent research that Both APPR finds
 - Node count 3-4× larger than Both → diluted precision
 
 **Reverse-only APPR problems:**
+
 - Includes broad application papers (cardiovascular therapy, eye disease)
   that happen to cite seed-related work — **mixed quality**
 - Fails completely for high-citation seeds (Zhao: 449 citers → mass dilution)
 - 5/5 target grandchildren not scored at all for Zhao
 
 **Both APPR advantage:**
+
 - Bidirectional push acts as natural relevance filter — generic tools get
   low scores because they lack reverse support, and vice versa
 - Highest precision across all seeds
@@ -161,9 +166,10 @@ tested edge restriction, which is non-standard.
 ### Decision
 
 Direction filtering at APPR level rejected. Instead:
+
 1. **Relation tag** (foundation/follow-up/lateral) for post-hoc direction filtering
-2. **Higher limit** (500) when deeper chain coverage needed
-3. Use cases like "show only foundations" → `jq '.papers[] | select(.relation == "foundation")'`
+1. **Higher limit** (500) when deeper chain coverage needed
+1. Use cases like "show only foundations" → `jq '.papers[] | select(.relation == "foundation")'`
 
 ### References
 
@@ -221,11 +227,11 @@ generic (Zhao/CRISPR origin papers displacing specific BE techniques).
 ### Decision
 
 1. **APPR remains the sole scoring algorithm** for expand
-2. **HKPR code retained** (`algo/hkpr.rs`, `graph.hkpr()` binding) for future use
-3. **Re-evaluate in Phase 3** when embedding layer is available — embedding
+1. **HKPR code retained** (`algo/hkpr.rs`, `graph.hkpr()` binding) for future use
+1. **Re-evaluate in Phase 3** when embedding layer is available — embedding
    similarity can distinguish "seed-relevant landmark" from "generic upstream
    tool", enabling selective HKPR paper promotion
-4. Potential Phase 3 approach: HKPR candidates filtered by embedding
+1. Potential Phase 3 approach: HKPR candidates filtered by embedding
    similarity to seed before fusion
 
 ### References
@@ -297,6 +303,7 @@ APPR is reserved for single-seed `expand` only.
 ### Phase 3 Extension
 
 Embedding adds a **candidate source**, not a replacement:
+
 - Close pair: citation bridges sufficient
 - Medium pair: citation bridges + embedding rerank
 - Far pair: embedding candidates + citation validation (order reverses)

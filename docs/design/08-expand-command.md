@@ -146,22 +146,26 @@ quarry expand <seed> \
 ### Schema Field Reference
 
 **scores**:
+
 - `fused`: wRRF fused score (fused mode) or APPR/lateral score (separated mode)
 - `appr`: raw APPR score. null if paper only found via coupling/cocitation.
 
 **quality** (all nullable — see 03-layer-quality.md for why):
+
 - `cited_by`: raw citation count (~100% coverage)
 - `cnp`: citation_normalized_percentile, 0-1, field+year normalized (87-99%)
 - `fwci`: Field-Weighted Citation Impact, unbounded (87-99%, ρ=0.99 with cnp)
 - `rcr`: Relative Citation Ratio, iCite, PubMed only (55-85%)
 
 **bridges** (lateral papers only, null for foundation/follow-up/mutual):
+
 - All shared refs/citers returned (no top-N cutoff)
 - Sorted by AA weight descending (structural rarity proxy)
 - `type`: `shared_ref` (seed and paper both cite bridge) or `shared_citer` (third paper cites both)
 - `weight`: Adamic-Adar weight = 1/log(indegree or outdegree)
 
 **relation**:
+
 - `foundation`: seed cites this paper (seed → paper edge exists)
 - `follow-up`: this paper cites seed (paper → seed edge exists)
 - `mutual`: both directions
@@ -188,6 +192,7 @@ All quality fields are nullable. NULL means "not measured" — not "zero" or
 "average". No imputation. See [07-missing-data.md](07-missing-data.md).
 
 Common NULL patterns:
+
 - Preprints (bioRxiv/arXiv): cnp, fwci, rcr all NULL
 - Chemistry journals: rcr NULL (not in PubMed)
 - Very new papers (2025+): cnp/fwci may be NULL or near-zero
@@ -216,6 +221,7 @@ bridge collection (pass 2)            JSON serialization
 | lateral quality | all on-topic (5/5 seeds) | all on-topic | 7/10 |
 
 Key findings:
+
 - APPR alone misses 3+ high-quality lateral papers per seed
 - Both modes recover them; separated guarantees more lateral slots
 - Lateral papers verified on-topic via PMC abstract review (all 5 seeds)

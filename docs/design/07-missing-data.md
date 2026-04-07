@@ -21,6 +21,7 @@ Evaluated on 5 seed papers (PET enzyme, base editing, PLM, bioinformatics):
 | cited_by_count | ~100% | Rare |
 
 NULL is not random — it's **systematic**:
+
 - Preprints: no fwci/cnp (not yet indexed by OpenAlex metrics)
 - Chemistry journals: no rcr (not in PubMed)
 - Very new papers: no citations yet
