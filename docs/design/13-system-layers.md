@@ -92,7 +92,7 @@ to keyword search. See AD-9 for ontology strategy.
 | search | search_papers | — | Aligned |
 | vsearch | similar_papers | — | Aligned (rename) |
 | info | get_paper | — | **Add CLI wrapper** (AD-8) |
-| mesh | mesh_explore | — | **Add CLI wrapper** (AD-9) |
+| mesh | mesh_explore | — | Aligned (AD-9). CLI uses mesh_lookup for synonym search |
 | sql | query_metadata | — | Dev-only; **not exposed in Server API** (AD-8) |
 | expand | expand_citations (**mismatch**) | expand (**APPR**) | Fix: add APPR expand, keep N-hop as expand_citations |
 | bridge | ❌ | bridge | Add |
