@@ -57,6 +57,7 @@ def info(
         ..., help="One or more work IDs: W<id>, DOI, PMID"
     ),
     full: bool = typer.Option(False, "--full", help="Show full abstract"),
+    show_mesh: bool = typer.Option(False, "--mesh", help="Show MeSH descriptors"),
     fmt: str = typer.Option("table", "--format", "-f", help="table|json"),
 ):
     """Lookup metadata for one or more papers."""
@@ -79,6 +80,13 @@ def info(
     if not results:
         raise typer.Exit(1)
 
+    # Fetch MeSH tags if requested
+    mesh_map: dict[str, list[dict]] = {}
+    if show_mesh:
+        for r in results:
+            wid = r.get("work_id", "")
+            mesh_map[wid] = db.get_work_mesh(wid)
+
     if fmt == "json":
         out = []
         for r in results:
@@ -94,6 +102,8 @@ def info(
             }
             if full:
                 entry["abstract"] = r.get("abstract", "")
+            if show_mesh:
+                entry["mesh"] = mesh_map.get(r.get("work_id", ""), [])
             out.append(entry)
         typer.echo(
             json_mod.dumps(
@@ -114,6 +124,20 @@ def info(
             console.print(f"  doi={r.get('doi', '-')}")
             if full and r.get("abstract"):
                 console.print(f"  [dim]{r['abstract']}[/dim]")
+            if show_mesh:
+                tags = mesh_map.get(r.get("work_id", ""), [])
+                if tags:
+                    console.print("  mesh:")
+                    for t in tags:
+                        marker = "★" if t.get("is_major_topic") else " "
+                        qual = (
+                            f" / {t['qualifier_name']}"
+                            if t.get("qualifier_name")
+                            else ""
+                        )
+                        console.print(
+                            f"    {marker} {t['descriptor_name']} ({t['descriptor_ui']}){qual}"
+                        )
             console.print()
 
 
@@ -136,6 +160,141 @@ def _resolve_and_get(identifier: str, db) -> dict | None:
         return db.get_work_by_doi(doi)
 
     return None
+
+
+@app.command()
+def mesh(
+    query: str = typer.Argument(
+        ..., help="MeSH descriptor name (partial) or UI (e.g. D018626)"
+    ),
+    tree: bool = typer.Option(
+        False, "--tree", "-t", help="Show hierarchy (parents/children)"
+    ),
+    limit: int = typer.Option(15, "--limit", "-n", help="Max papers to show"),
+):
+    """MeSH-based paper discovery and hierarchy browsing.
+
+    Find papers by curated MeSH vocabulary — precise topic filtering
+    without keyword noise. Also browse the MeSH hierarchy.
+
+    Examples:
+      quarry mesh "retroelement"        # search by name
+      quarry mesh D018626               # by descriptor UI
+      quarry mesh D018626 --tree        # show hierarchy
+    """
+    from rich.console import Console
+    from rich.table import Table
+    from rich.text import Text
+
+    from quarry.config import settings
+    from quarry.store.pg import PGStore
+
+    console = Console()
+    db = PGStore(settings.pg_conninfo)
+
+    # Resolve query to descriptor_ui
+    if query.startswith("D") and query[1:].isdigit():
+        descriptor_ui = query
+        entries = db.mesh_by_ui(descriptor_ui)
+        if entries:
+            descriptor_name = entries[0]["descriptor_name"]
+        else:
+            # Not in mesh_tree but may exist in work_mesh
+            from psycopg.rows import dict_row
+
+            with db.conn.cursor(row_factory=dict_row) as cur:
+                cur.execute(
+                    "SELECT DISTINCT descriptor_name FROM work_mesh "
+                    "WHERE descriptor_ui = %s LIMIT 1",
+                    (descriptor_ui,),
+                )
+                row = cur.fetchone()
+            if not row:
+                typer.echo(f"Not found: {descriptor_ui}", err=True)
+                raise typer.Exit(1)
+            descriptor_name = row["descriptor_name"]
+            entries = []
+    else:
+        matches = db.mesh_search_by_name(query, limit=10)
+        if not matches:
+            typer.echo(f"No MeSH descriptor matching: {query}", err=True)
+            raise typer.Exit(1)
+        if len(matches) > 1:
+            console.print(f"[bold]Multiple matches for '{query}':[/bold]")
+            for m in matches:
+                console.print(f"  {m['descriptor_ui']}  {m['descriptor_name']}")
+            console.print("\nSpecify descriptor_ui to select one.")
+            return
+        descriptor_ui = matches[0]["descriptor_ui"]
+        descriptor_name = matches[0]["descriptor_name"]
+        entries = db.mesh_by_ui(descriptor_ui)
+
+    tree_numbers = [e["tree_number"] for e in entries] if entries else []
+
+    if tree:
+        # Show hierarchy
+        console.print(f"\n[bold]{descriptor_ui}  {descriptor_name}[/bold]")
+        for tn in tree_numbers:
+            console.print(f"  tree: {tn}")
+            # Parent
+            parent = db.mesh_parent(tn)
+            if parent:
+                console.print(
+                    f"    ↑ {parent['descriptor_name']} ({parent['descriptor_ui']})"
+                )
+            # Children (direct, not all descendants)
+            children = db.mesh_descendants(tn)
+            direct = [
+                c
+                for c in children
+                if c["tree_number"] != tn
+                and c["tree_number"].startswith(tn + ".")
+                and c["tree_number"].count(".") == tn.count(".") + 1
+            ]
+            for c in direct:
+                console.print(f"    ↓ {c['descriptor_name']} ({c['descriptor_ui']})")
+        console.print()
+        return
+
+    # Paper discovery
+    _BROAD_THRESHOLD = 50_000
+    works, total = db.get_top_works_by_mesh(descriptor_ui, limit=limit)
+
+    console.print(
+        f"\n[bold]{descriptor_ui}  {descriptor_name}[/bold]  "
+        f"papers={total} (major topic)"
+    )
+
+    if total > _BROAD_THRESHOLD:
+        console.print(
+            f"[yellow]⚠ {total:,} papers — too broad for seed discovery. "
+            f"Use --tree to find sub-descriptors.[/yellow]"
+        )
+
+    if not works:
+        console.print("  No papers found.")
+        return
+
+    table = Table(show_edge=False, pad_edge=False, box=None, expand=True)
+    table.add_column("#", justify="right", style="dim", width=4, no_wrap=True)
+    table.add_column("year", justify="right", width=4, no_wrap=True)
+    table.add_column("cited", justify="right", width=6, no_wrap=True)
+    table.add_column("work_id", width=13, no_wrap=True)
+    table.add_column("title", ratio=1, overflow="ellipsis", no_wrap=True)
+
+    for i, w in enumerate(works):
+        year = str(w["pub_year"]) if w.get("pub_year") else "-"
+        cited = str(w["cited_by_count"]) if w.get("cited_by_count") is not None else "-"
+        table.add_row(
+            str(i + 1),
+            year,
+            cited,
+            w["work_id"],
+            Text(w.get("title") or "-"),
+        )
+
+    console.print(table)
+    console.print()
 
 
 _SCHEMA_HELP: dict[str, list[tuple[str, str]]] = {

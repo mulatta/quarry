@@ -439,3 +439,147 @@ add columns to `--format table`, include in JSON output.
 | Only enrich expand/bridge output | Doesn't cover standalone lookup ("what is W4382247824?") |
 | Keep sql as the only lookup method | Schema guessing, injection risk, bad UX |
 | Add `quarry schema` as separate command | Unnecessary if `sql --schema` exists; both are dev-only anyway |
+
+## AD-9: MeSH CLI Exposure and Ontology Strategy
+
+**Date**: 2026-04-07
+**Status**: Active
+
+### Context
+
+Two dogfood sessions revealed MeSH as a complementary discovery mechanism
+to citation-based tools:
+
+1. **Surveyor session** (cytidine deaminase): sql ILIKE was the only seed
+   discovery method. FTS/embedding unavailable.
+1. **Newbie session** (retron): `ILIKE '%retron%'` matched "retronasal"
+   noise. MeSH descriptor D018626 (Retroelements) would have provided
+   precise topic filtering.
+
+MeSH provides a **curated, hierarchical vocabulary** that finds papers
+citation graph cannot reach. Verified empirically: top Retroelements
+papers by MeSH vs retron expand results had **zero overlap** — entirely
+different sets.
+
+Backend infrastructure already exists:
+
+- PG: work_mesh (379M rows), mesh_tree (65K), both indexed
+- pg.py: `mesh_search_by_name()`, `mesh_descendants()`, `mesh_by_ui()`,
+  `top_mesh()`
+- MCP: `mesh_explore` tool
+- CLI: **nothing** — this is the gap
+
+### Decision
+
+**Three MeSH features for CLI, in priority order:**
+
+#### 1. `info --mesh` — Paper MeSH tags
+
+```
+quarry info W3096234081 --mesh
+  ...
+  mesh:
+    ★ Bacteria (D001419)
+    ★ Retroelements (D018626)
+      Escherichia coli (D004926)
+```
+
+Query: `work_mesh WHERE work_id = ?` — 0.1ms, no schema change needed.
+
+#### 2. `quarry mesh` — MeSH-based paper discovery + tree browsing
+
+```
+quarry mesh "retroelement"      # name search → top papers
+quarry mesh D018626 --tree      # hierarchy browsal
+```
+
+Paper discovery query: `work_mesh JOIN works WHERE descriptor_ui = ? AND is_major_topic ORDER BY cited_by_count DESC LIMIT N`.
+
+Performance by descriptor cardinality (EXPLAIN ANALYZE):
+
+- Retroelements (5.6K papers): **36ms** — acceptable
+- Bacteria (306K papers): **6.2s** — unacceptable but irrelevant
+
+High-cardinality descriptors are too broad for seed discovery.
+CLI guards with count check and suggests `--tree` drill-down:
+
+```
+⚠ Bacteria (D001419): 104,994 major-topic papers (too broad)
+  Use --tree to find sub-descriptors
+```
+
+New pg.py method: `get_top_works_by_mesh(descriptor_ui, limit)`.
+
+#### 3. `expand --mesh-summary` — Result MeSH distribution
+
+```
+quarry expand W3096234081 --mesh-summary
+  MeSH summary (major topics, top 10):
+    Bacteriophages (D001435)         16/25
+    CRISPR-Cas Systems (D000069236)  12/25
+```
+
+Query: `work_mesh WHERE work_id = ANY(result_ids) AND is_major_topic GROUP BY descriptor_ui` — 28ms for 25 papers.
+
+New pg.py method: `top_mesh_by_work_ids(work_ids, limit)`.
+
+### Schema Assessment
+
+Current schema and indexes are sufficient:
+
+| Index | Covers |
+|-------|--------|
+| `idx_work_mesh_wid` btree(work_id) | info --mesh, expand mesh-summary |
+| `idx_work_mesh_desc` btree(descriptor_ui) | mesh paper discovery |
+
+Optional improvement: composite index `(descriptor_ui, is_major_topic)`
+eliminates in-memory filter. Not required — current performance is
+acceptable for realistic descriptor cardinalities (\<50K papers).
+
+No denormalization needed. No schema redesign needed.
+
+### Ontology Strategy
+
+#### MeSH: in quarry (paper-level enrichment + filtering)
+
+MeSH maps directly to papers via work_mesh. quarry's unit is the paper,
+so MeSH is a natural fit for enrichment and discovery.
+
+#### UMLS/GO: outside quarry
+
+| Ontology | Why outside |
+|----------|-------------|
+| GO | Annotates genes/proteins, not papers. Paper→GO requires indirect mapping (UniProt mentions) |
+| UMLS | 3.5M concepts, but paper mapping still goes through MeSH. Marginal gain vs complexity |
+| SNOMED/OMIM | Clinical focus, not research paper discovery |
+
+UMLS's main advantage (synonym expansion) is better served by
+embedding similarity. Re-evaluate after Phase 3 embedding is live.
+
+#### MeSH in L2 Content Layer (Phase 3)
+
+After embedding, MeSH overlap becomes an L2 atomic operation:
+
+```
+MeSH_overlap(paper_i, seed) = |MeSH(i) ∩ MeSH(seed)| / |MeSH(seed)|
+```
+
+Weighted by IDF to suppress generic descriptors (Humans, DNA).
+Fused with embedding + BM25 via wRRF. This is the structured
+complement to unstructured embedding similarity.
+
+#### Heterogeneous Graph (Phase 3+, research)
+
+Adding MeSH edges to citation CSR is technically feasible but
+architecturally premature. Trigger: repeated evidence that embedding
+misses what MeSH catches (or vice versa) at the graph traversal level.
+
+### Implementation Notes
+
+- `info --mesh`: no new pg.py method, direct query in CLI
+- `quarry mesh`: wraps existing `mesh_search_by_name()` + new
+  `get_top_works_by_mesh()`
+- `quarry mesh --tree`: wraps existing `mesh_by_ui()` +
+  `mesh_descendants()` + new `mesh_parent()`
+- `expand --mesh-summary`: new `top_mesh_by_work_ids()` (work_id
+  based, current `top_mesh()` is pmid-based)

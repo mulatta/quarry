@@ -49,7 +49,22 @@ Lookup metadata for one or more papers. Returns work_id, title,
 pub_year, doi, host_venue, cited_by_count, oa_status, rcr,
 abstract (truncated).
 
-Options: `--full` (show full abstract), `--format json`
+Options: `--full` (show full abstract), `--mesh` (show MeSH tags),
+`--format json`
+
+### quarry mesh "<name>" or \<descriptor_ui>
+
+MeSH-based paper discovery and hierarchy browsing. Finds papers
+by curated MeSH vocabulary — precise topic filtering without
+keyword noise.
+
+```
+quarry mesh "retroelement"        # search by name → top papers
+quarry mesh D018626               # search by descriptor UI
+quarry mesh D018626 --tree        # show hierarchy (parents/children)
+```
+
+Options: `--tree` (show hierarchy), `--limit N` (default 15)
 
 ### quarry sql "<SELECT query>"
 

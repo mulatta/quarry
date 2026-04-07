@@ -173,6 +173,77 @@ class PGStore:
             cur.execute("SELECT * FROM works WHERE doi = %s", (doi,))
             return cur.fetchone()
 
+    def get_work_mesh(self, work_id: str) -> list[dict]:
+        """Get MeSH descriptors for a work, major topics first."""
+        with self.conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT descriptor_ui, descriptor_name, qualifier_name, is_major_topic "
+                "FROM work_mesh WHERE work_id = %s "
+                "ORDER BY is_major_topic DESC, descriptor_name",
+                (work_id,),
+            )
+            return cur.fetchall()
+
+    def get_top_works_by_mesh(
+        self, descriptor_ui: str, limit: int = 15, major_only: bool = True
+    ) -> tuple[list[dict], int]:
+        """Top cited works for a MeSH descriptor.
+
+        Returns (works, total_count). Guards against high-cardinality
+        descriptors by counting first.
+        """
+        with self.conn.cursor(row_factory=dict_row) as cur:
+            major_filter = " AND wm.is_major_topic = true" if major_only else ""
+            cur.execute(
+                f"SELECT COUNT(DISTINCT wm.work_id) FROM work_mesh wm "  # noqa: S608
+                f"WHERE wm.descriptor_ui = %s{major_filter}",
+                (descriptor_ui,),
+            )
+            row = cur.fetchone()
+            total = row["count"] if row else 0
+
+            cur.execute(
+                f"SELECT w.work_id, w.pub_year, w.cited_by_count, w.title "  # noqa: S608
+                f"FROM work_mesh wm JOIN works w ON wm.work_id = w.work_id "
+                f"WHERE wm.descriptor_ui = %s{major_filter} "
+                f"ORDER BY w.cited_by_count DESC NULLS LAST LIMIT %s",
+                (descriptor_ui, limit),
+            )
+            return cur.fetchall(), total
+
+    def mesh_parent(self, tree_number: str) -> dict | None:
+        """Get parent descriptor for a tree number."""
+        parts = tree_number.rsplit(".", 1)
+        if len(parts) < 2:
+            return None
+        parent_tn = parts[0]
+        with self.conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT descriptor_ui, descriptor_name, tree_number "
+                "FROM mesh_tree WHERE tree_number = %s",
+                (parent_tn,),
+            )
+            return cur.fetchone()
+
+    def top_mesh_by_work_ids(
+        self, work_ids: list[str], limit: int = 10, major_only: bool = True
+    ) -> list[dict]:
+        """Top MeSH descriptors across a set of work_ids."""
+        if not work_ids:
+            return []
+        major_filter = " AND is_major_topic = true" if major_only else ""
+        with self.conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                f"SELECT descriptor_ui, descriptor_name, "  # noqa: S608
+                f"COUNT(DISTINCT work_id) AS cnt "
+                f"FROM work_mesh "
+                f"WHERE work_id = ANY(%s){major_filter} "
+                f"GROUP BY descriptor_ui, descriptor_name "
+                f"ORDER BY cnt DESC LIMIT %s",
+                (work_ids, limit),
+            )
+            return cur.fetchall()
+
     def resolve_pmid_to_work_id(self, pmid: int) -> str | None:
         """Resolve PMID → work_id via id_crosswalk."""
         with self.conn.cursor() as cur:

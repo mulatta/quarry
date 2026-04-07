@@ -45,6 +45,7 @@ produce complete data. Agent and SKILL make judgment calls.
 quarry search     — hybrid search (BM25 + ANN + reranker)
 quarry vsearch    — vector similarity search (embedding ANN)
 quarry info       — single/multi paper metadata lookup (AD-8)
+quarry mesh       — MeSH-based paper discovery + tree browsing (AD-9)
 quarry expand     — single-seed APPR + coupling/cocitation subgraph
 quarry bridge     — multi-seed bridge discovery (7 types)
 quarry sql        — read-only PG query (development only, see AD-8)
@@ -56,6 +57,9 @@ vector search, not content similarity.
 
 Note: `sql` is a development escape hatch; not exposed in Server
 API (Phase 3). `info` is the safe, parameterized alternative.
+
+Note: `mesh` provides curated vocabulary-based discovery, complementary
+to keyword search. See AD-9 for ontology strategy.
 
 ## MCP Tools
 
@@ -87,6 +91,7 @@ API (Phase 3). `info` is the safe, parameterized alternative.
 | search | search_papers | — | Aligned |
 | vsearch | similar_papers | — | Aligned (rename) |
 | info | get_paper | — | **Add CLI wrapper** (AD-8) |
+| mesh | mesh_explore | — | **Add CLI wrapper** (AD-9) |
 | sql | query_metadata | — | Dev-only; **not exposed in Server API** (AD-8) |
 | expand | expand_citations (**mismatch**) | expand (**APPR**) | Fix: add APPR expand, keep N-hop as expand_citations |
 | bridge | ❌ | bridge | Add |
