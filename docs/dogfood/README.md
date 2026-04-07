@@ -13,18 +13,14 @@ Scores are 5 dimensions × 1-5 scale = max 25.
 | 2026-04-07 | newbie | [retron](2026-04-07-retron.md) | 16/25 | +1 | AD-9: mesh command needed |
 | 2026-04-07 | bridger | [FISH → spatial transcriptomics](2026-04-07-spatial-transcriptomics.md) | 21/25 | +5 | AD-10: shrink needed |
 | 2026-04-07 | surveyor | [ABE + PTM × CRISPR](2026-04-07-abe-ptm-crispr.md) | 22/25 | +1 | shrink centralization, mesh_lookup |
+| 2026-04-08 | reader | [RNA degrader landscape](2026-04-08-rna-degrader-landscape.md) | 24/25 | +2 | reader persona validated, custom venue essential for chem bio |
 
-## Score Trend
+Scenario coverage and priorities: [scenarios.md](scenarios.md)
 
-```
-25 ┤
-20 ┤                          ●──────●
-   │                        ╱
-15 ┤ ●────●                ╱
-   │       ╲             ╱
-10 ┤        (gap: features implemented)
-   │
- 5 ┤
-   └──────┬──────┬──────┬──────┬
-          S1     S2     S3     S4
-```
+## Notes
+
+Scores are per-session UX quality snapshots, not controlled benchmarks.
+Each session varies by persona, topic, and available features. Do not
+interpret the upward trend as pure tool improvement — field characteristics
+and persona type also affect scores. For regression testing, re-run an
+earlier session's exact scenario with new features.
