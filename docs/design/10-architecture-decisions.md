@@ -727,6 +727,49 @@ impossible), greedy selection order is fixed.
    in field-specific journals (e.g., Nucleic Acids Research, Genome
    Biology). Mitigation: user-specified venue list as alternative.
 
+1. **Centralization dominance**: In highly centralized fields (e.g.,
+   base editing), a single foundational paper can cover 90%+ of
+   candidates via 1-hop citations, making the remaining selections
+   trivially marginal. See post-implementation findings below.
+
+### Post-implementation: Centralization Problem (Dogfood Session 4)
+
+ABE seed (W2766599608) shrink produced 100% coverage with 5 papers,
+but rank 1 (CBE foundational paper, Nature 2016) alone covered 96%.
+The remaining 4 papers contributed +1~5 each — technically correct
+but not a useful reading list.
+
+**Root cause**: In fields with a single dominant founder paper that all
+subsequent work cites, 1-hop coverage becomes trivially saturated.
+This is a structural property of the field, not an algorithm bug.
+
+**Empirical comparison across fields**:
+
+| Field | Seed | Top-1 coverage | 5-paper coverage | Centralization |
+|-------|------|---------------|-----------------|----------------|
+| Spatial transcriptomics | MERFISH | 52% | 91% | moderate |
+| Mito ABE | mito ABE 2024 | 70% | 92% | moderate |
+| Deaminase discovery | structure-based 2023 | 58% | 76% | low |
+| ABE | ABE 2017 | 96% | 100% (trivial) | **extreme** |
+
+**Mitigations implemented**:
+
+1. **Centralization warning**: when top-1 paper covers >80% of
+   candidates, emit warning suggesting a more recent seed.
+
+1. **`--exclude` option**: exclude specific work_ids from the
+   venue-filtered pool. Primary use: exclude the dominant foundation
+   paper to see the "second layer" coverage structure.
+
+1. **`--no-foundation` flag**: automatically exclude papers with
+   relation="foundation" from the pool. Surfaces follow-up and lateral
+   papers that represent recent trends rather than historical origin.
+
+   Why relation-based rather than cited_by threshold: a high-cited
+   review from 2023 should remain in the pool (it's a follow-up with
+   high coverage). Only foundational papers (those the seed cites)
+   exhibit the centralization problem.
+
 ### Decisions (Resolved)
 
 | Question | Decision | Rationale |
@@ -739,6 +782,9 @@ impossible), greedy selection order is fixed.
 | Output | Selected papers + cumulative coverage % + uncovered count | Actionable for reading list |
 | Separate command | Yes (`quarry shrink`), not `expand --shrink` | Different operation, different parameters |
 | Diversity penalty | **Deferred** | Empirical results sufficient without it |
+| Centralization warning | Emit when top-1 >80% | Guides user to use `--no-foundation` or newer seed |
+| `--exclude` | User-specified work_ids to remove from pool | Manual control for known dominant papers |
+| `--no-foundation` | Exclude relation="foundation" from pool | Surfaces recent trends; foundation papers are the centralization source |
 
 ### NCS+ Venue Preset
 
@@ -758,6 +804,7 @@ NCS_PLUS = {
 
 ```
 quarry shrink <seed> [--top 5] [--venue NCS+] [--limit 200]
+                     [--no-foundation] [--exclude W123,W456]
                      [--format table|json]
 ```
 

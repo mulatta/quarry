@@ -41,11 +41,17 @@ papers by greedy weighted citation coverage.
 ```
 quarry shrink W2042789810                    # default: top 5, NCS+
 quarry shrink W2042789810 --top 10           # more papers
+quarry shrink W2042789810 --no-foundation    # skip foundations (recent trends)
+quarry shrink W2042789810 --exclude W2336828812  # exclude specific paper
 quarry shrink W2042789810 --venue "Nature,Science,Cell"  # custom venues
 ```
 
 Options: `--top N` (default 5), `--venue NCS+|<list>` (default NCS+),
-`--limit N` (expand limit, default 200), `--format table|json`
+`--limit N` (expand limit, default 200), `--no-foundation` (exclude
+foundation papers), `--exclude W...,W...` (exclude specific papers),
+`--format table|json`
+
+Warns when top-1 paper covers >80% (centralized field).
 
 ### quarry bridge <seed1> <seed2> [seed3...]
 
