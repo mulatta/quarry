@@ -15,15 +15,34 @@ All algorithms run on a custom Rust CSR (Compressed Sparse Row) mmap structure.
 | Co-Citation | Pattern | Papers co-cited by same citers (Adamic-Adar) | O(shared citers) |
 | Bibliographic Coupling | Pattern | Papers sharing references (Adamic-Adar) | O(shared refs) |
 | Bridge Nodes | Pattern | Bidirectional BFS shortest-path intermediaries | O(max_depth) |
+| Multi-Seed Bridge | Discovery | Cross-seed common_refs/citers/coupling/cocitation (Type 1-4) | O(Σ deg) |
 
 ### Library Replaceability
 
-APPR, HKPR, Expand, Co-Citation, and Bibliographic Coupling are **citation-graph
-domain-specific** — no existing library provides these. They must remain as custom
-Rust implementations on the CSR structure.
+APPR, HKPR, Expand, Co-Citation, Bibliographic Coupling, and Multi-Seed Bridge
+are **citation-graph domain-specific** — no existing library provides these.
+They must remain as custom Rust implementations on the CSR structure.
 
-WCC, Betweenness, and Bridge are generic graph algorithms replaceable by libraries,
-but the current Rust implementations are already optimized for the CSR layout.
+WCC, Betweenness, and Bridge Nodes are generic graph algorithms replaceable by
+libraries, but the current Rust implementations are already optimized for the CSR layout.
+
+### Multi-Seed Bridge (algo/bridge.rs)
+
+Dedicated multi-seed bridge discovery — structurally different from single-seed
+patterns above. See [11-bridge.md](11-bridge.md) for full design.
+
+| Type | Status | Description |
+|------|--------|-------------|
+| common_refs (Type 1) | Done | `refs(A) ∩ refs(B)`, AA-weighted |
+| common_citers (Type 2) | Done | `citers(A) ∩ citers(B)`, AA-weighted |
+| coupling_bridges (Type 3) | Done | Cross-seed bibliographic coupling, product scoring |
+| cocitation_bridges (Type 4) | Done | Cross-seed co-citation, product scoring |
+| path_bridges (Type 5) | Planned | BFS shortest path / Yen's k-paths |
+| ppr_bridges (Type 6) | Planned | Per-seed APPR geometric mean |
+| steiner_bridges (Type 7) | Planned | KMB heuristic (k ≥ 3 only) |
+
+**Note**: Type 1-4 are Rust-only (`#![allow(dead_code)]`). No Python binding or
+CLI yet — `lib.rs` does not expose `algo::bridge`. See 11-bridge.md Step 6.
 
 ## Future Algorithm Candidates
 
