@@ -165,6 +165,17 @@ impl Graph {
         self.rev.neighbors(idx)
     }
 
+    /// Call `f` for each undirected neighbor (fwd ∪ rev). No allocation.
+    /// Duplicates possible if node appears in both directions — caller handles.
+    pub(crate) fn for_each_undirected<F: FnMut(u32)>(&self, idx: u32, mut f: F) {
+        for &nb in self.fwd_neighbors(idx) {
+            f(nb);
+        }
+        for &nb in self.rev_neighbors(idx) {
+            f(nb);
+        }
+    }
+
     pub(crate) fn fwd_indptr(&self) -> &[u64] {
         self.fwd.indptr()
     }
@@ -547,7 +558,7 @@ impl Graph {
     /// Returns (per_type_results, stats) where per_type_results is a dict
     /// with keys: common_refs, common_citers, coupling_bridges, cocitation_bridges.
     #[allow(clippy::type_complexity)]
-    #[pyo3(signature = (seeds, types=None, limit=100, max_neighbor_degree=10_000))]
+    #[pyo3(signature = (seeds, types=None, limit=100, max_neighbor_degree=10_000, max_path_depth=5))]
     fn bridge(
         &self,
         py: Python<'_>,
@@ -555,6 +566,7 @@ impl Graph {
         types: Option<Vec<String>>,
         limit: usize,
         max_neighbor_degree: usize,
+        max_path_depth: usize,
     ) -> PyResult<(HashMap<String, PyObject>, HashMap<String, PyObject>)> {
         if seeds.len() < 2 {
             return Err(pyo3::exceptions::PyValueError::new_err(
@@ -588,6 +600,7 @@ impl Graph {
             types: bridge_types,
             limit,
             max_neighbor_degree,
+            max_path_depth,
             ..Default::default()
         };
 
@@ -626,11 +639,20 @@ impl Graph {
             d
         }).collect();
 
+        let path: Vec<HashMap<String, PyObject>> = result.path_bridges.iter().map(|e| {
+            let mut d = HashMap::new();
+            d.insert("work_id".into(), e.work_id.into_pyobject(py).unwrap().into_any().unbind());
+            d.insert("hop_from".into(), e.hop_from.clone().into_pyobject(py).unwrap().into_any().unbind());
+            d.insert("path_count".into(), e.path_count.into_pyobject(py).unwrap().into_any().unbind());
+            d
+        }).collect();
+
         let mut results = HashMap::new();
         results.insert("common_refs".into(), common_refs.into_pyobject(py).unwrap().into_any().unbind());
         results.insert("common_citers".into(), common_citers.into_pyobject(py).unwrap().into_any().unbind());
         results.insert("coupling_bridges".into(), coupling.into_pyobject(py).unwrap().into_any().unbind());
         results.insert("cocitation_bridges".into(), cocitation.into_pyobject(py).unwrap().into_any().unbind());
+        results.insert("path_bridges".into(), path.into_pyobject(py).unwrap().into_any().unbind());
 
         // Stats
         let mut stats = HashMap::new();
@@ -639,6 +661,7 @@ impl Graph {
         stats.insert("per_seed_citer_count".into(), result.stats.per_seed_citer_count.into_pyobject(py).unwrap().into_any().unbind());
         stats.insert("overlap_refs".into(), (result.stats.overlap_refs as u64).into_pyobject(py).unwrap().into_any().unbind());
         stats.insert("overlap_citers".into(), (result.stats.overlap_citers as u64).into_pyobject(py).unwrap().into_any().unbind());
+        stats.insert("shortest_path_length".into(), result.stats.shortest_path_length.into_pyobject(py).unwrap().into_any().unbind());
         stats.insert("elapsed_ms".into(), result.stats.elapsed_ms.into_pyobject(py).unwrap().into_any().unbind());
 
         Ok((results, stats))

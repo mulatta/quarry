@@ -23,6 +23,7 @@ _BRIDGE_TYPES = [
     "common_citers",
     "coupling",
     "cocitation",
+    "path",
 ]
 
 
@@ -34,6 +35,7 @@ def run_bridge(
     types: list[str] | None = None,
     limit: int = 100,
     max_neighbor_degree: int = 10_000,
+    max_path_depth: int = 5,
     include_abstract: bool = False,
 ) -> dict[str, Any]:
     """Run bridge pipeline: resolve → compute → enrich → assemble.
@@ -58,6 +60,7 @@ def run_bridge(
         types=types,
         limit=limit,
         max_neighbor_degree=max_neighbor_degree,
+        max_path_depth=max_path_depth,
     )
     elapsed = time.perf_counter() - t0
 
@@ -68,6 +71,7 @@ def run_bridge(
         "common_citers",
         "coupling_bridges",
         "cocitation_bridges",
+        "path_bridges",
     ):
         for entry in results.get(key, []):
             all_wids.add(entry["work_id"])
@@ -145,6 +149,30 @@ def run_bridge(
             out.append(entry)
         return out
 
+    def _enrich_path(entries: list[dict]) -> list[dict]:
+        out = []
+        for e in entries:
+            wid = e["work_id"]
+            meta = metadata.get(wid, {})
+            entry: dict[str, Any] = {
+                "work_id": wid,
+                "title": meta.get("title"),
+                "doi": meta.get("doi"),
+                "year": meta.get("pub_year"),
+                "hop_from": e["hop_from"],
+                "path_count": e["path_count"],
+                "quality": {
+                    "cited_by": meta.get("cited_by_count"),
+                    "cnp": meta.get("cnp"),
+                    "fwci": meta.get("fwci"),
+                    "rcr": meta.get("rcr"),
+                },
+            }
+            if include_abstract:
+                entry["abstract"] = meta.get("abstract")
+            out.append(entry)
+        return out
+
     return {
         "meta": {
             "quarry_version": "0.2.0",
@@ -155,17 +183,20 @@ def run_bridge(
             "types": types or _BRIDGE_TYPES,
             "limit": limit,
             "max_neighbor_degree": max_neighbor_degree,
+            "max_path_depth": max_path_depth,
         },
         "common_refs": _enrich_common(results.get("common_refs", [])),
         "common_citers": _enrich_common(results.get("common_citers", [])),
         "coupling_bridges": _enrich_scored(results.get("coupling_bridges", [])),
         "cocitation_bridges": _enrich_scored(results.get("cocitation_bridges", [])),
+        "path_bridges": _enrich_path(results.get("path_bridges", [])),
         "stats": {
             "seeds": seed_ids,
             "per_seed_ref_count": stats["per_seed_ref_count"],
             "per_seed_citer_count": stats["per_seed_citer_count"],
             "overlap_refs": stats["overlap_refs"],
             "overlap_citers": stats["overlap_citers"],
+            "shortest_path_length": stats.get("shortest_path_length"),
             "elapsed_ms": stats["elapsed_ms"],
             "elapsed_s": round(elapsed, 3),
         },

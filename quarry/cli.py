@@ -161,11 +161,14 @@ def bridge(
         "--type",
         "-t",
         help="Bridge types to compute (default: all). "
-        "Options: common_refs, common_citers, coupling, cocitation",
+        "Options: common_refs, common_citers, coupling, cocitation, path",
     ),
     limit: int = typer.Option(100, "--limit", "-n", help="Max results per type"),
     max_neighbor_degree: int = typer.Option(
         10_000, "--max-degree", help="Prune neighbors above this degree (Type 3-4)"
+    ),
+    max_path_depth: int = typer.Option(
+        5, "--max-path-depth", help="Max BFS depth for path bridges (Type 5)"
     ),
     fmt: str = typer.Option("table", "--format", "-f", help="table|json|detail"),
 ):
@@ -176,6 +179,7 @@ def bridge(
       common_citers  — who already synthesized both
       coupling       — who combined both methods
       cocitation     — what both communities read
+      path           — stepping-stone reading path between seeds
 
     Output: complete JSON with metadata. Use jq/SQL for filtering/sorting.
     """
@@ -196,6 +200,7 @@ def bridge(
             types=types or None,
             limit=limit,
             max_neighbor_degree=max_neighbor_degree,
+            max_path_depth=max_path_depth,
             include_abstract=(fmt == "detail"),
         )
     except ValueError as e:
@@ -219,11 +224,13 @@ def _print_bridge_table(result: dict) -> None:
 
     # Header
     seed_strs = [f"W{s['work_id']}" for s in result["seeds"]]
+    sp_len = stats.get("shortest_path_length")
+    sp_info = f" sp={sp_len}" if sp_len is not None else ""
     console.print(
         f"Bridge: {' ↔ '.join(seed_strs)}  "
         f"({stats['elapsed_s']}s)  "
         f"[dim]refs overlap={stats['overlap_refs']} "
-        f"citers overlap={stats['overlap_citers']}[/dim]"
+        f"citers overlap={stats['overlap_citers']}{sp_info}[/dim]"
     )
 
     _SECTIONS = [
@@ -231,6 +238,7 @@ def _print_bridge_table(result: dict) -> None:
         ("common_citers", "Common Citers (synthesis papers)"),
         ("coupling_bridges", "Coupling Bridges (combined methods)"),
         ("cocitation_bridges", "Cocitation Bridges (community reads)"),
+        ("path_bridges", "Path Bridges (stepping stones)"),
     ]
 
     for key, label in _SECTIONS:
@@ -240,12 +248,17 @@ def _print_bridge_table(result: dict) -> None:
 
         console.print(f"\n[bold]{label}[/bold]  ({len(entries)})")
 
+        is_path = "hop_from" in entries[0]
+        is_scored = "score" in entries[0]
+
         table = Table(show_edge=False, pad_edge=False, box=None, expand=True)
         table.add_column("#", justify="right", style="dim", width=4, no_wrap=True)
         table.add_column("year", justify="right", width=4, no_wrap=True)
 
-        is_scored = "score" in entries[0]
-        if is_scored:
+        if is_path:
+            table.add_column("hops", justify="right", width=7, no_wrap=True)
+            table.add_column("paths", justify="right", width=6, no_wrap=True)
+        elif is_scored:
             table.add_column("score", justify="right", width=10, no_wrap=True)
         else:
             table.add_column("aa", justify="right", width=8, no_wrap=True)
@@ -255,14 +268,27 @@ def _print_bridge_table(result: dict) -> None:
 
         for i, e in enumerate(entries):
             year = str(e["year"]) if e.get("year") else "-"
-            score_col = f"{e['score']:.6f}" if is_scored else f"{e['aa_weight']:.4f}"
-            table.add_row(
-                str(i + 1),
-                year,
-                score_col,
-                f"W{e['work_id']}",
-                Text(e.get("title") or "-"),
-            )
+            if is_path:
+                hops = "+".join(str(h) for h in e["hop_from"])
+                table.add_row(
+                    str(i + 1),
+                    year,
+                    hops,
+                    str(e["path_count"]),
+                    f"W{e['work_id']}",
+                    Text(e.get("title") or "-"),
+                )
+            else:
+                score_col = (
+                    f"{e['score']:.6f}" if is_scored else f"{e['aa_weight']:.4f}"
+                )
+                table.add_row(
+                    str(i + 1),
+                    year,
+                    score_col,
+                    f"W{e['work_id']}",
+                    Text(e.get("title") or "-"),
+                )
 
         console.print(table)
 
