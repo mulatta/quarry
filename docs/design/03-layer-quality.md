@@ -39,19 +39,19 @@ protein language model, bioinformatics). Coverage measured on expand top-200.
 1. **fwci and cnp are essentially identical** (ρ=0.99 across all seeds).
    cnp preferred because 0-1 range requires no normalization.
 
-2. **Preprints have no quality signals** — fwci/cnp coverage drops to 10%
+1. **Preprints have no quality signals** — fwci/cnp coverage drops to 10%
    for preprints. In ML-heavy seeds (Jiang-2025), 8% of expand results
    are preprints with NULL quality data.
 
-3. **fwci captures landmark papers** — ESM-2 (fwci=672), Yoshida 2016
+1. **fwci captures landmark papers** — ESM-2 (fwci=672), Yoshida 2016
    (fwci=51) correctly identified as field-defining. But also promotes
    off-topic high-impact papers (e.g., PBAT degradation for PET seed).
 
-4. **fwci demotes seed-relevant niche papers** — recent method papers
-   with low citations (fwci<3) are structurally important but would be
+1. **fwci demotes seed-relevant niche papers** — recent method papers
+   with low citations (fwci\<3) are structurally important but would be
    deprioritized by quality reranking.
 
-5. **Conclusion**: quality signals measure "field importance" not
+1. **Conclusion**: quality signals measure "field importance" not
    "relevance to seed". Using them for reranking would hurt precision.
    Exposing as metadata lets users make informed judgments.
 

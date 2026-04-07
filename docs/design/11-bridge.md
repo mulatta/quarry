@@ -34,6 +34,7 @@ papers share?"
 **Example**: Gaudelli 2017 (ABE) — cited by both progeria BE and sickle cell BE.
 
 **Computation**:
+
 ```
 fwd_neighbors(seed_A) ∩ fwd_neighbors(seed_B)
 Each shared ref weighted by AA: 1/log(indegree)
@@ -46,7 +47,7 @@ with `cited_by_seeds` count.
 
 **Phase 3**: Embedding filters "core foundation" vs "pro-forma citation".
 
----
+______________________________________________________________________
 
 ### Type 2: common_citers (Common Descendant)
 
@@ -61,6 +62,7 @@ both fields.
 both progeria BE and sickle cell BE.
 
 **Computation**:
+
 ```
 rev_neighbors(seed_A) ∩ rev_neighbors(seed_B)
 Each shared citer weighted by AA: 1/log(outdegree)
@@ -73,7 +75,7 @@ Each shared citer weighted by AA: 1/log(outdegree)
 **Phase 3**: Embedding verifies whether the citer actually compares/synthesizes
 vs merely lists both in a generic review.
 
----
+______________________________________________________________________
 
 ### Type 3: coupling_bridges (Cross-seed Bibliographic Coupling)
 
@@ -89,6 +91,7 @@ seeds' reference worlds.
 HSC therapy protocols (B's world).
 
 **Computation**:
+
 ```
 For each ref r in refs(A):
     For each citer C of r:
@@ -111,7 +114,7 @@ Return candidates where score > 0
 **Origin**: Kessler (1963) bibliographic coupling + Uzzi (2013) atypical
 combinations.
 
----
+______________________________________________________________________
 
 ### Type 4: cocitation_bridges (Cross-seed Co-citation)
 
@@ -123,6 +126,7 @@ reference C.
 **Question answered**: "What do researchers in both fields commonly read?"
 
 **Computation**:
+
 ```
 For each citer c of A:
     For each paper C cited by c:
@@ -144,7 +148,7 @@ Co-citation = "both communities pay attention to C".
 
 **Origin**: Small (1973) co-citation analysis.
 
----
+______________________________________________________________________
 
 ### Type 5: path_bridges (Shortest Path / K-Shortest Paths)
 
@@ -159,6 +163,7 @@ in the undirected citation graph.
 sickle cell BE. The intermediate papers form a narrative chain.
 
 **Computation**:
+
 ```
 k=1: BFS on undirected view (fwd + rev), trace path
 k>1: Yen's algorithm for k-shortest simple paths
@@ -177,7 +182,7 @@ see Type 7 (Steiner tree).
 **Phase 3**: When no citation path exists (far pair), embedding provides
 an "implicit path" — semantic stepping stones.
 
----
+______________________________________________________________________
 
 ### Type 6: ppr_bridges (PPR Product)
 
@@ -193,6 +198,7 @@ Type 5 is global but deterministic (path). Type 6 is global and probabilistic
 (random walk).
 
 **Computation**:
+
 ```
 For each seed_i:
     π_i = APPR(graph, seed_i, α, ε)
@@ -214,7 +220,7 @@ is informative.
 **Origin**: Haveliwala (2002) personalized PageRank; Lofgren et al. (2016)
 PPR product ≈ meeting probability of independent random walks.
 
----
+______________________________________________________________________
 
 ### Type 7: steiner_bridges (Steiner Tree — k ≥ 3)
 
@@ -246,6 +252,7 @@ steiner_bridges(A,B,C)
 ```
 
 **Computation**: KMB heuristic (Kou-Markowsky-Berman 1981):
+
 ```
 1. All-pairs shortest path among k seeds → distance matrix
 2. Build complete graph on seeds, edge weight = shortest path distance
@@ -267,7 +274,7 @@ semantic distance to all seeds, even without citation paths.
 **Origin**: Steiner tree problem (Karp 1972, NP-hard). KMB heuristic gives
 2-approximation in polynomial time.
 
----
+______________________________________________________________________
 
 ## Summary Table
 
@@ -384,6 +391,7 @@ Embedding candidates fill the gap. The candidate/scoring separation means
 Phase 3 adds a new candidate source without changing existing scoring.
 
 Distance classification (free — computed as byproduct of bridge):
+
 - overlap > 10%: citation bridges sufficient
 - overlap 1-10%: citation bridges + caution
 - overlap < 1%: citation bridges sparse, recommend embedding (Phase 3)

@@ -114,8 +114,8 @@ leave-one-out, symmetry, expert judgment. See: [09-evaluation.md](09-evaluation.
 ## Open Questions
 
 - [ ] Missing data fairness: how to weight signals with partial coverage
-      (e.g., RCR available for 74% of PubMed papers, 0% of non-PubMed)
-      See: [07-missing-data.md](07-missing-data.md)
+  (e.g., RCR available for 74% of PubMed papers, 0% of non-PubMed)
+  See: [07-missing-data.md](07-missing-data.md)
 - [ ] Optimal APPR α for citation networks (start with 0.15, tune via eval)
 - [x] ~~L3 Quality: fusion vs reranking~~ → **neither** — metadata only (see 03)
 - [ ] Embedding model choice for Layer 2 (jina-v5 nano currently)
@@ -156,6 +156,7 @@ Implemented:
 - [x] Weighted APPR evaluation: cnp/fwci post-hoc weighting tested, rejected (AD-2 confirmed)
 
 Verified (5 seeds: PET, base editing, PLM, glycosylase BE, aptamer):
+
 - All top-20 on-topic across all seeds (PMC abstract verified)
 - Lateral papers all relevant (0 noise across 5 seeds)
 - wRRF w=0.7/0.15/0.15 preserves ref recovery while adding laterals
