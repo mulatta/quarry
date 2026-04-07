@@ -148,6 +148,8 @@ pub fn parse_mesh_xml(path: &Path) -> Result<MeshParseResult, Box<dyn std::error
                         }
                     }
                     in_descriptor = false;
+                    in_descriptor_name = false;
+                    in_term = false;
                 }
                 _ => {}
             },
@@ -320,5 +322,51 @@ mod tests {
         let result = parse_mesh_xml(f.path()).unwrap();
         assert_eq!(result.tree_entries.len(), 1);
         assert_eq!(result.tree_entries[0].descriptor_name, "Anatomy & Histology");
+    }
+
+    #[test]
+    fn test_multi_concept_descriptor() {
+        // Real MeSH descriptors can have multiple Concepts, each with its own TermList.
+        // All terms from all concepts should be extracted.
+        let mut f = NamedTempFile::new().unwrap();
+        write!(
+            f,
+            r#"<?xml version="1.0"?>
+<DescriptorRecordSet>
+  <DescriptorRecord>
+    <DescriptorUI>D000100</DescriptorUI>
+    <DescriptorName><String>Acetaminophen</String></DescriptorName>
+    <TreeNumberList><TreeNumber>D02.065.199.092</TreeNumber></TreeNumberList>
+    <ConceptList>
+      <Concept PreferredConceptYN="Y">
+        <TermList>
+          <Term RecordPreferredTermYN="Y"><String>Acetaminophen</String></Term>
+          <Term RecordPreferredTermYN="N"><String>Tylenol</String></Term>
+        </TermList>
+      </Concept>
+      <Concept PreferredConceptYN="N">
+        <TermList>
+          <Term RecordPreferredTermYN="N"><String>Paracetamol</String></Term>
+          <Term RecordPreferredTermYN="N"><String>APAP</String></Term>
+        </TermList>
+      </Concept>
+    </ConceptList>
+  </DescriptorRecord>
+</DescriptorRecordSet>"#
+        )
+        .unwrap();
+        f.flush().unwrap();
+
+        let result = parse_mesh_xml(f.path()).unwrap();
+        assert_eq!(result.tree_entries.len(), 1);
+        // All 4 terms from both concepts should be captured
+        assert_eq!(result.term_entries.len(), 4);
+        let term_strs: Vec<&str> = result.term_entries.iter().map(|t| t.term.as_str()).collect();
+        assert!(term_strs.contains(&"Acetaminophen"));
+        assert!(term_strs.contains(&"Tylenol"));
+        assert!(term_strs.contains(&"Paracetamol"));
+        assert!(term_strs.contains(&"APAP"));
+        // Only RecordPreferredTermYN="Y" is marked preferred
+        assert_eq!(result.term_entries.iter().filter(|t| t.is_preferred).count(), 1);
     }
 }
