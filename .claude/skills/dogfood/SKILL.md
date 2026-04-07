@@ -94,6 +94,9 @@ This enables cross-session comparison and score trend tracking.
    add the `design_refs` field in frontmatter. AD docs should link
    back using: `See [dogfood session](../../docs/dogfood/{filename})`.
 
+1. **Update scenario coverage** in `docs/dogfood/scenarios.md`:
+   change the matching scenario's status to `done` with session ID.
+
 The session file must be **self-contained** — readable as a standalone
 document without needing the conversation that produced it. Include
 the full friction log, command sequence, and research findings.

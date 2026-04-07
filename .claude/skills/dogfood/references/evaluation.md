@@ -11,7 +11,6 @@ Use this framework after every dogfood session, regardless of persona.
 | **Workflow continuity** | Had to guess what to do next | Next step was obvious from the output |
 | **Information sufficiency** | Needed external lookup to make decisions | All needed info present in output |
 | **Command ergonomics** | Too many steps, copy-paste, flags to remember | Smooth, minimal friction |
-| **Performance** | Commands too slow, broke my flow | All commands felt instant |
 
 ## Friction Log
 
