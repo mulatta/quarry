@@ -1,13 +1,24 @@
 //! MeSH descriptor XML → structured entries.
 //!
-//! Streaming parser using quick-xml. Same pattern as existing PubMed XML parser.
-//! Replaces Python `etl/mesh.py::parse_mesh_descriptors()`.
+//! Hybrid parser: SAX boundary detection + serde deserialization.
+//! SAX scans for `<DescriptorRecord>` boundaries, `capture_element()` grabs
+//! the raw XML, then `quick_xml::de::from_str()` deserializes structurally.
+//!
+//! This approach eliminates the nested-element overwrite bug that affected the
+//! previous SAX-only parser: serde structs scope fields to their parent element,
+//! so `<DescriptorUI>` inside `<PharmacologicalAction>/<DescriptorReferredTo>`
+//! is never confused with the top-level `<DescriptorUI>`.
 
 use quick_xml::events::Event;
 use quick_xml::Reader;
+use serde::Deserialize;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
+
+use super::capture_element;
+
+// ── Output structs (unchanged — consumed by parquet_writer) ──
 
 /// A single MeSH descriptor → tree_number entry.
 pub struct MeshEntry {
@@ -17,12 +28,6 @@ pub struct MeshEntry {
 }
 
 /// A single MeSH descriptor → term entry (synonym / entry term).
-///
-/// NLM MeSH XML stores synonyms as Term elements within ConceptList.
-/// Each descriptor has one preferred term (= descriptor_name) and zero
-/// or more non-preferred entry terms (alternative names, abbreviations).
-/// Parsing these enables searching by synonym rather than requiring
-/// users to know the exact MeSH descriptor name.
 pub struct MeshTerm {
     pub descriptor_ui: String,
     pub descriptor_name: String,
@@ -36,10 +41,110 @@ pub struct MeshParseResult {
     pub term_entries: Vec<MeshTerm>,
 }
 
+// ── Serde deserialization structs ──
+//
+// Only the fields we need are declared. quick-xml serde silently ignores
+// undeclared elements (PharmacologicalAction, SeeRelatedList, AllowableQualifiersList,
+// etc.), which is exactly what prevents the nested DescriptorUI bug.
+
+#[derive(Deserialize)]
+struct XmlDescriptorRecord {
+    #[serde(rename = "DescriptorUI")]
+    descriptor_ui: String,
+    #[serde(rename = "DescriptorName")]
+    descriptor_name: XmlDescriptorName,
+    #[serde(rename = "TreeNumberList", default)]
+    tree_number_list: Option<XmlTreeNumberList>,
+    #[serde(rename = "ConceptList", default)]
+    concept_list: Option<XmlConceptList>,
+}
+
+#[derive(Deserialize)]
+struct XmlDescriptorName {
+    /// MeSH uses `<String>` as element name for text content.
+    #[serde(rename = "String")]
+    value: String,
+}
+
+#[derive(Deserialize)]
+struct XmlTreeNumberList {
+    #[serde(rename = "TreeNumber", default)]
+    tree_numbers: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct XmlConceptList {
+    #[serde(rename = "Concept", default)]
+    concepts: Vec<XmlConcept>,
+}
+
+#[derive(Deserialize)]
+struct XmlConcept {
+    #[serde(rename = "TermList", default)]
+    term_list: Option<XmlTermList>,
+}
+
+#[derive(Deserialize)]
+struct XmlTermList {
+    #[serde(rename = "Term", default)]
+    terms: Vec<XmlTerm>,
+}
+
+#[derive(Deserialize)]
+struct XmlTerm {
+    #[serde(rename = "@RecordPreferredTermYN", default)]
+    record_preferred_term_yn: Option<String>,
+    #[serde(rename = "String")]
+    value: String,
+}
+
+// ── Conversion ──
+
+fn convert_record(rec: XmlDescriptorRecord) -> (Vec<MeshEntry>, Vec<MeshTerm>) {
+    let ui = &rec.descriptor_ui;
+    let name = rec.descriptor_name.value.trim();
+
+    if ui.is_empty() || name.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+
+    // Tree entries
+    let tree_entries: Vec<MeshEntry> = rec
+        .tree_number_list
+        .into_iter()
+        .flat_map(|tnl| tnl.tree_numbers)
+        .filter(|tn| !tn.is_empty())
+        .map(|tn| MeshEntry {
+            descriptor_ui: ui.clone(),
+            descriptor_name: name.to_string(),
+            tree_number: tn,
+        })
+        .collect();
+
+    // Term entries
+    let term_entries: Vec<MeshTerm> = rec
+        .concept_list
+        .into_iter()
+        .flat_map(|cl| cl.concepts)
+        .filter_map(|c| c.term_list)
+        .flat_map(|tl| tl.terms)
+        .filter(|t| !t.value.trim().is_empty())
+        .map(|t| MeshTerm {
+            descriptor_ui: ui.clone(),
+            descriptor_name: name.to_string(),
+            term: t.value.trim().to_string(),
+            is_preferred: t.record_preferred_term_yn.as_deref() == Some("Y"),
+        })
+        .collect();
+
+    (tree_entries, term_entries)
+}
+
+// ── Main parser ──
+
 /// Parse MeSH descriptor XML → tree entries + term entries.
 ///
-/// Tree entries: each DescriptorRecord with N TreeNumbers produces N MeshEntry rows.
-/// Term entries: each Term/String in ConceptList produces one MeshTerm row.
+/// Uses SAX to find `<DescriptorRecord>` boundaries, then serde for each record.
 pub fn parse_mesh_xml(path: &Path) -> Result<MeshParseResult, Box<dyn std::error::Error>> {
     let file = File::open(path)?;
     let reader = BufReader::with_capacity(256 * 1024, file);
@@ -50,119 +155,27 @@ pub fn parse_mesh_xml(path: &Path) -> Result<MeshParseResult, Box<dyn std::error
     let mut term_entries: Vec<MeshTerm> = Vec::with_capacity(200_000);
     let mut buf = Vec::with_capacity(4096);
 
-    // State for current DescriptorRecord
-    let mut in_descriptor = false;
-    let mut current_ui = String::new();
-    let mut current_name = String::new();
-    let mut current_trees: Vec<String> = Vec::new();
-    let mut current_terms: Vec<(String, bool)> = Vec::new(); // (term, is_preferred)
-
-    // Track nesting for text capture.
-    // MeSH XML nests String elements under both DescriptorName and Term.
-    // We distinguish them by tracking which parent we're inside.
-    #[derive(Clone, Copy, PartialEq)]
-    enum Capture {
-        None,
-        DescriptorUI,
-        DescriptorNameString,
-        TreeNumber,
-        TermString,
-    }
-    let mut capture = Capture::None;
-    let mut in_descriptor_name = false;
-    let mut in_term = false;
-    let mut current_term_is_preferred = false;
-
     loop {
+        buf.clear();
         match xml.read_event_into(&mut buf) {
-            Ok(Event::Start(ref e)) => match e.name().as_ref() {
-                b"DescriptorRecord" => {
-                    in_descriptor = true;
-                    current_ui.clear();
-                    current_name.clear();
-                    current_trees.clear();
-                    current_terms.clear();
-                }
-                b"DescriptorUI" if in_descriptor => capture = Capture::DescriptorUI,
-                b"DescriptorName" if in_descriptor => in_descriptor_name = true,
-                b"String" if in_descriptor_name => capture = Capture::DescriptorNameString,
-                b"TreeNumber" if in_descriptor => capture = Capture::TreeNumber,
-                b"Term" if in_descriptor => {
-                    in_term = true;
-                    // RecordPreferredTermYN="Y" marks the descriptor's primary term
-                    current_term_is_preferred = e.attributes().flatten().any(|a| {
-                        a.key.as_ref() == b"RecordPreferredTermYN"
-                            && a.value.as_ref() == b"Y"
-                    });
-                }
-                b"String" if in_term => capture = Capture::TermString,
-                _ => {}
-            },
-            Ok(Event::Text(ref e)) => match capture {
-                Capture::DescriptorUI => {
-                    current_ui = e.unescape()?.trim().to_string();
-                }
-                Capture::DescriptorNameString => {
-                    current_name = e.unescape()?.trim().to_string();
-                }
-                Capture::TreeNumber => {
-                    let tn = e.unescape()?.trim().to_string();
-                    if !tn.is_empty() {
-                        current_trees.push(tn);
+            Ok(Event::Start(ref e)) if e.name().as_ref() == b"DescriptorRecord" => {
+                let owned = e.to_owned();
+                let raw = capture_element(&mut xml, &owned, &mut buf)?;
+                match quick_xml::de::from_str::<XmlDescriptorRecord>(&raw) {
+                    Ok(rec) => {
+                        let (trees, terms) = convert_record(rec);
+                        tree_entries.extend(trees);
+                        term_entries.extend(terms);
+                    }
+                    Err(err) => {
+                        eprintln!("mesh: WARN: failed to parse DescriptorRecord: {err}");
                     }
                 }
-                Capture::TermString => {
-                    let term = e.unescape()?.trim().to_string();
-                    if !term.is_empty() {
-                        current_terms.push((term, current_term_is_preferred));
-                    }
-                }
-                Capture::None => {}
-            },
-            Ok(Event::End(ref e)) => match e.name().as_ref() {
-                b"DescriptorUI" | b"TreeNumber" => capture = Capture::None,
-                b"String"
-                    if capture == Capture::DescriptorNameString
-                        || capture == Capture::TermString =>
-                {
-                    capture = Capture::None;
-                }
-                b"DescriptorName" => in_descriptor_name = false,
-                b"Term" => in_term = false,
-                b"DescriptorRecord" => {
-                    if !current_ui.is_empty() && !current_name.is_empty() {
-                        // drain() moves owned values out, avoiding clone.
-                        // current_trees/current_terms are emptied and ready
-                        // for the next DescriptorRecord.
-                        for tn in current_trees.drain(..) {
-                            tree_entries.push(MeshEntry {
-                                descriptor_ui: current_ui.clone(),
-                                descriptor_name: current_name.clone(),
-                                tree_number: tn,
-                            });
-                        }
-                        for (term, is_pref) in current_terms.drain(..) {
-                            term_entries.push(MeshTerm {
-                                descriptor_ui: current_ui.clone(),
-                                descriptor_name: current_name.clone(),
-                                term,
-                                is_preferred: is_pref,
-                            });
-                        }
-                        // ui/name still cloned per entry — acceptable at
-                        // this scale (25K descriptors, <1s total parse).
-                    }
-                    in_descriptor = false;
-                    in_descriptor_name = false;
-                    in_term = false;
-                }
-                _ => {}
-            },
+            }
             Ok(Event::Eof) => break,
             Err(e) => return Err(format!("XML parse error: {e}").into()),
             _ => {}
         }
-        buf.clear();
     }
 
     Ok(MeshParseResult {
@@ -373,5 +386,115 @@ mod tests {
         assert!(term_strs.contains(&"APAP"));
         // Only RecordPreferredTermYN="Y" is marked preferred
         assert_eq!(result.term_entries.iter().filter(|t| t.is_preferred).count(), 1);
+    }
+
+    /// Regression test for the nested DescriptorUI bug.
+    ///
+    /// MeSH XML contains `<DescriptorUI>` at multiple nesting levels:
+    /// - Direct child of `<DescriptorRecord>` (the real one)
+    /// - Inside `<PharmacologicalAction>/<DescriptorReferredTo>` (cross-reference)
+    /// - Inside `<SeeRelatedList>/<SeeRelatedDescriptor>/<DescriptorReferredTo>`
+    ///
+    /// The old SAX parser overwrote `current_ui` with nested instances,
+    /// causing 34% of descriptors to have corrupted term mappings.
+    /// With serde, undeclared elements are silently ignored, so the
+    /// nested DescriptorUI never affects the top-level field.
+    #[test]
+    fn test_nested_descriptor_ui_not_captured() {
+        let mut f = NamedTempFile::new().unwrap();
+        write!(
+            f,
+            r#"<?xml version="1.0"?>
+<DescriptorRecordSet>
+  <DescriptorRecord>
+    <DescriptorUI>D000001</DescriptorUI>
+    <DescriptorName><String>Calcimycin</String></DescriptorName>
+    <TreeNumberList>
+      <TreeNumber>D03.633.100.221.173</TreeNumber>
+    </TreeNumberList>
+    <PharmacologicalAction>
+      <DescriptorReferredTo>
+        <DescriptorUI>D000900</DescriptorUI>
+        <DescriptorName><String>Anti-Infective Agents</String></DescriptorName>
+      </DescriptorReferredTo>
+    </PharmacologicalAction>
+    <PharmacologicalAction>
+      <DescriptorReferredTo>
+        <DescriptorUI>D061207</DescriptorUI>
+        <DescriptorName><String>Calcium Ionophores</String></DescriptorName>
+      </DescriptorReferredTo>
+    </PharmacologicalAction>
+    <ConceptList>
+      <Concept PreferredConceptYN="Y">
+        <TermList>
+          <Term RecordPreferredTermYN="Y"><String>Calcimycin</String></Term>
+          <Term RecordPreferredTermYN="N"><String>A-23187</String></Term>
+        </TermList>
+      </Concept>
+    </ConceptList>
+  </DescriptorRecord>
+  <DescriptorRecord>
+    <DescriptorUI>D015202</DescriptorUI>
+    <DescriptorName><String>Protein Engineering</String></DescriptorName>
+    <SeeRelatedList>
+      <SeeRelatedDescriptor>
+        <DescriptorReferredTo>
+          <DescriptorUI>D016297</DescriptorUI>
+          <DescriptorName><String>Mutagenesis, Site-Directed</String></DescriptorName>
+        </DescriptorReferredTo>
+      </SeeRelatedDescriptor>
+      <SeeRelatedDescriptor>
+        <DescriptorReferredTo>
+          <DescriptorUI>D019020</DescriptorUI>
+          <DescriptorName><String>Directed Molecular Evolution</String></DescriptorName>
+        </DescriptorReferredTo>
+      </SeeRelatedDescriptor>
+    </SeeRelatedList>
+    <ConceptList>
+      <Concept PreferredConceptYN="Y">
+        <TermList>
+          <Term RecordPreferredTermYN="Y"><String>Protein Engineering</String></Term>
+          <Term RecordPreferredTermYN="N"><String>Engineering, Protein</String></Term>
+        </TermList>
+      </Concept>
+    </ConceptList>
+  </DescriptorRecord>
+</DescriptorRecordSet>"#
+        )
+        .unwrap();
+        f.flush().unwrap();
+
+        let result = parse_mesh_xml(f.path()).unwrap();
+
+        // D000001: terms must be under D000001, NOT D061207
+        let d1_terms: Vec<&MeshTerm> = result
+            .term_entries
+            .iter()
+            .filter(|t| t.descriptor_ui == "D000001")
+            .collect();
+        assert_eq!(d1_terms.len(), 2);
+        assert_eq!(d1_terms[0].term, "Calcimycin");
+        assert_eq!(d1_terms[0].descriptor_name, "Calcimycin");
+
+        // D015202: terms must be under D015202, NOT D019020
+        let d15202_terms: Vec<&MeshTerm> = result
+            .term_entries
+            .iter()
+            .filter(|t| t.descriptor_ui == "D015202")
+            .collect();
+        assert_eq!(d15202_terms.len(), 2);
+        assert_eq!(d15202_terms[0].term, "Protein Engineering");
+        assert_eq!(d15202_terms[0].descriptor_name, "Protein Engineering");
+        assert!(d15202_terms[0].is_preferred);
+
+        // No terms should exist for the nested reference UIs
+        assert!(result.term_entries.iter().all(|t| t.descriptor_ui != "D061207"));
+        assert!(result.term_entries.iter().all(|t| t.descriptor_ui != "D019020"));
+        assert!(result.term_entries.iter().all(|t| t.descriptor_ui != "D000900"));
+        assert!(result.term_entries.iter().all(|t| t.descriptor_ui != "D016297"));
+
+        // Tree entries: D000001 only (D015202 has no TreeNumberList)
+        assert_eq!(result.tree_entries.len(), 1);
+        assert_eq!(result.tree_entries[0].descriptor_ui, "D000001");
     }
 }
