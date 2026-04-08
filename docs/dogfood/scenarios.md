@@ -10,7 +10,7 @@ scenarios:
   N2: { status: blocked, blocker: embedding, desc: "Start from vsearch" }
   N3: { status: blocked, blocker: FTS, desc: "Search vs mesh comparison" }
   # bridger
-  B1: { status: done,    session: S6, desc: "3-seed steiner bridge" }
+  B1: { status: done,    session: "S6,S12", desc: "3-seed steiner bridge" }
   B2: { status: partial, session: S6, desc: "Close bridge (same field)" }
   B3: { status: done,    session: S11, desc: "Far-field bridge (sp>10)" }
   # surveyor
@@ -113,15 +113,24 @@ compare results → expand (top hit from each)
 **Goal**: Validate steiner bridge (k≥3) in practice. Does it provide
 insights beyond pairwise bridge union?
 
+S6 tested with sp=1 seeds (all directly connected) → empty steiner
+(correct behavior). Need sp=2-4 seeds for meaningful intermediate nodes.
+
 **Key questions**:
-- Does the steiner tree find a reasonable "minimum path" connecting 3 seeds?
-- Does steiner discover papers not found in pairwise bridges?
-- Is computation time acceptable?
+- Does steiner return junction papers not found in any single expand?
+- Are steiner hub papers genuinely useful as narrative backbone?
+- How does steiner differ from shrink union? (connectivity vs coverage)
 
-**Example seeds**: W2766599608 (ABE), W2336828812 (CBE), W2981137429 (prime editing)
+**Example seeds** (verified sp=3/8/∞):
+- W2973445868 (SHERLOCK, CRISPR diagnostics, 2019)
+- W2190054909 (CRISPR gene drive, mosquito, 2015)
+- W3119813698 (in vivo base editing, progeria, 2021)
 
-**Expected workflow**: bridge W... W... W... → analyze steiner results →
-info (steiner hub papers) → expand (central paper)
+**Pre-check**: info --mesh each seed, then 2-seed bridge to verify
+pairwise sp ≥ 2. ABE+CBE+PE (original example) fails because sp=1.
+
+**Expected workflow**: info --mesh (3 seeds) → bridge (2-seed sp check)
+→ bridge (3-seed steiner) → info (steiner hubs) → expand (hub paper)
 
 ---
 
