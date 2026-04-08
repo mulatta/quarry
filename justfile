@@ -13,9 +13,11 @@ default:
 
 # ── Sync (uv) ──
 
-# Sync Python deps
+# Sync Python deps + rebuild Rust extensions (uv sync overwrites maturin .so)
 sync:
     uv sync --all-extras
+    maturin develop --release -m crates/quarry-core/Cargo.toml
+    maturin develop --release -m crates/quarry-graph/Cargo.toml
 
 # ── Dev (debug) ──
 
