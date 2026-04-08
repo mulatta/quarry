@@ -72,16 +72,19 @@ fn parse_byte_range(data: &[u8], range_start: usize, range_end: usize) -> (Vec<i
 }
 
 /// Extract CSR (indptr + indices) from sorted pairs. Does NOT sort — caller must sort first.
-fn extract_csr(pairs: &[(u32, u32)], num_nodes: usize) -> (Vec<u64>, Vec<u32>) {
-    let mut counts = vec![0u64; num_nodes];
+///
+/// indptr is u32: sufficient when num_edges < 2^32 (~4.2 billion).
+/// Current graph has ~2.3B edges, well within u32 range.
+fn extract_csr(pairs: &[(u32, u32)], num_nodes: usize) -> (Vec<u32>, Vec<u32>) {
+    let mut counts = vec![0u32; num_nodes];
     for &(n, _) in pairs {
         counts[n as usize] += 1;
     }
     let mut indptr = Vec::with_capacity(num_nodes + 1);
-    indptr.push(0u64);
-    let mut cumsum = 0u64;
+    indptr.push(0u32);
+    let mut cumsum = 0u32;
     for c in &counts {
-        cumsum += c;
+        cumsum = cumsum.checked_add(*c).expect("edge count exceeds u32::MAX");
         indptr.push(cumsum);
     }
     let indices: Vec<u32> = pairs.iter().map(|&(_, nb)| nb).collect();
@@ -305,22 +308,15 @@ fn build_from_raw_edges(
         write_bin(&rev_dir.join("indices.bin"), &rev_indices).map_err(|e| e.to_string())?;
     }
 
-    // id_map.bin
-    {
-        let mut w = BufWriter::new(
-            File::create(graph_dir.join("id_map.bin")).map_err(|e| e.to_string())?,
-        );
-        for &id in &sorted_ids {
-            writeln!(w, "{}", id).map_err(|e| e.to_string())?;
-        }
-        w.flush().map_err(|e| e.to_string())?;
-    }
+    // id_map.bin — binary i64 array (sorted), mmap-friendly
+    write_bin(&graph_dir.join("id_map.bin"), &sorted_ids).map_err(|e| e.to_string())?;
 
     let build_date = chrono_free_iso8601();
     let meta = serde_json::json!({
         "num_nodes": num_nodes,
         "num_edges": num_edges,
         "build_date": build_date,
+        "format": 2,
     });
     fs::write(
         graph_dir.join("meta.json"),
@@ -493,6 +489,16 @@ mod tests {
         );
     }
 
+    /// Read binary i64 array from id_map.bin
+    fn read_id_map(path: &Path) -> Vec<i64> {
+        let bytes = std::fs::read(path).unwrap();
+        assert_eq!(bytes.len() % 8, 0, "id_map.bin size not multiple of 8");
+        bytes
+            .chunks_exact(8)
+            .map(|chunk| i64::from_le_bytes(chunk.try_into().unwrap()))
+            .collect()
+    }
+
     #[test]
     fn test_build_csr_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
@@ -515,6 +521,19 @@ mod tests {
         let meta: serde_json::Value = serde_json::from_str(&meta_str).unwrap();
         assert_eq!(meta["num_nodes"], 5);
         assert_eq!(meta["num_edges"], 5);
+        assert_eq!(meta["format"], 2);
+
+        // Verify indptr is u32 (5 nodes → 6 entries × 4 bytes = 24)
+        let indptr_size = std::fs::metadata(graph_dir.join("forward/indptr.bin"))
+            .unwrap()
+            .len();
+        assert_eq!(indptr_size, (num_nodes + 1) as u64 * 4);
+
+        // Verify id_map is binary i64 (5 nodes × 8 bytes = 40)
+        let id_map_size = std::fs::metadata(graph_dir.join("id_map.bin"))
+            .unwrap()
+            .len();
+        assert_eq!(id_map_size, num_nodes as u64 * 8);
     }
 
     #[test]
@@ -527,13 +546,8 @@ mod tests {
         assert_eq!(num_nodes, 3);
         assert_eq!(num_edges, 3);
 
-        // Verify id_map contains sorted large IDs
-        let id_map_str = std::fs::read_to_string(graph_dir.join("id_map.bin")).unwrap();
-        let ids: Vec<i64> = id_map_str
-            .lines()
-            .filter(|l| !l.is_empty())
-            .map(|l| l.parse::<i64>().unwrap())
-            .collect();
+        // Verify id_map contains sorted large IDs (binary format)
+        let ids = read_id_map(&graph_dir.join("id_map.bin"));
         assert_eq!(ids.len(), 3);
         assert!(ids.windows(2).all(|w| w[0] < w[1]), "IDs must be sorted");
         assert!(ids.contains(&2741809807));
