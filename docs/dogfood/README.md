@@ -21,6 +21,7 @@ Scores are 5 dimensions × 1-5 scale = max 25.
 | 2026-04-08 | surveyor | [protein eng regression](2026-04-08-protein-eng-regression.md) | 23/25 | +4 | S9 regression: mesh D015202 resolved, NCS+ 48% for enzyme eng |
 | 2026-04-08 | bridger | [far-field bridge](2026-04-08-far-field-bridge.md) | 19/25 | -4 | B3: sp=7 QKD×DNA, coupling finds real cross-domain papers despite MeSH gap |
 | 2026-04-08 | bridger | [steiner CRISPR apps](2026-04-08-steiner-crispr-apps.md) | 24/25 | +5 | B1: first non-empty steiner! 3/4 hubs pairwise-unique, sp=3/8/∞ |
+| 2026-04-08 | surveyor | [prime editing efficiency](2026-04-08-prime-editing-efficiency.md) | 20/25 | -4 | 8 efficiency factor categories mapped; SQL 1m18s bottleneck |
 
 Scenario coverage and priorities: [scenarios.md](scenarios.md)
 
