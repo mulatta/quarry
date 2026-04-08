@@ -85,7 +85,9 @@ Options: `--full` (show full abstract), `--mesh` (show MeSH tags),
 
 MeSH-based paper discovery and hierarchy browsing. Finds papers
 by curated MeSH vocabulary — precise topic filtering without
-keyword noise.
+keyword noise. MeSH covers biomedical/life sciences only; CS,
+physics, math topics are absent. Use `sql` with title ILIKE
+for non-biomedical fields.
 
 ```
 quarry mesh "retroelement"        # search by name → top papers
