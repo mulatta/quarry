@@ -30,6 +30,7 @@ def run_expand(
     alpha: float = 0.15,
     epsilon: float = 1e-6,
     limit: int = 200,
+    min_citations: int = 0,
     include_abstract: bool = False,
 ) -> dict[str, Any]:
     """Run expand pipeline: resolve → compute → enrich → assemble.
@@ -43,10 +44,11 @@ def run_expand(
     if not graph.has_node(seed_id):
         raise ValueError(f"Seed {seed_id} not found in graph")
 
-    # Rust expand
+    # Rust expand (over-fetch when filtering by citations)
+    internal_limit = min(limit * 5, 5000) if min_citations > 0 else limit
     t0 = time.perf_counter()
     papers, stats = graph.expand(
-        seed_id, alpha=alpha, epsilon=epsilon, mode=mode, limit=limit
+        seed_id, alpha=alpha, epsilon=epsilon, mode=mode, limit=internal_limit
     )
     elapsed = time.perf_counter() - t0
 
@@ -83,6 +85,15 @@ def run_expand(
     metadata = _enrich_metadata(
         all_wids, pg_conninfo, include_abstract=include_abstract
     )
+
+    # Post-filter by citation count
+    if min_citations > 0:
+        classified = [
+            p
+            for p in classified
+            if (metadata.get(p["work_id"], {}).get("cited_by_count") or 0)
+            >= min_citations
+        ][:limit]
 
     # Seed metadata
     seed_meta = _enrich_metadata([seed_id], pg_conninfo, include_abstract=False)

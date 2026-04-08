@@ -420,6 +420,9 @@ def expand(
     ),
     alpha: float = typer.Option(0.15, "--alpha", help="APPR teleport probability"),
     epsilon: float = typer.Option(1e-6, "--epsilon", help="APPR precision threshold"),
+    min_citations: int = typer.Option(
+        0, "--min-citations", help="Minimum cited_by_count filter (0=disabled)"
+    ),
 ):
     """Expand seed paper into a ranked subgraph of related papers.
 
@@ -443,6 +446,7 @@ def expand(
             alpha=alpha,
             epsilon=epsilon,
             limit=limit,
+            min_citations=min_citations,
             include_abstract=(fmt == "detail"),
         )
     except ValueError as e:
