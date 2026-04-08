@@ -95,6 +95,12 @@ quarry mesh D018626 --tree        # show hierarchy (parents/children)
 
 Options: `--tree` (show hierarchy), `--limit N` (default 15)
 
+**Seed selection tip**: the top-cited paper in a MeSH descriptor may
+be a niche subfield (e.g., fluorescent proteins under "Protein
+Engineering"). Use `info --mesh` on candidates to verify they are
+field-representative before using as expand seeds. Review papers
+or highly-cited recent papers with broad MeSH tags are better seeds.
+
 ### quarry sql "<SELECT query>"
 
 Execute read-only SQL against PostgreSQL metadata. Development-only
