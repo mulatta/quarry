@@ -2,21 +2,21 @@
 scenarios:
   # reader
   R1: { status: done,    session: S5, desc: "Start from DOI" }
-  R2: { status: open,    priority: P2, desc: "Expand → lateral → bridge" }
+  R2: { status: done,    session: S14, desc: "Expand → lateral → bridge" }
   R3: { status: done,    session: S5, desc: "Expand → shrink" }
-  R4: { status: open,    priority: P3, desc: "Old classic paper as seed" }
+  R4: { status: done,    session: S14, desc: "Old classic paper as seed" }
   # newbie
   N1: { status: blocked, blocker: FTS, priority: P1, desc: "Start from search" }
   N2: { status: blocked, blocker: embedding, desc: "Start from vsearch" }
   N3: { status: blocked, blocker: FTS, desc: "Search vs mesh comparison" }
   # bridger
   B1: { status: done,    session: "S6,S12", desc: "3-seed steiner bridge" }
-  B2: { status: partial, session: S6, desc: "Close bridge (same field)" }
+  B2: { status: done,    session: "S6,S14", desc: "Close bridge (same field)" }
   B3: { status: done,    session: S11, desc: "Far-field bridge (sp>10)" }
   # surveyor
   S1: { status: done,    session: "S2,S4,S6,S9", desc: "mesh-summary → drill-down loop" }
   S2: { status: done,    session: S8, desc: "Shrink venue comparison" }
-  S3: { status: open,    priority: P2, desc: "Chronological lineage + bridge chain" }
+  S3: { status: done,    session: S14, desc: "Chronological lineage + bridge chain" }
 ---
 
 # Dogfood Scenarios
