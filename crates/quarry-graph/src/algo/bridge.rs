@@ -228,11 +228,17 @@ pub fn compute(graph: &Graph, seeds: &[i64], params: &BridgeParams) -> BridgeRes
     result.stats.per_seed_ref_count = neighbors.refs.iter().map(|s| s.len()).collect();
     result.stats.per_seed_citer_count = neighbors.citers.iter().map(|s| s.len()).collect();
 
-    // Pairwise shortest path (lightweight BFS, max_depth from params)
+    // Pairwise shortest path — min of both directions (directed graph is asymmetric)
     let k = seed_indices.len();
     for i in 0..k {
         for j in (i + 1)..k {
-            let sp = shortest_path_length(graph, seed_indices[i], seed_indices[j], params.max_path_depth);
+            let sp_ij = shortest_path_length(graph, seed_indices[i], seed_indices[j], params.max_path_depth);
+            let sp_ji = shortest_path_length(graph, seed_indices[j], seed_indices[i], params.max_path_depth);
+            let sp = match (sp_ij, sp_ji) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a @ Some(_), None) | (None, a @ Some(_)) => a,
+                (None, None) => None,
+            };
             result.stats.pairwise_sp.push((i, j, sp));
         }
     }
@@ -565,10 +571,21 @@ fn path_bridges(
     max_depth: usize,
 ) -> (Vec<PathEntry>, Option<usize>) {
     if seed_indices.len() == 2 {
-        return path_bridges_pair(
+        let (e_fwd, sp_fwd) = path_bridges_pair(
             graph, seed_indices[0], seed_indices[1],
             seed_set, limit, max_depth,
         );
+        let (e_rev, sp_rev) = path_bridges_pair(
+            graph, seed_indices[1], seed_indices[0],
+            seed_set, limit, max_depth,
+        );
+        return match (sp_fwd, sp_rev) {
+            (Some(a), Some(b)) if a <= b => (e_fwd, sp_fwd),
+            (Some(_), Some(_)) => (e_rev, sp_rev),
+            (Some(_), None) => (e_fwd, sp_fwd),
+            (None, Some(_)) => (e_rev, sp_rev),
+            (None, None) => (vec![], None),
+        };
     }
 
     // k > 2: pairwise, merge results
@@ -577,10 +594,21 @@ fn path_bridges(
 
     for i in 0..seed_indices.len() {
         for j in (i + 1)..seed_indices.len() {
-            let (entries, sp_len) = path_bridges_pair(
+            let (e_fwd, sp_fwd) = path_bridges_pair(
                 graph, seed_indices[i], seed_indices[j],
                 seed_set, 0, max_depth,
             );
+            let (e_rev, sp_rev) = path_bridges_pair(
+                graph, seed_indices[j], seed_indices[i],
+                seed_set, 0, max_depth,
+            );
+            let (entries, sp_len) = match (sp_fwd, sp_rev) {
+                (Some(a), Some(b)) if a <= b => (e_fwd, sp_fwd),
+                (Some(_), Some(_)) => (e_rev, sp_rev),
+                (Some(_), None) => (e_fwd, sp_fwd),
+                (None, Some(_)) => (e_rev, sp_rev),
+                (None, None) => (vec![], None),
+            };
             if let Some(d) = sp_len {
                 min_sp_len = Some(min_sp_len.map_or(d, |m: usize| m.min(d)));
             }
@@ -1634,6 +1662,51 @@ mod tests {
         let result = compute(&g, &seeds, &params);
         assert!(result.path_bridges.is_empty());
         assert!(result.stats.shortest_path_length.is_none());
+    }
+
+    #[test]
+    fn pairwise_sp_asymmetric() {
+        // A(1) → B(2) → C(3), no reverse edges.
+        // sp(1→2) = 1, sp(2→1) = None → min = 1
+        // sp(1→3) = 2, sp(3→1) = None → min = 2
+        // Regardless of seed order, pairwise_sp should pick the shorter direction.
+        let dir = tempfile::tempdir().unwrap();
+        let csv_path = dir.path().join("asym.csv");
+        {
+            use std::io::Write;
+            let mut f = std::fs::File::create(&csv_path).unwrap();
+            writeln!(f, "citing,cited").unwrap();
+            writeln!(f, "1,2").unwrap();
+            writeln!(f, "2,3").unwrap();
+        }
+        let graph_dir = dir.path().join("graph");
+        crate::build::build_from_csv_raw(&csv_path, &graph_dir).unwrap();
+        std::mem::forget(dir);
+        let g = Graph::open(&graph_dir).unwrap();
+
+        // seeds = [2, 1] — "wrong" order where src=2→dst=1 has no forward path
+        let params = BridgeParams {
+            types: vec![BridgeType::Path],
+            max_path_depth: 10,
+            ..Default::default()
+        };
+        let result = compute(&g, &[2, 1], &params);
+        // pairwise_sp should be 1 (from 1→2 direction)
+        assert_eq!(result.stats.pairwise_sp.len(), 1);
+        let (_, _, sp) = result.stats.pairwise_sp[0];
+        assert_eq!(sp, Some(1), "min(sp(2→1)=None, sp(1→2)=1) = 1");
+
+        // path_bridges should find the path via the shorter direction
+        assert_eq!(
+            result.stats.shortest_path_length,
+            Some(1),
+            "path bridges sp should also be 1"
+        );
+
+        // Reversed seed order should give same result
+        let result2 = compute(&g, &[1, 2], &params);
+        assert_eq!(result2.stats.pairwise_sp[0].2, Some(1));
+        assert_eq!(result2.stats.shortest_path_length, Some(1));
     }
 
     // -- Integration tests (require real CSR graph) --
