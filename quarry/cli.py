@@ -760,13 +760,22 @@ def _empty_bridge_reason(key: str, result: dict) -> str | None:
             return "requires 3+ seeds"
         pairwise = result.get("stats", {}).get("pairwise_sp", [])
         unreachable = sum(1 for _, _, s in pairwise if s is None)
+        all_sp1 = all(s == 1 for _, _, s in pairwise if s is not None)
         if unreachable:
-            return f"no steiner tree ({unreachable}/{len(pairwise)} pairs unreachable)"
-        return "no intermediate nodes (all pairs directly connected)"
+            return (
+                f"no steiner tree ({unreachable}/{len(pairwise)} pairs unreachable)"
+                " → try closer seeds or use pairwise bridge"
+            )
+        if all_sp1:
+            return (
+                "no intermediate nodes (all pairs sp=1)"
+                " → seeds directly connected, use expand instead"
+            )
+        return "no intermediate nodes found"
     if key == "path_bridges":
         if sp == 1:
-            return "seeds directly connected (sp=1), no stepping stones"
-        return "no path found within max depth"
+            return "seeds directly connected (sp=1), no stepping stones needed"
+        return "no path found within max depth → try increasing --max-path-depth"
     return None
 
 

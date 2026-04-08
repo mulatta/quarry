@@ -63,14 +63,26 @@ Header shows pairwise shortest path for each seed pair:
 Use this to assess seed compatibility — many ∞ pairs means seeds
 are directionally disconnected (consider expand instead of bridge).
 
-Empty bridge types show a diagnostic reason (e.g., "no steiner tree
-(2/3 pairs unreachable)").
+Empty bridge types show a diagnostic reason with actionable
+suggestion (e.g., "use expand instead", "try closer seeds").
 
 Options: `--type <type>` (filter to specific type), `--limit N`,
 `--format table|json|detail`, `--max-path-depth N`, `--alpha`, `--epsilon`
 
 Bridge types: common_refs, common_citers, coupling, cocitation,
 path, ppr, steiner (k>=3 only)
+
+**Steiner usage**: steiner finds the minimal set of junction papers
+connecting 3+ seeds — papers you wouldn't find by expanding any
+single seed. It answers "what do I read to understand how these
+fields relate?" (connectivity), unlike shrink which answers "what
+do I read to understand this field?" (coverage).
+
+Before running steiner (k≥3):
+1. `info --mesh` each seed to verify they're from distinct subfields
+2. Run 2-seed bridge first to check pairwise sp values
+3. Ideal: all pairs sp=2-4 (directly connected seeds give empty
+   steiner; unreachable seeds give no tree at all)
 
 ### quarry info \<work_id> [work_id2 ...]
 
