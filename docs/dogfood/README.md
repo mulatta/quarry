@@ -19,6 +19,7 @@ Scores are 5 dimensions × 1-5 scale = max 25.
 | 2026-04-08 | surveyor | [shrink venue comparison](2026-04-08-shrink-venue-comparison.md) | 23/25 | -2 | NCS+ = custom for NCS-concentrated fields; venue preset needed |
 | 2026-04-08 | surveyor | [protein engineering](2026-04-08-protein-engineering.md) | 19/25 | -4 | mesh search misses exact descriptors, S1 drill-down loop validated |
 | 2026-04-08 | surveyor | [protein eng regression](2026-04-08-protein-eng-regression.md) | 23/25 | +4 | S9 regression: mesh D015202 resolved, NCS+ 48% for enzyme eng |
+| 2026-04-08 | bridger | [far-field bridge](2026-04-08-far-field-bridge.md) | 19/25 | -4 | B3: sp=7 QKD×DNA, coupling finds real cross-domain papers despite MeSH gap |
 
 Scenario coverage and priorities: [scenarios.md](scenarios.md)
 
