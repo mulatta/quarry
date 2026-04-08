@@ -1,5 +1,5 @@
 lockfile_version: '1'
-generated_at: '2026-04-07T13:48:19.212645+00:00'
+generated_at: '2026-04-09T05:40:29.294382+00:00'
 apm_version: 0.8.10
 dependencies:
 - repo_url: ClickHouse/agent-skills
@@ -43,3 +43,10 @@ dependencies:
   deployed_files:
   - .claude/skills/dignified-python
   content_hash: sha256:15ba6b8a7ef46ffa038dd5b3a4a5f35a53a11039c6fd2b3d044256b22211f8da
+- repo_url: revfactory/harness
+  host: github.com
+  resolved_commit: 3bfc442a02e64a37bd0f312dd2ae9bd3b7d9f251
+  package_type: apm_package
+  deployed_files:
+  - .claude/skills/harness
+  content_hash: sha256:ee4a6700a741877750726a176c7b7b12d6fd94d7d92d22e34774126aa92c8b19
