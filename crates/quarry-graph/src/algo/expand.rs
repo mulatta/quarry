@@ -514,12 +514,18 @@ mod tests {
     fn write_test_graph(dir: &std::path::Path, n: usize, ids: &[i64], edges: &[(u32, u32)]) {
         std::fs::write(
             dir.join("meta.json"),
-            format!(r#"{{"num_nodes":{n},"num_edges":{}}}"#, edges.len()),
+            format!(r#"{{"num_nodes":{n},"num_edges":{},"format":2}}"#, edges.len()),
         )
         .unwrap();
 
-        let id_map: String = ids.iter().map(|id| format!("{id}\n")).collect();
-        std::fs::write(dir.join("id_map.bin"), id_map).unwrap();
+        // id_map.bin — binary i64 array
+        {
+            use std::io::Write;
+            let mut f = std::fs::File::create(dir.join("id_map.bin")).unwrap();
+            for &id in ids {
+                f.write_all(&id.to_le_bytes()).unwrap();
+            }
+        }
 
         let fwd_dir = dir.join("forward");
         std::fs::create_dir_all(&fwd_dir).unwrap();
@@ -540,20 +546,20 @@ mod tests {
 
     fn write_csr(dir: &std::path::Path, n: usize, adj: &[Vec<u32>]) {
         use std::io::Write;
-        let mut indptr: Vec<u64> = Vec::with_capacity(n + 1);
+        let mut indptr: Vec<u32> = Vec::with_capacity(n + 1);
         let mut indices: Vec<u32> = Vec::new();
         indptr.push(0);
         for neighbors in adj {
             indices.extend_from_slice(neighbors);
-            indptr.push(indices.len() as u64);
+            indptr.push(indices.len() as u32);
         }
         let mut f = std::fs::File::create(dir.join("indptr.bin")).unwrap();
         for &v in &indptr {
-            f.write_all(&v.to_ne_bytes()).unwrap();
+            f.write_all(&v.to_le_bytes()).unwrap();
         }
         let mut f = std::fs::File::create(dir.join("indices.bin")).unwrap();
         for &v in &indices {
-            f.write_all(&v.to_ne_bytes()).unwrap();
+            f.write_all(&v.to_le_bytes()).unwrap();
         }
     }
 
