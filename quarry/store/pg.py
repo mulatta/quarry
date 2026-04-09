@@ -162,9 +162,14 @@ class PGStore:
     # -- v2 (OpenAlex) read queries --
 
     def get_work(self, work_id: str) -> dict | None:
-        """Get a single work by OpenAlex work_id."""
+        """Get a single work by OpenAlex work_id, enriched with pmc_id."""
         with self.conn.cursor(row_factory=dict_row) as cur:
-            cur.execute("SELECT * FROM works WHERE work_id = %s", (work_id,))
+            cur.execute(
+                "SELECT w.*, c.pmc_id "
+                "FROM works w LEFT JOIN id_crosswalk c ON w.work_id = c.work_id "
+                "WHERE w.work_id = %s",
+                (work_id,),
+            )
             return cur.fetchone()
 
     def get_works(self, work_ids: list[str]) -> list[dict]:
@@ -179,15 +184,25 @@ class PGStore:
             return cur.fetchall()
 
     def get_work_by_pmid(self, pmid: int) -> dict | None:
-        """Get a single work by PMID (via works table)."""
+        """Get a single work by PMID (via works table), enriched with pmc_id."""
         with self.conn.cursor(row_factory=dict_row) as cur:
-            cur.execute("SELECT * FROM works WHERE pmid = %s", (pmid,))
+            cur.execute(
+                "SELECT w.*, c.pmc_id "
+                "FROM works w LEFT JOIN id_crosswalk c ON w.work_id = c.work_id "
+                "WHERE w.pmid = %s",
+                (pmid,),
+            )
             return cur.fetchone()
 
     def get_work_by_doi(self, doi: str) -> dict | None:
-        """Get a single work by DOI."""
+        """Get a single work by DOI, enriched with pmc_id."""
         with self.conn.cursor(row_factory=dict_row) as cur:
-            cur.execute("SELECT * FROM works WHERE doi = %s", (doi,))
+            cur.execute(
+                "SELECT w.*, c.pmc_id "
+                "FROM works w LEFT JOIN id_crosswalk c ON w.work_id = c.work_id "
+                "WHERE w.doi = %s",
+                (doi,),
+            )
             return cur.fetchone()
 
     def get_work_mesh(self, work_id: str) -> list[dict]:

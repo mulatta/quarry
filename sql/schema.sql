@@ -203,7 +203,8 @@ CREATE TABLE IF NOT EXISTS work_citations (
 
 CREATE TABLE IF NOT EXISTS id_crosswalk (
     work_id TEXT PRIMARY KEY,
-    pmid    INTEGER NOT NULL
+    pmid    INTEGER NOT NULL,
+    pmc_id  TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_works_work_id_int ON works(work_id_int);

@@ -145,6 +145,19 @@ SELECT
 FROM pm_papers p
 LEFT JOIN icite_raw i ON p.pmid = i.pmid;
 
+/* 3b. id_crosswalk_export: crosswalk enriched with pmc_id from PubMed */
+
+CREATE OR REPLACE TABLE id_crosswalk_export
+ENGINE = MergeTree()
+ORDER BY work_id
+AS
+SELECT
+    c.work_id   AS work_id,
+    c.pmid      AS pmid,
+    p.pmc_id    AS pmc_id
+FROM oa_id_crosswalk c
+LEFT JOIN pm_papers p ON c.pmid = p.pmid;
+
 /* 4. work_mesh_export: crosswalk JOIN for OA work → MeSH mapping */
 
 CREATE OR REPLACE TABLE work_mesh_export
