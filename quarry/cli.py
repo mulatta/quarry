@@ -95,6 +95,8 @@ def info(
                 "title": r.get("title"),
                 "pub_year": r.get("pub_year"),
                 "doi": r.get("doi"),
+                "pmid": r.get("pmid"),
+                "pmc_id": r.get("pmc_id"),
                 "host_venue": r.get("host_venue"),
                 "cited_by_count": r.get("cited_by_count"),
                 "rcr": r.get("rcr"),
@@ -120,8 +122,11 @@ def info(
                 f"  year={r.get('pub_year', '-')}  cited_by={r.get('cited_by_count', '-')}  "
                 f"rcr={r.get('rcr', '-')}  oa={r.get('oa_status', '-')}"
             )
+            pmid_str = r.get("pmid") or "-"
+            pmc_str = r.get("pmc_id") or "-"
             console.print(f"  venue={r.get('host_venue', '-')}")
             console.print(f"  doi={r.get('doi', '-')}")
+            console.print(f"  pmid={pmid_str}  pmc={pmc_str}")
             if full and r.get("abstract"):
                 console.print(f"  [dim]{r['abstract']}[/dim]")
             if show_mesh:
@@ -365,7 +370,7 @@ _SCHEMA_HELP: dict[str, list[tuple[str, str]]] = {
     "id_crosswalk": [
         ("work_id", "text"),
         ("pmid", "integer"),
-        ("doi", "text"),
+        ("pmc_id", "text — PMC ID (e.g. PMC12749249)"),
     ],
 }
 
