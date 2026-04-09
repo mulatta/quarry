@@ -20,51 +20,45 @@ The Python CLI is ~200 lines of thin wrapper around Rust .so (via PyO3).
 
 | Phase | Architecture | Rationale |
 |-------|-------------|-----------|
-| 1b (now) | Python CLI + Rust .so | Working, no performance issue. Avoid delay. |
-| 2 | Evaluate pure Rust CLI | If MCP expand duplication or deployment burden triggers |
-| 3 | Server-client (Rust server + gRPC) | When embedding service (Python) is added |
+| 1b (now) | Python CLI + Rust .so | Working. FFI overhead measured at \<7% (bridge), negligible elsewhere. |
+| 2 | Server-client (Python server) | Agent + eval need quarry as service. QuarryClient abstraction (local/remote). |
+| 3 | Rust server (axum) | When PG enrichment migrated to Rust. Protocol TBD (HTTP/gRPC/WS). |
 
-### Migration Triggers (Phase 2)
+### Migration Triggers (Phase 2 → 3)
 
-Migrate to pure Rust CLI when **any** of these occur:
+Migrate server to Rust when **any** of these occur:
 
-- MCP server needs `expand()` → logic duplication becomes real
-- Output schema has downstream consumers that need type safety
-- Python dependency (pydantic, psycopg, rich) becomes deployment burden
+- Real-time streaming needed (agent graph visualization)
+- PG enrichment rewritten in Rust (sqlx)
+- Python server becomes deployment burden
 
-### Phase 3 Embedding Architecture (Pre-decided)
+### FFI Overhead Assessment (2026-04-09)
 
-```
-Python embedding service (sentence-transformers + LanceDB)
-  ↕ gRPC
-Rust CLI / Rust server
-  ↕ mmap
-CSR graph
-```
+Measured on 48-core / 188GB / NVMe:
 
-Python stays for embedding inference. Rust stays for graph computation.
-gRPC bridges them. This means Phase 2 Rust CLI should include gRPC client
-scaffolding for Phase 3 readiness.
+| Operation | Python total | Rust internal | FFI overhead |
+|-----------|-------------|---------------|-------------|
+| expand(200) | 0.88s | 0.90s | ~0ms |
+| bridge(2 seeds) | 0.90s | 0.91s | ~0ms |
+| bridge(5 seeds) | 2.12s | 2.12s | ~0ms |
 
-### Mitigation: Shared Logic Extraction
+Pure Rust CLI rewrite yields \<7% improvement — insufficient ROI.
+Bridge parallelization (rayon) yielded 5-6x improvement instead.
 
-To minimize Phase 2 migration cost, extract expand logic into
-`quarry/core/expand.py` — a pure function that both CLI and MCP server
-call. This function becomes the exact scope of Rust migration.
+### Shared Logic Extraction (Done)
 
-```python
-# quarry/core/expand.py
-def run_expand(seed, mode, limit, ...) -> dict:
-    """Resolve seed → Rust expand → PG enrich → JSON-ready dict."""
-```
+`quarry/core/expand.py` and `quarry/core/bridge.py` are pure functions
+that CLI, agent, and eval all call. `QuarryClient` wraps these with
+local (direct import) or remote (HTTP) backend.
 
 ### Alternatives Considered
 
 | Alternative | Why not (now) |
 |-------------|--------------|
-| Pure Rust CLI now | Phase 1b delayed. PyO3 binding still needed for MCP. Maintenance doesn't decrease. |
-| Server-client now | Over-engineering for single-user CLI. No embedding service yet. |
-| Keep Python forever | maturin .venv issues recurring. Schema safety weak (dict-based). |
+| Pure Rust CLI now | FFI overhead \<7%. Measured, not justified. PG enrichment rewrite required. |
+| gRPC now | Unary payloads \<50KB. gRPC streaming not needed until real-time viz. Protocol TBD. |
+| BAML | Solves 20% of problem (structured output) with 100% dependency. Pydantic + tool_use sufficient. |
+| LangGraph | Over-engineering. Python for/while loops sufficient for DAG orchestration. |
 
 ## AD-2: Quality Signals as Metadata Only
 
@@ -898,3 +892,72 @@ Add `--min-citations N` as a Python post-filter:
 - `quarry/core/expand.py:run_expand()` (internal_limit, post-filter)
 - `quarry/cli.py:expand()` (--min-citations option)
 - Dogfood S15: `docs/dogfood/2026-04-08-f1-f2-regression.md`
+
+## AD-13: Server-Client Architecture and Protocol
+
+**Date**: 2026-04-09
+**Status**: Active
+
+### Context
+
+quarry has multiple consumers (CLI, agent, eval, future web UI) that all
+need the same operations (expand, bridge, mesh, info). Currently each
+consumer imports `quarry.core` directly. This works for single-machine
+use but doesn't support:
+
+- External users without PG/CSR infrastructure
+- Agent running on a different machine than data
+- Real-time web visualization of agent reasoning
+
+### Decision
+
+Introduce `QuarryClient` abstraction with local and remote backends.
+Server implementation and protocol are deferred until workload is clear.
+
+| Phase | Server | Client | Protocol |
+|-------|--------|--------|----------|
+| Now | None (direct import) | QuarryClient(local) | Python function call |
+| 2 | Python (Starlette) | QuarryClient(remote) | HTTP+JSON, unix socket |
+| 3 | Rust (axum) or Python | QuarryClient(remote) | TBD (HTTP/gRPC/WS) |
+
+### Protocol Decision: Deferred
+
+Protocol choice depends on workload, which is not yet confirmed:
+
+| Workload | Best protocol | Why |
+|----------|--------------|-----|
+| Unary request-response only | HTTP+JSON | Simplest, curl-testable |
+| Server→client streaming (progress) | WebSocket or gRPC server stream | Real-time updates |
+| Bidirectional (user intervention) | WebSocket or gRPC bidi | Agent viz + user control |
+| Typed graph schema (concept graph) | Protobuf schema + any transport | Schema enforcement across languages |
+
+gRPC advantages (typed, streaming, multi-language codegen) only matter
+when real-time viz and concept graph are confirmed workloads. Until then,
+HTTP+JSON is sufficient and adds zero complexity.
+
+### Graph Data Schema: Deferred
+
+Future real-time visualization needs a typed concept graph (papers,
+sub-problems, MeSH concepts, reasoning steps as nodes; citations,
+dependencies, bridges as edges). Schema format (protobuf, JSON Schema,
+or other) depends on:
+
+- Frontend framework choice (affects serialization needs)
+- Streaming granularity (full snapshot vs incremental delta)
+- Whether concept connection verification needs graph queries
+
+Decision to be made when visualization workload is concrete.
+
+### Alternatives Considered
+
+| Alternative | Why not (now) |
+|-------------|--------------|
+| gRPC now | Unary payloads \<50KB. Streaming not needed yet. Adds protoc build step. |
+| REST-only forever | Insufficient if real-time viz confirmed |
+| GraphQL | Over-engineering for known query patterns (expand, bridge, mesh) |
+
+### References
+
+- AD-1: FFI overhead assessment (2026-04-09)
+- AI-Scientist: pure Python orchestrator, no server (reference)
+- STORM: DSPy + LiteLLM, no server (reference)
