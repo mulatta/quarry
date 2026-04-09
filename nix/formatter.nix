@@ -3,6 +3,11 @@
   imports = [ inputs.treefmt-nix.flakeModule ];
   perSystem.treefmt = {
     projectRootFile = "flake.nix";
+    # Exclude skill files — mdformat mangles YAML frontmatter (--- → ## heading)
+    settings.global.excludes = [
+      ".claude/skills/**"
+      "docs/dogfood/**"
+    ];
     programs = {
       nixfmt.enable = true;
       deadnix.enable = true;

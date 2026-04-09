@@ -127,8 +127,11 @@ leave-one-out, symmetry, expert judgment. See: [09-evaluation.md](09-evaluation.
 | 1a | APPR (push-based) | **Done** |
 | 1b | expand(fused/separated) + AA coupling/cocite + wRRF + CLI | **Done** |
 | 2a | Bridge discovery (7 types: LCA, CD, coupling, cocite, path, PPR, Steiner) | Design confirmed — [design](11-bridge.md) |
+| 2a+ | CLI `info` command + expand/bridge output enrichment (DOI, venue, cited_by) | **Done** — [AD-8](10-architecture-decisions.md#ad-8-info-command-and-sql-lifecycle) |
+| 2a++ | CLI `mesh` command + `info --mesh` + `expand --mesh-summary` | **Done** — [AD-9](10-architecture-decisions.md#ad-9-mesh-cli-exposure-and-ontology-strategy) |
+| 2a+++ | CLI `shrink` — minimum covering paper set from top venues | Planned — [AD-10](10-architecture-decisions.md#ad-10-shrink--minimum-covering-paper-set) |
 | 2b | MCP server expand tool | Planned (deferred) |
-| 3 | Content (embedding, BM25) + embedding bridge candidates + HKPR re-eval | After embeddings |
+| 3 | Content (embedding, BM25, MeSH overlap) + embedding bridge candidates + HKPR re-eval | After embeddings |
 | 4 | Temporal | Long-term |
 
 Direction-restricted APPR **rejected** — experiment showed bidirectional APPR

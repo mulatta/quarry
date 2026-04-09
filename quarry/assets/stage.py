@@ -19,7 +19,7 @@ from quarry.config import settings
 @asset(
     group_name="supplementary",
     deps=[mesh_descriptor_sync],
-    description="Parse MeSH descriptor XML → Parquet via quarry-parse.",
+    description="Parse MeSH descriptor XML → mesh_tree.parquet + mesh_terms.parquet via quarry-parse.",
     kinds={"rust", "parquet"},
     automation_condition=AutomationCondition.eager(),
 )

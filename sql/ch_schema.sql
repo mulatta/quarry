@@ -164,6 +164,17 @@ CREATE TABLE IF NOT EXISTS pm_mesh_tree (
 ) ENGINE = ReplacingMergeTree()
 ORDER BY (descriptor_ui, tree_number);
 
+/* MeSH entry terms (synonyms) from desc*.xml ConceptList/Term.
+   Columns match mesh_terms.parquet (descriptor_ui, descriptor_name, term, is_preferred).
+   Transformed into PG mesh_lookup with source/has_tree columns at pg_load time. */
+CREATE TABLE IF NOT EXISTS pm_mesh_terms (
+    descriptor_ui   String,
+    descriptor_name String,
+    term            String,
+    is_preferred    Bool
+) ENGINE = ReplacingMergeTree()
+ORDER BY (descriptor_ui, term);
+
 /* iCite raw table */
 
 CREATE TABLE IF NOT EXISTS icite_raw (

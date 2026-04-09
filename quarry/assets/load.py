@@ -1,12 +1,12 @@
-"""ELT pipeline assets: init → parse → CH load → CH transform → parquet → serve.
+"""ELT pipeline assets: init → parse → CH load → CH transform → serve.
 
 Asset graph:
                                                 ch_init ────────┐
   oa_sync ──→ oa_parse ──────────┐              (DB + tables)   │
                                  │                              │
-  pm_sync ──→ pm_parse ──────────┼──→ ch_load ──→ ch_transform ──→ parquet_export ──┬──→ pg_load
-                                 │                                                  ├──→ paper_embeddings
-  mesh_sync ──→ mesh_stage ──────┤                                                  └──→ csr_graph
+  pm_sync ──→ pm_parse ──────────┼──→ ch_load ──→ ch_transform ──┬──→ pg_load (CH → CSV → psql)
+                                 │                               ├──→ paper_embeddings (CH → ArrowStream → GPU)
+  mesh_sync ──→ mesh_stage ──────┤                               └──→ parquet_export ──→ csr_graph
                                  │
   icite_sync ────────────────────┘
 
@@ -325,19 +325,29 @@ def ch_load_pm(context: AssetExecutionContext) -> MaterializeResult:
 @asset(
     group_name="load",
     deps=[ch_init, mesh_stage],
-    description="MeSH Parquet → CH: pm_mesh_tree.",
+    description="MeSH Parquet → CH: pm_mesh_tree + pm_mesh_terms.",
     kinds={"clickhouse"},
 )
 def ch_load_mesh(context: AssetExecutionContext) -> MaterializeResult:
-    mesh_parquet = settings.mesh_parquet_dir / "mesh_tree.parquet"
-    if not mesh_parquet.exists():
-        context.log.warning(f"MeSH Parquet not found: {mesh_parquet}, skipping")
+    mesh_tree_parquet = settings.mesh_parquet_dir / "mesh_tree.parquet"
+    mesh_terms_parquet = settings.mesh_parquet_dir / "mesh_terms.parquet"
+
+    if not mesh_tree_parquet.exists():
+        context.log.warning(f"MeSH Parquet not found: {mesh_tree_parquet}, skipping")
         return MaterializeResult(metadata={"status": MetadataValue.text("skipped")})
-    _ch_load_tables(
-        ["pm_mesh_tree"],
-        [("pm_mesh_tree", str(mesh_parquet), "Parquet")],
-        context,
-    )
+
+    tables_to_truncate = ["pm_mesh_tree"]
+    loads = [("pm_mesh_tree", str(mesh_tree_parquet), "Parquet")]
+
+    if mesh_terms_parquet.exists():
+        tables_to_truncate.append("pm_mesh_terms")
+        loads.append(("pm_mesh_terms", str(mesh_terms_parquet), "Parquet"))
+    else:
+        context.log.warning(
+            f"MeSH terms Parquet not found: {mesh_terms_parquet}, skipping terms"
+        )
+
+    _ch_load_tables(tables_to_truncate, loads, context)
     return MaterializeResult(metadata={"status": MetadataValue.text("ok")})
 
 
@@ -384,6 +394,7 @@ def ch_transform(context: AssetExecutionContext) -> MaterializeResult:
         "pm_grants",
         "pm_chemicals",
         "pm_mesh_tree",
+        "pm_mesh_terms",
         "icite_raw",
     ]
 
@@ -533,6 +544,13 @@ _EXPORT_TABLES: list[tuple[str, str, str]] = [
     ),
     ("oa_id_crosswalk", "id_crosswalk", "work_id, pmid"),
     ("pm_mesh_tree", "mesh_tree", "descriptor_ui, descriptor_name, tree_number"),
+    # mesh_lookup entry terms: CH mesh_lookup_export adds source/has_tree columns.
+    # Historical descriptors (has_tree=false) added in post-load step.
+    (
+        "mesh_lookup_export",
+        "mesh_lookup",
+        "descriptor_ui, descriptor_name, term, source, has_tree",
+    ),
     (
         "work_mesh_export",
         "work_mesh",
@@ -784,7 +802,8 @@ def pg_load(context: AssetExecutionContext, pg: PGResource) -> MaterializeResult
     _psql(
         "TRUNCATE papers, authors, mesh_headings, grants, chemicals, "
         "cited_by_clin, works, work_authors, work_topics, work_mesh, "
-        "work_citations, work_counts_by_year, id_crosswalk, mesh_tree CASCADE",
+        "work_citations, work_counts_by_year, id_crosswalk, mesh_tree, "
+        "mesh_lookup CASCADE",
         context,
         label="[PG] truncating all tables",
     )
@@ -843,6 +862,30 @@ def pg_load(context: AssetExecutionContext, pg: PGResource) -> MaterializeResult
     _psql("VACUUM ANALYZE works", context, label="[PG] VACUUM ANALYZE works")
     for _, t, _ in _EXPORT_TABLES:
         _psql(f"VACUUM ANALYZE {t}", context, label=f"[PG] VACUUM ANALYZE {t}")
+
+    # mesh_lookup: unified search index for MeSH synonym lookup.
+    # Combines two sources:
+    #   1. Entry terms from desc*.xml (via CH pm_mesh_terms → PG COPY)
+    #      — official NLM synonyms, abbreviations, cross-references
+    #   2. Historical descriptors from work_mesh — descriptors whose
+    #      tree_numbers were removed in MeSH revisions but still appear
+    #      in paper annotations (e.g., D011499 Post-Translational, 17K papers)
+    # Replaces the previous mesh_descriptors table.
+    # Note: step 1 (entry terms) is loaded via _EXPORT_TABLES COPY above.
+    # Step 2 (historical) requires work_mesh to be loaded first.
+    _psql(
+        "INSERT INTO mesh_lookup (descriptor_ui, descriptor_name, term, source, has_tree) "
+        "SELECT DISTINCT wm.descriptor_ui, wm.descriptor_name, wm.descriptor_name, "
+        "'historical', false FROM work_mesh wm "
+        "WHERE NOT EXISTS (SELECT 1 FROM mesh_lookup ml WHERE ml.descriptor_ui = wm.descriptor_ui)",
+        context,
+        label="[PG] adding historical descriptors to mesh_lookup",
+    )
+    _psql(
+        "VACUUM ANALYZE mesh_lookup",
+        context,
+        label="[PG] VACUUM ANALYZE mesh_lookup",
+    )
 
     # REINDEX after bulk COPY to eliminate index bloat from batch insertions.
     # Safe without CONCURRENTLY since no other sessions during bulk load.

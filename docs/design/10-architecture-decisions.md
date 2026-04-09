@@ -367,3 +367,470 @@ Trades Type 3 coverage (60-70%) for 4x size reduction.
 
 PG/CH metadata can be replaced by OA API + iCite API at runtime.
 CSR is the sole irreplaceable local asset.
+
+## AD-8: `info` Command and `sql` Lifecycle
+
+**Date**: 2026-04-07
+**Status**: Active
+
+### Context
+
+Dogfood session (surveyor persona: cytidine deaminase discovery for base
+editors) revealed that `quarry sql` is used for two distinct purposes:
+
+1. **Seed discovery**: finding papers by keyword before expand/bridge
+1. **Metadata lookup**: getting DOI, venue, cited_by_count for papers
+   found by expand/bridge
+
+Purpose (1) is properly served by `search` when FTS + embedding are
+available. Purpose (2) has no dedicated command — users must write raw
+SQL with unknown schema, causing repeated friction:
+
+- Schema guessing (`publication_year` → `UndefinedColumn` error)
+- Copy-paste work_id from expand output → sql query → repeat
+- 5 out of 13 commands in the session were metadata lookups via sql
+
+MCP already has `get_paper` tool for single-paper lookup. CLI has no
+equivalent.
+
+### Decision
+
+**Add `quarry info <work_id>` CLI command.**
+
+```
+quarry info W4382247824
+quarry info W4382247824 W4413279334   # multiple
+```
+
+Output: work_id, title, pub_year, doi, host_venue, cited_by_count,
+oa_status, rcr, abstract (truncated unless --full).
+
+Implementation: thin wrapper around PG parameterized query (same as
+MCP `get_paper`). No raw SQL, no injection surface.
+
+### `sql` Lifecycle
+
+`sql` is a development escape hatch, not a user-facing feature.
+
+| Phase | `sql` status | Rationale |
+|-------|-------------|-----------|
+| 1-2 (CLI) | **Keep** | Developer debugging, ad-hoc exploration |
+| 3 (Server) | **Do not expose** via API | Injection surface, no parameterization |
+
+`sql --schema` added as convenience for development phase. Both `sql`
+and `--schema` are removed when Server API replaces CLI as primary
+interface. Server exposes only parameterized endpoints: `info`,
+`expand`, `bridge`, `search`.
+
+### `expand`/`bridge` Output Enrichment
+
+Separate from `info`: add DOI, host_venue, cited_by_count to
+expand/bridge table output. This eliminates the most common
+`sql` usage pattern (metadata lookup after expand).
+
+Implementation: these fields are already fetched in PG enrichment
+step (`core/expand.py`, `core/bridge.py`). Change is output-only:
+add columns to `--format table`, include in JSON output.
+
+### Alternatives Considered
+
+| Alternative | Why not |
+|-------------|---------|
+| Only enrich expand/bridge output | Doesn't cover standalone lookup ("what is W4382247824?") |
+| Keep sql as the only lookup method | Schema guessing, injection risk, bad UX |
+| Add `quarry schema` as separate command | Unnecessary if `sql --schema` exists; both are dev-only anyway |
+
+## AD-9: MeSH CLI Exposure and Ontology Strategy
+
+**Date**: 2026-04-07
+**Status**: Active
+
+### Context
+
+Two dogfood sessions revealed MeSH as a complementary discovery mechanism
+to citation-based tools:
+
+1. **Surveyor session** (cytidine deaminase): sql ILIKE was the only seed
+   discovery method. FTS/embedding unavailable.
+1. **Newbie session** (retron): `ILIKE '%retron%'` matched "retronasal"
+   noise. MeSH descriptor D018626 (Retroelements) would have provided
+   precise topic filtering.
+
+MeSH provides a **curated, hierarchical vocabulary** that finds papers
+citation graph cannot reach. Verified empirically: top Retroelements
+papers by MeSH vs retron expand results had **zero overlap** — entirely
+different sets.
+
+Backend infrastructure already exists:
+
+- PG: work_mesh (379M rows), mesh_tree (65K), both indexed
+- pg.py: `mesh_search_by_name()`, `mesh_descendants()`, `mesh_by_ui()`,
+  `top_mesh()`
+- MCP: `mesh_explore` tool
+- CLI: **nothing** — this is the gap
+
+### Decision
+
+**Three MeSH features for CLI, in priority order:**
+
+#### 1. `info --mesh` — Paper MeSH tags
+
+```
+quarry info W3096234081 --mesh
+  ...
+  mesh:
+    ★ Bacteria (D001419)
+    ★ Retroelements (D018626)
+      Escherichia coli (D004926)
+```
+
+Query: `work_mesh WHERE work_id = ?` — 0.1ms, no schema change needed.
+
+#### 2. `quarry mesh` — MeSH-based paper discovery + tree browsing
+
+```
+quarry mesh "retroelement"      # name search → top papers
+quarry mesh D018626 --tree      # hierarchy browsal
+```
+
+Paper discovery query: `work_mesh JOIN works WHERE descriptor_ui = ? AND is_major_topic ORDER BY cited_by_count DESC LIMIT N`.
+
+Performance by descriptor cardinality (EXPLAIN ANALYZE):
+
+- Retroelements (5.6K papers): **36ms** — acceptable
+- Bacteria (306K papers): **6.2s** — unacceptable but irrelevant
+
+High-cardinality descriptors are too broad for seed discovery.
+CLI guards with count check and suggests `--tree` drill-down:
+
+```
+⚠ Bacteria (D001419): 104,994 major-topic papers (too broad)
+  Use --tree to find sub-descriptors
+```
+
+New pg.py method: `get_top_works_by_mesh(descriptor_ui, limit)`.
+
+#### 3. `expand --mesh-summary` — Result MeSH distribution
+
+```
+quarry expand W3096234081 --mesh-summary
+  MeSH summary (major topics, top 10):
+    Bacteriophages (D001435)         16/25
+    CRISPR-Cas Systems (D000069236)  12/25
+```
+
+Query: `work_mesh WHERE work_id = ANY(result_ids) AND is_major_topic GROUP BY descriptor_ui` — 28ms for 25 papers.
+
+New pg.py method: `top_mesh_by_work_ids(work_ids, limit)`.
+
+### Schema Assessment
+
+| Table | Rows | Purpose |
+|-------|------|---------|
+| `mesh_tree` | 65K | Hierarchy (tree_number). Current MeSH vocabulary only |
+| `mesh_lookup` | 272K | Synonym search index. Entry terms from desc\*.xml (267K) + historical descriptors from work_mesh (5.7K) |
+| `work_mesh` | 379M | Paper ↔ MeSH annotation (unchanged) |
+
+| Index | Covers |
+|-------|--------|
+| `idx_work_mesh_wid` btree(work_id) | info --mesh, expand mesh-summary |
+| `idx_work_mesh_desc` btree(descriptor_ui) | mesh paper discovery |
+| `idx_mesh_lookup_term` btree(term) | mesh name search (single query) |
+| `idx_mesh_lookup_desc` btree(descriptor_ui) | mesh UI lookup fallback |
+
+mesh_lookup replaces the previous mesh_descriptors table (AD-9
+post-implementation). Built from two sources at ELT time:
+
+1. Entry terms: desc\*.xml → quarry-parse → mesh_terms.parquet →
+   CH pm_mesh_terms → mesh_lookup_export (adds source/has_tree) → PG
+1. Historical: work_mesh DISTINCT WHERE NOT IN mesh_lookup → INSERT
+
+### Ontology Strategy
+
+#### MeSH: in quarry (paper-level enrichment + filtering)
+
+MeSH maps directly to papers via work_mesh. quarry's unit is the paper,
+so MeSH is a natural fit for enrichment and discovery.
+
+#### UMLS/GO: outside quarry
+
+| Ontology | Why outside |
+|----------|-------------|
+| GO | Annotates genes/proteins, not papers. Paper→GO requires indirect mapping (UniProt mentions) |
+| UMLS | 3.5M concepts, but paper mapping still goes through MeSH. Marginal gain vs complexity |
+| SNOMED/OMIM | Clinical focus, not research paper discovery |
+
+UMLS's main advantage (synonym expansion) is now partially addressed
+by NLM entry terms in mesh_lookup (267K terms for 25K descriptors).
+Remaining gap: cross-ontology mapping (MeSH ↔ GO ↔ SNOMED).
+Re-evaluate after Phase 3 embedding is live.
+
+#### MeSH in L2 Content Layer (Phase 3)
+
+After embedding, MeSH overlap becomes an L2 atomic operation:
+
+```
+MeSH_overlap(paper_i, seed) = |MeSH(i) ∩ MeSH(seed)| / |MeSH(seed)|
+```
+
+Weighted by IDF to suppress generic descriptors (Humans, DNA).
+Fused with embedding + BM25 via wRRF. This is the structured
+complement to unstructured embedding similarity.
+
+#### Heterogeneous Graph (Phase 3+, research)
+
+Adding MeSH edges to citation CSR is technically feasible but
+architecturally premature. Trigger: repeated evidence that embedding
+misses what MeSH catches (or vice versa) at the graph traversal level.
+
+### Implementation Notes
+
+- `info --mesh`: `get_work_mesh()` in pg.py
+- `quarry mesh`: `mesh_search_by_name()` queries mesh_lookup (single
+  table, token-AND ILIKE on `term` column). Covers NLM entry terms
+  - historical descriptors in one query. Falls back to mesh_lookup
+    by descriptor_ui for UI-based lookups.
+- `quarry mesh --tree`: `mesh_by_ui()` + `mesh_descendants()` +
+  `mesh_parent()`
+- `expand --mesh-summary`: `top_mesh_by_work_ids()`
+- ELT pipeline: desc\*.xml → Rust quarry-parse (MeshTerm struct) →
+  mesh_terms.parquet → CH pm_mesh_terms → mesh_lookup_export →
+  PG mesh_lookup. Historical descriptors added in pg_load post-step.
+
+### Post-implementation: Dogfood Findings (session 3)
+
+Bridger session (FISH → spatial transcriptomics) validated AD-9
+features and identified further improvements:
+
+1. **MeSH token matching**: `mesh "in situ hybridization fluorescence"`
+   failed because ILIKE requires exact substring. Fix: split input
+   into tokens, AND-combine ILIKE. MeSH has only 25K entries so
+   multi-ILIKE is instant. MeSH embedding (25K vectors) deferred —
+   token matching sufficient for short descriptor names.
+
+1. **host_venue in expand/bridge output**: lineage quality assessment
+   requires knowing the journal. Currently only available via `info`
+   or `sql`. Fix: add `host_venue` to PG enrichment in
+   `core/expand.py` `_enrich_metadata()`, display in table output.
+
+1. **`quarry shrink` (planned)**: minimum covering set of high-quality
+   papers. Given expand results, find N papers from top venues that
+   maximize citation coverage of the full result set. Subsumes the
+   rejected `expand --venue` filter. See AD-10 for design.
+
+## AD-10: `shrink` — Minimum Covering Paper Set
+
+**Date**: 2026-04-07
+**Status**: Active
+
+### Context
+
+Dogfood session 3 (FISH → spatial transcriptomics) showed that expand
+returns 200 papers but the user wants a reading list of 5-10 papers
+from top journals that cover the full lineage. Manual filtering is
+tedious; `expand --venue` was considered but rejected — shrink
+subsumes it entirely.
+
+### Problem
+
+Given expand(seed, limit=200) → candidates, find the smallest subset
+S ⊂ candidates such that:
+
+1. All papers in S are from specified venues (NCS+)
+1. S "covers" the full candidate set via citations
+1. The algorithm is **deterministic** (same input → same output)
+
+### Coverage Definition
+
+**1-hop citation coverage**: paper A covers paper B if A cites B,
+B cites A, or A = B. Computed via `graph.neighbors(A, "forward")`
+∪ `graph.neighbors(A, "reverse")` ∪ {A}, intersected with candidates.
+
+**Weighted by expand fused score**: covering rank-1 paper (score 0.015)
+contributes more than rank-200 (score 0.003). This ensures high-ranked
+(most relevant) papers are prioritized for coverage.
+
+Why 1-hop citation, not "explanation":
+
+| Aspect | Citation coverage | Content "explanation" |
+|--------|------------------|----------------------|
+| Measurable | ✅ structural, deterministic | ❌ requires LLM/abstract |
+| Proxy quality | review papers naturally favored (high citation fan-out = selected early) | ideal but not computable in Core layer |
+| Known limitation | passing citation ≠ explanation | — |
+
+Citation coverage is a **structural proxy** for "reading A helps
+understand B". It is not a semantic guarantee. The algorithm
+naturally selects review papers (high coverage) which tend to
+explain rather than merely cite. Full semantic assessment belongs
+in the Agent layer (LLM-based curation on shrink output).
+
+### Empirical Validation
+
+Tested on MERFISH seed (W2042789810), expand limit=200:
+
+- NCS+ pool: 109/200 papers (55%)
+- Individual NCS+ paper coverage: 30-52% of candidates
+- Greedy 5-paper selection: **91% coverage**
+- Greedy 10-paper selection: **97% coverage**
+
+Selected papers (top 5) match expected lineage milestones:
+
+| # | Year | Venue | Marginal | Cumulative | Paper |
+|---|------|-------|----------|------------|-------|
+| 1 | 2019 | Nature | +104 | 52% | seqFISH+ (imaging state-of-art) |
+| 2 | 2022 | Nat Rev Genetics | +34 | 69% | Review (landscape overview) |
+| 3 | 2014 | Nature Methods | +24 | 81% | seqFISH (imaging origin) |
+| 4 | 2019 | Science | +12 | 87% | Slide-seq (capture branch) |
+| 5 | 2021 | Nature | +8 | 91% | Mouse atlas (application) |
+
+### Algorithm
+
+**Greedy Weighted Set Cover** — deterministic, O(pool × top_n).
+
+```python
+def shrink(seed, top_n=5, venues=NCS_PLUS, expand_limit=200):
+    # Phase 1: expand
+    result = run_expand(seed, limit=expand_limit)
+    candidates = result["papers"]
+    candidate_ids = {p["work_id"] for p in candidates}
+    score_map = {p["work_id"]: p["scores"]["fused"] for p in candidates}
+
+    # Phase 2: precompute coverage for venue-filtered pool
+    pool = []
+    for p in candidates:
+        if p["host_venue"] not in venues:
+            continue
+        fwd = set(graph.neighbors(p["work_id"], "forward"))
+        rev = set(graph.neighbors(p["work_id"], "reverse"))
+        cov = (fwd | rev | {p["work_id"]}) & candidate_ids
+        pool.append({"paper": p, "coverage_set": cov})
+
+    # Phase 3: greedy selection
+    covered = set()
+    selected = []
+    for _ in range(min(top_n, len(pool))):
+        best = max(pool, key=lambda x:
+            sum(score_map[c] for c in x["coverage_set"] - covered))
+        covered |= best["coverage_set"]
+        selected.append(best)
+        pool.remove(best)
+
+    return selected, len(covered) / len(candidate_ids)
+```
+
+**Determinism**: guaranteed. APPR is deterministic, CSR neighbors are
+fixed arrays, weighted scores are floats (exact ties practically
+impossible), greedy selection order is fixed.
+
+### Known Limitations
+
+1. **Citation ≠ explanation**: a passing methods citation counts the
+   same as a detailed discussion. Mitigation: reviews naturally score
+   highest (empirically confirmed).
+
+1. **Topic redundancy**: two papers covering the same 50 citations both
+   appear equally good, but may represent the same sub-topic. Future
+   improvement: MeSH diversity penalty (AD-9 overlap scoring). Deferred
+   — empirical results show sufficient diversity without it.
+
+1. **MeSH coverage lag**: MeSH annotations for recent papers may be
+   incomplete, limiting diversity assessment. Same limitation as AD-9.
+
+1. **Venue bias**: NCS+ filter excludes legitimate high-quality papers
+   in field-specific journals (e.g., Nucleic Acids Research, Genome
+   Biology). Mitigation: user-specified venue list as alternative.
+
+1. **Centralization dominance**: In highly centralized fields (e.g.,
+   base editing), a single foundational paper can cover 90%+ of
+   candidates via 1-hop citations, making the remaining selections
+   trivially marginal. See post-implementation findings below.
+
+### Post-implementation: Centralization Problem (Dogfood Session 4)
+
+ABE seed (W2766599608) shrink produced 100% coverage with 5 papers,
+but rank 1 (CBE foundational paper, Nature 2016) alone covered 96%.
+The remaining 4 papers contributed +1~5 each — technically correct
+but not a useful reading list.
+
+**Root cause**: In fields with a single dominant founder paper that all
+subsequent work cites, 1-hop coverage becomes trivially saturated.
+This is a structural property of the field, not an algorithm bug.
+
+**Empirical comparison across fields**:
+
+| Field | Seed | Top-1 coverage | 5-paper coverage | Centralization |
+|-------|------|---------------|-----------------|----------------|
+| Spatial transcriptomics | MERFISH | 52% | 91% | moderate |
+| Mito ABE | mito ABE 2024 | 70% | 92% | moderate |
+| Deaminase discovery | structure-based 2023 | 58% | 76% | low |
+| ABE | ABE 2017 | 96% | 100% (trivial) | **extreme** |
+
+**Mitigations implemented**:
+
+1. **Centralization warning**: when top-1 paper covers >80% of
+   candidates, emit warning suggesting a more recent seed.
+
+1. **`--exclude` option**: exclude specific work_ids from the
+   venue-filtered pool. Primary use: exclude the dominant foundation
+   paper to see the "second layer" coverage structure.
+
+1. **`--no-foundation` flag**: automatically exclude papers with
+   relation="foundation" from the pool. Surfaces follow-up and lateral
+   papers that represent recent trends rather than historical origin.
+
+   Why relation-based rather than cited_by threshold: a high-cited
+   review from 2023 should remain in the pool (it's a follow-up with
+   high coverage). Only foundational papers (those the seed cites)
+   exhibit the centralization problem.
+
+### Decisions (Resolved)
+
+| Question | Decision | Rationale |
+|----------|----------|-----------|
+| Coverage definition | 1-hop citation, weighted by fused score | Structural proxy; reviews naturally favored |
+| MeSH in coverage? | **No** (1st version) | Keep simple; MeSH diversity as future improvement |
+| Self-coverage | Yes (paper covers itself) | Trivially correct |
+| Venue specification | Preset `NCS+` (14 journals) + user `--venue` list | Flexibility without complexity |
+| Empty pool fallback | Top cited_by_count, any venue, with warning | Graceful degradation |
+| Output | Selected papers + cumulative coverage % + uncovered count | Actionable for reading list |
+| Separate command | Yes (`quarry shrink`), not `expand --shrink` | Different operation, different parameters |
+| Diversity penalty | **Deferred** | Empirical results sufficient without it |
+| Centralization warning | Emit when top-1 >80% | Guides user to use `--no-foundation` or newer seed |
+| `--exclude` | User-specified work_ids to remove from pool | Manual control for known dominant papers |
+| `--no-foundation` | Exclude relation="foundation" from pool | Surfaces recent trends; foundation papers are the centralization source |
+
+### NCS+ Venue Preset
+
+```python
+NCS_PLUS = {
+    "Nature", "Science", "Cell",
+    "Nature Methods", "Nature Biotechnology", "Nature Genetics",
+    "Nature Medicine", "Nature Chemical Biology",
+    "Nature Communications", "Science Advances",
+    "Molecular Cell", "Cell Reports", "Cell Systems", "Cell Stem Cell",
+    "Nature Reviews Genetics", "Nature Reviews Molecular Cell Biology",
+    "Nature Biomedical Engineering", "Nature Neuroscience",
+}
+```
+
+### CLI Interface
+
+```
+quarry shrink <seed> [--top 5] [--venue NCS+] [--limit 200]
+                     [--no-foundation] [--exclude W123,W456]
+                     [--format table|json]
+```
+
+### Performance
+
+- expand: ~3s (existing)
+- neighbors precompute: ~109 calls × ~1ms = ~0.1s
+- greedy selection: O(pool × top_n) set operations ≈ instant
+- **Total: ~3-4s** (same as expand)
+
+### Implementation Plan
+
+1. ~~Add `host_venue` to expand/bridge enrichment~~ **Done**
+1. `quarry/core/shrink.py`: `run_shrink()` function
+1. `quarry/cli.py`: `shrink` subcommand
+1. NCS+ preset as module constant

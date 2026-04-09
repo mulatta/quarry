@@ -11,7 +11,7 @@ name = "quarry_parse"
 quarry-core = { path = "../quarry-core" }
 
 # Parse: XML, JSON
-quick-xml = "0.37"
+quick-xml = { version = "0.37", features = ["serde", "serialize"] }
 sonic-rs = "0.5"
 serde = { version = "1", features = ["derive"] }
 flate2 = { version = "1", features = ["zlib-ng"], default-features = false }

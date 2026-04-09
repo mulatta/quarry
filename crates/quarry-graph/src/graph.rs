@@ -41,8 +41,8 @@ impl CsrArrays {
         let indices_mmap = unsafe { Mmap::map(&indices_file) }
             .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
 
-        // Validate sizes
-        let expected_indptr_bytes = (num_nodes + 1) * 8; // u64
+        // Validate sizes — indptr is u32 (format 2)
+        let expected_indptr_bytes = (num_nodes + 1) * 4; // u32
         if indptr_mmap.len() < expected_indptr_bytes {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
                 "indptr.bin too small: {} < {}",
@@ -53,8 +53,8 @@ impl CsrArrays {
 
         // Validate alignment (mmap is page-aligned, but assert for safety)
         assert!(
-            indptr_mmap.as_ptr().align_offset(std::mem::align_of::<u64>()) == 0,
-            "indptr mmap not aligned to u64"
+            indptr_mmap.as_ptr().align_offset(std::mem::align_of::<u32>()) == 0,
+            "indptr mmap not aligned to u32"
         );
         assert!(
             indices_mmap.as_ptr().align_offset(std::mem::align_of::<u32>()) == 0,
@@ -75,7 +75,7 @@ impl CsrArrays {
         let indptr_mmap = unsafe { Mmap::map(&indptr_file) }.map_err(|e| e.to_string())?;
         let indices_mmap = unsafe { Mmap::map(&indices_file) }.map_err(|e| e.to_string())?;
 
-        let expected_indptr_bytes = (num_nodes + 1) * 8;
+        let expected_indptr_bytes = (num_nodes + 1) * 4; // u32
         if indptr_mmap.len() < expected_indptr_bytes {
             return Err(format!(
                 "indptr.bin too small: {} < {}",
@@ -85,8 +85,8 @@ impl CsrArrays {
         }
 
         assert!(
-            indptr_mmap.as_ptr().align_offset(std::mem::align_of::<u64>()) == 0,
-            "indptr mmap not aligned to u64"
+            indptr_mmap.as_ptr().align_offset(std::mem::align_of::<u32>()) == 0,
+            "indptr mmap not aligned to u32"
         );
         assert!(
             indices_mmap.as_ptr().align_offset(std::mem::align_of::<u32>()) == 0,
@@ -100,11 +100,11 @@ impl CsrArrays {
         })
     }
 
-    fn indptr(&self) -> &[u64] {
+    fn indptr(&self) -> &[u32] {
         // SAFETY: alignment validated in open/open_raw, size validated, mmap lifetime matches self
         unsafe {
             std::slice::from_raw_parts(
-                self._indptr_mmap.as_ptr() as *const u64,
+                self._indptr_mmap.as_ptr() as *const u32,
                 self.num_nodes + 1,
             )
         }
@@ -134,16 +134,28 @@ impl CsrArrays {
 pub struct Graph {
     fwd: CsrArrays,
     rev: CsrArrays,
-    /// node index → external ID (i64)
-    idx_to_id: Vec<i64>,
+    /// node index → external ID (i64), mmap-backed binary array
+    _id_map_mmap: Mmap,
     num_nodes: usize,
     num_edges: usize,
 }
 
 impl Graph {
+    /// Sorted i64 ID array, zero-copy from mmap.
+    fn idx_to_id(&self) -> &[i64] {
+        // SAFETY: id_map.bin is binary i64 array written by build.rs,
+        // alignment validated on load, lifetime tied to self._id_map_mmap
+        unsafe {
+            std::slice::from_raw_parts(
+                self._id_map_mmap.as_ptr() as *const i64,
+                self.num_nodes,
+            )
+        }
+    }
+
     /// Resolve external ID to node index via binary search on sorted idx_to_id.
     pub(crate) fn resolve(&self, id: i64) -> Option<u32> {
-        self.idx_to_id
+        self.idx_to_id()
             .binary_search(&id)
             .ok()
             .map(|i| i as u32)
@@ -165,7 +177,7 @@ impl Graph {
         self.rev.neighbors(idx)
     }
 
-    pub(crate) fn fwd_indptr(&self) -> &[u64] {
+    pub(crate) fn fwd_indptr(&self) -> &[u32] {
         self.fwd.indptr()
     }
 
@@ -178,7 +190,7 @@ impl Graph {
     }
 
     pub(crate) fn id_of(&self, idx: u32) -> i64 {
-        self.idx_to_id[idx as usize]
+        self.idx_to_id()[idx as usize]
     }
 
     /// Pure-Rust constructor for tests.
@@ -191,21 +203,23 @@ impl Graph {
         let num_nodes = meta["num_nodes"].as_u64().ok_or("missing num_nodes")? as usize;
         let num_edges = meta["num_edges"].as_u64().ok_or("missing num_edges")? as usize;
 
-        let id_map_str =
-            std::fs::read_to_string(graph_dir.join("id_map.bin")).map_err(|e| e.to_string())?;
-        let idx_to_id: Vec<i64> = id_map_str
-            .lines()
-            .filter(|l| !l.is_empty())
-            .map(|l| l.parse::<i64>().map_err(|e| e.to_string()))
-            .collect::<Result<Vec<_>, _>>()?;
+        let id_map_file =
+            File::open(graph_dir.join("id_map.bin")).map_err(|e| e.to_string())?;
+        let id_map_mmap =
+            unsafe { Mmap::map(&id_map_file) }.map_err(|e| e.to_string())?;
 
-        if idx_to_id.len() != num_nodes {
+        let expected_id_map_bytes = num_nodes * 8; // i64
+        if id_map_mmap.len() < expected_id_map_bytes {
             return Err(format!(
-                "id_map has {} entries but meta says {}",
-                idx_to_id.len(),
-                num_nodes
+                "id_map.bin too small: {} < {}",
+                id_map_mmap.len(),
+                expected_id_map_bytes
             ));
         }
+        assert!(
+            id_map_mmap.as_ptr().align_offset(std::mem::align_of::<i64>()) == 0,
+            "id_map mmap not aligned to i64"
+        );
 
         let fwd = CsrArrays::open_raw(&graph_dir.join("forward"), num_nodes)?;
         let rev = CsrArrays::open_raw(&graph_dir.join("reverse"), num_nodes)?;
@@ -213,7 +227,7 @@ impl Graph {
         Ok(Self {
             fwd,
             rev,
-            idx_to_id,
+            _id_map_mmap: id_map_mmap,
             num_nodes,
             num_edges,
         })
@@ -238,25 +252,31 @@ impl Graph {
             .as_u64()
             .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("missing num_edges"))?
             as usize;
-
-        let id_map_str = std::fs::read_to_string(dir.join("id_map.bin"))
-            .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
-        let idx_to_id: Vec<i64> = id_map_str
-            .lines()
-            .filter(|l| !l.is_empty())
-            .map(|l| {
-                l.parse::<i64>()
-                    .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
-            })
-            .collect::<PyResult<Vec<_>>>()?;
-
-        if idx_to_id.len() != num_nodes {
+        let format = meta["format"].as_u64().unwrap_or(1);
+        if format != 2 {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "id_map has {} entries but meta says {}",
-                idx_to_id.len(),
-                num_nodes
+                "unsupported CSR format {format}, expected 2 (rebuild with latest quarry-graph)"
             )));
         }
+
+        // id_map.bin — binary i64 array, mmap zero-copy
+        let id_map_file = File::open(dir.join("id_map.bin"))
+            .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+        let id_map_mmap = unsafe { Mmap::map(&id_map_file) }
+            .map_err(|e| pyo3::exceptions::PyIOError::new_err(e.to_string()))?;
+
+        let expected_id_map_bytes = num_nodes * 8; // i64
+        if id_map_mmap.len() < expected_id_map_bytes {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "id_map.bin too small: {} < {}",
+                id_map_mmap.len(),
+                expected_id_map_bytes
+            )));
+        }
+        assert!(
+            id_map_mmap.as_ptr().align_offset(std::mem::align_of::<i64>()) == 0,
+            "id_map mmap not aligned to i64"
+        );
 
         let fwd = CsrArrays::open(&dir.join("forward"), num_nodes)?;
         let rev = CsrArrays::open(&dir.join("reverse"), num_nodes)?;
@@ -264,7 +284,7 @@ impl Graph {
         Ok(Self {
             fwd,
             rev,
-            idx_to_id,
+            _id_map_mmap: id_map_mmap,
             num_nodes,
             num_edges,
         })
@@ -299,7 +319,7 @@ impl Graph {
             .csr_validated(direction)
             .neighbors(idx)
             .iter()
-            .map(|&i| self.idx_to_id[i as usize])
+            .map(|&i| self.idx_to_id()[i as usize])
             .collect())
     }
 
@@ -346,7 +366,7 @@ impl Graph {
                                 if visited.len() >= max_nodes {
                                     return Ok(visited
                                         .iter()
-                                        .map(|&i| self.idx_to_id[i as usize])
+                                        .map(|&i| self.idx_to_id()[i as usize])
                                         .collect());
                                 }
                             }
@@ -361,7 +381,7 @@ impl Graph {
 
             Ok(visited
                 .iter()
-                .map(|&i| self.idx_to_id[i as usize])
+                .map(|&i| self.idx_to_id()[i as usize])
                 .collect())
         })
     }
@@ -542,6 +562,137 @@ impl Graph {
         Ok((papers, stats))
     }
 
+    /// Multi-seed bridge discovery (Type 1-4).
+    ///
+    /// Returns (per_type_results, stats) where per_type_results is a dict
+    /// with keys: common_refs, common_citers, coupling_bridges, cocitation_bridges.
+    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
+    #[pyo3(signature = (seeds, types=None, limit=100, max_neighbor_degree=10_000, max_path_depth=5, alpha=0.15, epsilon=1e-6))]
+    fn bridge(
+        &self,
+        py: Python<'_>,
+        seeds: Vec<i64>,
+        types: Option<Vec<String>>,
+        limit: usize,
+        max_neighbor_degree: usize,
+        max_path_depth: usize,
+        alpha: f64,
+        epsilon: f64,
+    ) -> PyResult<(HashMap<String, PyObject>, HashMap<String, PyObject>)> {
+        if seeds.len() < 2 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "bridge requires at least 2 seeds",
+            ));
+        }
+
+        let bridge_types = match types {
+            Some(ts) => {
+                let mut parsed = Vec::with_capacity(ts.len());
+                for t in &ts {
+                    parsed.push(match t.as_str() {
+                        "common_refs" => algo::bridge::BridgeType::CommonRefs,
+                        "common_citers" => algo::bridge::BridgeType::CommonCiters,
+                        "coupling" => algo::bridge::BridgeType::Coupling,
+                        "cocitation" => algo::bridge::BridgeType::Cocitation,
+                        "path" => algo::bridge::BridgeType::Path,
+                        "ppr" => algo::bridge::BridgeType::Ppr,
+                        "steiner" => algo::bridge::BridgeType::Steiner,
+                        _ => return Err(pyo3::exceptions::PyValueError::new_err(
+                            format!("unknown bridge type '{t}'"),
+                        )),
+                    });
+                }
+                parsed
+            }
+            None => vec![],
+        };
+
+        let params = algo::bridge::BridgeParams {
+            types: bridge_types,
+            limit,
+            max_neighbor_degree,
+            max_path_depth,
+            alpha,
+            epsilon,
+            ..Default::default()
+        };
+
+        let result = py.allow_threads(|| algo::bridge::compute(self, &seeds, &params));
+
+        // Convert to Python dicts
+        let common_refs: Vec<HashMap<String, PyObject>> = result.common_refs.iter().map(|e| {
+            let mut d = HashMap::new();
+            d.insert("work_id".into(), e.work_id.into_pyobject(py).unwrap().into_any().unbind());
+            d.insert("aa_weight".into(), e.aa_weight.into_pyobject(py).unwrap().into_any().unbind());
+            d.insert("seed_count".into(), e.seed_count.into_pyobject(py).unwrap().into_any().unbind());
+            d
+        }).collect();
+
+        let common_citers: Vec<HashMap<String, PyObject>> = result.common_citers.iter().map(|e| {
+            let mut d = HashMap::new();
+            d.insert("work_id".into(), e.work_id.into_pyobject(py).unwrap().into_any().unbind());
+            d.insert("aa_weight".into(), e.aa_weight.into_pyobject(py).unwrap().into_any().unbind());
+            d.insert("seed_count".into(), e.seed_count.into_pyobject(py).unwrap().into_any().unbind());
+            d
+        }).collect();
+
+        let coupling: Vec<HashMap<String, PyObject>> = result.coupling_bridges.iter().map(|e| {
+            let mut d = HashMap::new();
+            d.insert("work_id".into(), e.work_id.into_pyobject(py).unwrap().into_any().unbind());
+            d.insert("per_seed_scores".into(), e.per_seed_scores.clone().into_pyobject(py).unwrap().into_any().unbind());
+            d.insert("score".into(), e.score.into_pyobject(py).unwrap().into_any().unbind());
+            d
+        }).collect();
+
+        let cocitation: Vec<HashMap<String, PyObject>> = result.cocitation_bridges.iter().map(|e| {
+            let mut d = HashMap::new();
+            d.insert("work_id".into(), e.work_id.into_pyobject(py).unwrap().into_any().unbind());
+            d.insert("per_seed_scores".into(), e.per_seed_scores.clone().into_pyobject(py).unwrap().into_any().unbind());
+            d.insert("score".into(), e.score.into_pyobject(py).unwrap().into_any().unbind());
+            d
+        }).collect();
+
+        let path: Vec<HashMap<String, PyObject>> = result.path_bridges.iter().map(|e| {
+            let mut d = HashMap::new();
+            d.insert("work_id".into(), e.work_id.into_pyobject(py).unwrap().into_any().unbind());
+            d.insert("hop_from".into(), e.hop_from.clone().into_pyobject(py).unwrap().into_any().unbind());
+            d.insert("path_count".into(), e.path_count.into_pyobject(py).unwrap().into_any().unbind());
+            d
+        }).collect();
+
+        let ppr: Vec<HashMap<String, PyObject>> = result.ppr_bridges.iter().map(|e| {
+            let mut d = HashMap::new();
+            d.insert("work_id".into(), e.work_id.into_pyobject(py).unwrap().into_any().unbind());
+            d.insert("per_seed_scores".into(), e.per_seed_scores.clone().into_pyobject(py).unwrap().into_any().unbind());
+            d.insert("score".into(), e.score.into_pyobject(py).unwrap().into_any().unbind());
+            d
+        }).collect();
+
+        let mut results = HashMap::new();
+        results.insert("common_refs".into(), common_refs.into_pyobject(py).unwrap().into_any().unbind());
+        results.insert("common_citers".into(), common_citers.into_pyobject(py).unwrap().into_any().unbind());
+        results.insert("coupling_bridges".into(), coupling.into_pyobject(py).unwrap().into_any().unbind());
+        results.insert("cocitation_bridges".into(), cocitation.into_pyobject(py).unwrap().into_any().unbind());
+        results.insert("path_bridges".into(), path.into_pyobject(py).unwrap().into_any().unbind());
+        results.insert("ppr_bridges".into(), ppr.into_pyobject(py).unwrap().into_any().unbind());
+        results.insert("steiner_bridges".into(), result.steiner_bridges.into_pyobject(py).unwrap().into_any().unbind());
+
+        // Stats
+        let mut stats = HashMap::new();
+        stats.insert("seeds".into(), result.seeds.into_pyobject(py).unwrap().into_any().unbind());
+        stats.insert("per_seed_ref_count".into(), result.stats.per_seed_ref_count.into_pyobject(py).unwrap().into_any().unbind());
+        stats.insert("per_seed_citer_count".into(), result.stats.per_seed_citer_count.into_pyobject(py).unwrap().into_any().unbind());
+        stats.insert("overlap_refs".into(), (result.stats.overlap_refs as u64).into_pyobject(py).unwrap().into_any().unbind());
+        stats.insert("overlap_citers".into(), (result.stats.overlap_citers as u64).into_pyobject(py).unwrap().into_any().unbind());
+        stats.insert("shortest_path_length".into(), result.stats.shortest_path_length.into_pyobject(py).unwrap().into_any().unbind());
+        // Pairwise sp as list of [i, j, sp_or_None]
+        let pairwise: Vec<(usize, usize, Option<usize>)> = result.stats.pairwise_sp;
+        stats.insert("pairwise_sp".into(), pairwise.into_pyobject(py).unwrap().into_any().unbind());
+        stats.insert("elapsed_ms".into(), result.stats.elapsed_ms.into_pyobject(py).unwrap().into_any().unbind());
+
+        Ok((results, stats))
+    }
+
     /// Weakly connected components via atomic union-find.
     fn wcc(&self, py: Python<'_>) -> PyResult<Vec<(i64, u32)>> {
         py.allow_threads(|| Ok(algo::wcc::compute(self)))
@@ -612,8 +763,8 @@ impl Graph {
                 for &nb in self.fwd.neighbors(idx) {
                     if set.contains(&nb) {
                         edges.push((
-                            self.idx_to_id[idx as usize],
-                            self.idx_to_id[nb as usize],
+                            self.idx_to_id()[idx as usize],
+                            self.idx_to_id()[nb as usize],
                         ));
                     }
                 }
@@ -647,7 +798,7 @@ impl Graph {
 
         fwd_path
             .iter()
-            .map(|&i| self.idx_to_id[i as usize])
+            .map(|&i| self.idx_to_id()[i as usize])
             .collect()
     }
 }
@@ -1012,7 +1163,7 @@ mod tests {
                                 if visited.len() >= max_nodes {
                                     return visited
                                         .iter()
-                                        .map(|&i| self.idx_to_id[i as usize])
+                                        .map(|&i| self.idx_to_id()[i as usize])
                                         .collect();
                                 }
                             }
@@ -1026,7 +1177,7 @@ mod tests {
             }
             visited
                 .iter()
-                .map(|&i| self.idx_to_id[i as usize])
+                .map(|&i| self.idx_to_id()[i as usize])
                 .collect()
         }
 
@@ -1094,8 +1245,8 @@ mod tests {
                 for &nb in self.fwd.neighbors(idx) {
                     if set.contains(&nb) {
                         edges.push((
-                            self.idx_to_id[idx as usize],
-                            self.idx_to_id[nb as usize],
+                            self.idx_to_id()[idx as usize],
+                            self.idx_to_id()[nb as usize],
                         ));
                     }
                 }
