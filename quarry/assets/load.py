@@ -542,7 +542,7 @@ _EXPORT_TABLES: list[tuple[str, str, str]] = [
         "chemicals",
         "pmid, registry_number, substance_ui, substance_name",
     ),
-    ("oa_id_crosswalk", "id_crosswalk", "work_id, pmid"),
+    ("id_crosswalk_export", "id_crosswalk", "work_id, pmid, pmc_id"),
     ("pm_mesh_tree", "mesh_tree", "descriptor_ui, descriptor_name, tree_number"),
     # mesh_lookup entry terms: CH mesh_lookup_export adds source/has_tree columns.
     # Historical descriptors (has_tree=false) added in post-load step.
