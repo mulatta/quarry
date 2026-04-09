@@ -834,3 +834,67 @@ quarry shrink <seed> [--top 5] [--venue NCS+] [--limit 200]
 1. `quarry/core/shrink.py`: `run_shrink()` function
 1. `quarry/cli.py`: `shrink` subcommand
 1. NCS+ preset as module constant
+
+## AD-11: Bridge sp — Bidirectional Minimum
+
+**Date**: 2026-04-08
+**Status**: Active
+
+### Context
+
+`shortest_path_length()` in `bridge.rs` computed sp from seed[i]→seed[j]
+only. In directed citation graphs, sp(A→B) ≠ sp(B→A). A newer paper
+citing an older paper has sp=1 in one direction but sp=∞ in the other.
+This made sp values depend on CLI argument order.
+
+### Decision
+
+Compute `min(sp(i→j), sp(j→i))` for all pairwise sp calculations
+and path_bridges. Cost: 2× BFS calls per pair (negligible at
+MAX_VISITED=200,000).
+
+### Evidence
+
+CBE↔ABE: sp=∞ (before) → sp=1 (after). 12 bridge pairs across
+dogfood S3-S14 checked: 9 improved, 3 unchanged, 0 regressions.
+
+### References
+
+- `crates/quarry-graph/src/algo/bridge.rs:232-238` (pairwise sp)
+- `crates/quarry-graph/src/algo/bridge.rs:567-595` (path_bridges)
+- Dogfood S15: `docs/dogfood/2026-04-08-f1-f2-regression.md`
+
+## AD-12: Expand `--min-citations` Post-Filter
+
+**Date**: 2026-04-08
+**Status**: Active
+
+### Context
+
+Classic papers with extreme citation counts (e.g., Cas9 with 16,935
+citations) produce noise-dominated expand results. APPR spreads across
+the entire citation graph, ranking niche low-citation papers above
+field milestones like CBE/ABE/PE.
+
+### Decision
+
+Add `--min-citations N` as a Python post-filter:
+
+1. Internally request `min(limit × 5, 5000)` from Rust expand.
+1. After PG enrichment, filter by `cited_by_count >= N`.
+1. Truncate to user's `--limit`.
+   Default 0 (no filter) preserves existing behavior.
+
+### Trade-offs
+
+| Pro | Con |
+|-----|-----|
+| Milestones surface from classic seeds | Higher internal limit = more PG queries |
+| No Rust change needed | Information loss (low-citation papers may be relevant) |
+| Default=0 is backward-compatible | User must guess appropriate N |
+
+### References
+
+- `quarry/core/expand.py:run_expand()` (internal_limit, post-filter)
+- `quarry/cli.py:expand()` (--min-citations option)
+- Dogfood S15: `docs/dogfood/2026-04-08-f1-f2-regression.md`

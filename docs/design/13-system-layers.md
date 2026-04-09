@@ -77,13 +77,18 @@ to keyword search. See AD-9 for ontology strategy.
 | get_subgraph | Graph | Session subgraph + metrics |
 | mesh_explore | Browse | MeSH hierarchy navigation |
 
-### Planned additions
+### Planned additions (deferred — CLI-first, MCP after CLI validation)
 
-| Tool | Category | Description | Rationale |
-|------|----------|-------------|-----------|
-| bridge | Analysis | Multi-seed bridge (7 types) | Agent needs bridge access |
-| diagnose_seeds | Analysis | Seed quality assessment | Agent needs pre-check before bridge |
-| expand | Graph | APPR-based expand (= CLI expand) | Current expand_citations is N-hop only, mismatches CLI |
+MCP additions are deferred until all CLI commands are validated via
+dogfood sessions. Rationale: CLI is the primary interface for research
+workflows; MCP duplication adds maintenance burden without proven need.
+See AD-14 for agent architecture that uses CLI via Bash tool.
+
+| Tool | Category | Description | Status |
+|------|----------|-------------|--------|
+| bridge | Analysis | Multi-seed bridge (7 types) | **Deferred** — CLI bridge complete and validated |
+| diagnose_seeds | Analysis | Seed quality assessment | **Deferred** — agent handles via expand + info |
+| expand | Graph | APPR-based expand (= CLI expand) | **Deferred** — CLI expand complete with --min-citations |
 
 ### CLI ↔ MCP alignment
 
@@ -198,18 +203,24 @@ Skill(bridge-discovery)
 
 ## Implementation Roadmap
 
-| Phase | Work | Layer |
-|-------|------|-------|
-| **Now** | MCP: add bridge, diagnose_seeds, APPR expand | MCP |
-| **Now** | CLI: rename similar → vsearch | CLI |
-| **Next** | BAML: ClassifyPaper, AssessSeedQuality | Agent |
-| **Next** | SKILL: bridge-discovery workflow | Agent |
-| **Later** | DSPy: pipeline optimization with eval data | Agent |
-| **Later** | Phase 3 embedding integration | Core + MCP |
+| Phase | Work | Layer | Status |
+|-------|------|-------|--------|
+| **Done** | CLI: bridge (7 types), shrink, mesh, expand (--min-citations), sp fix | CLI | ✅ AD-10,11,12 |
+| **Done** | CLI: rename similar → vsearch | CLI | ✅ |
+| **Done** | Agent: research-scout (md, pipeline pattern) | Agent | ✅ AD-14 |
+| **Now** | Agent: pipeline decomposition (explorer/bridger/synthesizer workers) | Agent | In progress |
+| **Now** | Skill: quarry-research (shared references) | Agent | In progress |
+| **Next** | BAML: ClassifyPaper, AssessSeedQuality (after 3-5 agent runs) | Agent | Blocked by eval data |
+| **Later** | DSPy: pipeline optimization (after 200+ eval examples) | Agent | Blocked by BAML |
+| **Later** | MCP: bridge, expand, diagnose_seeds (after CLI fully validated) | MCP | Deferred |
+| **Later** | Phase 3 embedding integration (LanceDB) | Core + MCP | Blocked by lancedb |
 
 ## References
 
 - AD-2: Quality signals as metadata only (no opinions in pipeline)
 - AD-3: No --sort/--filter in CLI (downstream processing)
+- AD-11: Bridge sp bidirectional minimum
+- AD-12: Expand --min-citations post-filter
+- AD-14: Research agent architecture (14-research-agent.md)
 - 11-bridge.md: Bridge types, seed quality criteria
 - 12-graph-algorithms.md: Algorithm catalog
