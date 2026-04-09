@@ -319,6 +319,8 @@ Human-rated bridge results + QA triplet quality feed the loop.
 | D12 | Serendipity validation at orchestrator (Phase 2.5), not synthesizer | Only orchestrator has full context: all sp definitions, all findings, all bridge sp values. Synthesizer formats validated results only. | Synthesizer validates (lacks decompose-time baseline); explorer validates (lacks cross-sp context) |
 | D13 | Tree refinement for infeasible sub-problems (depth max 1) | ★☆☆☆ sp may be a composite of solvable + unsolvable parts. Decomposing narrows the bottleneck. Triggers: 0 seeds, needs_refinement flag, "no precedent" in findings. | No refinement (report "hard" without analysis); unlimited depth (cost explosion) |
 | D14 | Bridge sp as soft signal for serendipity novelty, not hard threshold | sp < session median = likely predictable; sp > median = likely novel. But sp varies by field, graph coverage, and topic specificity. LLM makes final call with sp as evidence. | Hard sp threshold (ignores context); ignore sp entirely (loses quantitative signal) |
+| D15 | CLARIFY phase (Phase -1) before DECOMPOSE | PICO-like structure extraction prevents same-intent-different-wording divergence. DSRC-QCS (Zheng 2024): one-shot decomposition misses sub-problem dependencies, iterative normalization improves F1 by 10-17%. Conditional: skip if all 4 PICO fields inferrable. | No clarification (decomposition sensitive to wording); always ask (delays simple queries) |
+| D16 | DAG decomposition, not flat list or tree | Sub-problems share biological/molecular dependencies (e.g., "template recognition" requires both "polymerase" and "fidelity"). GoT (Besta 2023): aggregation over tree, 62% quality gain. AGoT (2025): dynamic DAG, +46% reasoning. Enables parallel exploration of independent nodes, explicit dependency propagation. | Flat list (implicit ordering only); tree (no merge/aggregation, duplicate computation); full graph (cycle risk) |
 
 ## Future Agent Types (Not Yet Implemented)
 
@@ -341,3 +343,7 @@ orchestrator agent differs (phase sequence and decomposition logic).
 - IM-SciQA dataset: https://huggingface.co/datasets/MRAGDATASET/Pubmed-MHQA
 - memvid: https://github.com/memvid/memvid
 - Claude Agent SDK: https://platform.claude.com/docs/en/agent-sdk/overview
+- DSRC-QCS (Zheng 2024): doi:10.1002/asi.24971 (iterative decompose-solve-renewal)
+- Graph of Thoughts (Besta 2023): arXiv:2308.09687
+- Adaptive Graph of Thoughts (2025): arXiv:2502.05078
+- CoQuest (CHI 2024): doi:10.1145/3613904.3642698 (collaborative research question generation)
