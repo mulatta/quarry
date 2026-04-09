@@ -25,6 +25,8 @@ and MeSH-mediated serendipity.
 | S16 | Reverse central dogma: Rqc2p found via MeSH serendipity | Serendipity detection is core value, not optional |
 | S16-agent | 50 tool calls, 4 serendipity, 15-paper reading list | Single agent works but context pressure at 50 calls |
 | S16-agent | Fidelity as natural integration point (bridge sp=3 pattern) | Bridge analysis produces structural insights beyond individual expand |
+| Pipeline-run1 | 94 calls, 6 serendipity, CSR error → SQL fallback, hooks not called | Hook invocation must be explicit bash command in SOUL.md |
+| Pipeline-run2 | 95 calls, 6 serendipity, 41 state files, L1 hooks 4/4, novelty 89% | Pipeline validated. L1 deterministic flag caught "aaRS as bridge" |
 
 ## Architecture: Pipeline of Specialized Agents
 
