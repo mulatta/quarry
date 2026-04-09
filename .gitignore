@@ -26,6 +26,11 @@ data/
 # test
 tests/data/
 
+# eval outputs (generated from tracked source data)
+eval/seed-recall/reviews.jsonl
+eval/seed-recall/summary.json
+eval/seed-recall/results/
+
 
 # agents
 apm_modules/
