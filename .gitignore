@@ -32,7 +32,11 @@ apm_modules/
 .claude/*
 !CLAUDE.md
 !.claude/CLAUDE.md
+!.claude/agents/
+!.claude/agents/**
 !.claude/skills/
 .claude/skills/*
 !.claude/skills/dogfood/
 !.claude/skills/dogfood/**
+!.claude/skills/quarry-research/
+!.claude/skills/quarry-research/**

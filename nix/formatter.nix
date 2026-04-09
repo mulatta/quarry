@@ -3,8 +3,9 @@
   imports = [ inputs.treefmt-nix.flakeModule ];
   perSystem.treefmt = {
     projectRootFile = "flake.nix";
-    # Exclude skill files — mdformat mangles YAML frontmatter (--- → ## heading)
+    # Exclude files with YAML frontmatter — mdformat mangles --- delimiters
     settings.global.excludes = [
+      ".claude/agents/**"
       ".claude/skills/**"
       "docs/dogfood/**"
     ];
