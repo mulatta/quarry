@@ -2,7 +2,8 @@
 
 ```
 $HOME/.claude/outputs/research-scout-<slug>/state/
-├── sub_problems.yaml          # Phase 0 output
+├── normalized_query.yaml      # Phase -1 output
+├── sub_problems.yaml          # Phase 0 output (DAG)
 ├── sp_1/
 │   ├── seeds.yaml             # explorer output
 │   ├── findings.yaml          # explorer output
@@ -24,26 +25,65 @@ $HOME/.claude/outputs/research-scout-<slug>/state/
 └── report.md                  # synthesizer output: final report
 ```
 
+## normalized_query.yaml
+
+```yaml
+original: "RNA 자가복제 나노머신이 가능한가?"
+system: "RNA-based ribozyme"
+mechanism: "self-replication via template-dependent polymerization"
+context: "in vitro, synthetic biology"
+outcome: "feasibility of autonomous replication cycle"
+scope_assumptions:
+  - "excludes protein-assisted replication"
+  - "focuses on catalytic RNA (ribozymes)"
+clarification_asked: false   # true if user was asked clarifying questions
+```
+
 ## sub_problems.yaml
 
 ```yaml
+# DAG structure: depends_on defines directed edges (prerequisite relationship).
+# No cycles allowed. Topological order determines exploration sequence.
+# SPs with no unresolved depends_on may be explored in parallel.
 sub_problems:
   - id: 1
-    name: "short name"
-    function: "what it must do"
-    analogue: "closest known system"
-    search: ["MeSH term 1", "keyword"]
-    depends_on: []
-    parent_id: null    # null for root, sp id for tree refinements
-    status: explored   # pending | explored | refined | unable_to_assess
+    name: "polymerase activity"
+    function: "RNA-catalyzed RNA polymerization"
+    analogue: "ribozyme polymerase (e.g., tC19Z)"
+    search: ["RNA-Directed RNA Polymerase", "ribozyme"]
+    depends_on: []          # root node — explored first
+    parent_id: null
+    depth: 0                # refinement depth (max 2)
+    status: explored        # pending | explored | refined | unable_to_assess
     feasibility: "★★★☆"
-  - id: "2a"           # sub-sp from tree refinement of sp 2
-    name: "narrowed aspect"
-    function: "specific part of sp 2"
+  - id: 2
+    name: "template recognition"
+    function: "sequence-specific template binding"
+    analogue: "Watson-Crick base pairing in ribozymes"
+    search: ["Template, RNA", "base pairing"]
+    depends_on: [1]         # needs SP1 results (polymerase context)
+    parent_id: null
+    depth: 0
+    status: explored
+    feasibility: "★★☆☆"
+  - id: 3
+    name: "error correction"
+    function: "replication fidelity above error catastrophe threshold"
+    analogue: "Qβ replicase fidelity mechanisms"
+    search: ["RNA Replicase", "mutation rate"]
+    depends_on: [1, 2]      # needs both SP1 and SP2
+    parent_id: null
+    depth: 0
+    status: pending
+    feasibility: null
+  - id: "2a"                # refinement of SP2 (depth 1)
+    name: "internal template binding"
+    function: "cis-acting template recognition"
     analogue: "..."
     search: ["..."]
-    depends_on: []
-    parent_id: 2       # indicates this is a child of sp 2
+    depends_on: [1]         # inherits parent's dependency
+    parent_id: 2
+    depth: 1
     status: explored
     feasibility: "★☆☆☆"
 ```
