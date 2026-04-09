@@ -677,10 +677,18 @@ fn path_bridges(
         }
         for e in entries {
             let idx = graph.resolve(e.work_id).unwrap();
-            merged
-                .entry(idx)
-                .and_modify(|(_, count)| *count += e.path_count)
-                .or_insert((e.hop_from, e.path_count));
+            match merged.entry(idx) {
+                std::collections::hash_map::Entry::Occupied(mut o) => {
+                    let (existing_hop, count) = o.get_mut();
+                    *count += e.path_count;
+                    if e.hop_from < *existing_hop {
+                        *existing_hop = e.hop_from;
+                    }
+                }
+                std::collections::hash_map::Entry::Vacant(v) => {
+                    v.insert((e.hop_from, e.path_count));
+                }
+            }
         }
     }
 
@@ -693,7 +701,11 @@ fn path_bridges(
         })
         .collect();
 
-    result.sort_unstable_by(|a, b| b.path_count.cmp(&a.path_count));
+    result.sort_unstable_by(|a, b| {
+        b.path_count
+            .cmp(&a.path_count)
+            .then_with(|| a.work_id.cmp(&b.work_id))
+    });
     if limit > 0 {
         result.truncate(limit);
     }
@@ -1168,21 +1180,20 @@ fn find_meeting_path(
     src: u32,
     dst: u32,
 ) -> Option<Vec<u32>> {
-    // Find meeting point with minimum total distance
-    let mut best_total = usize::MAX;
-    let mut best_meet = None;
+    // Find meeting point with minimum (total_distance, node_id).
+    // Tuple ordering makes ties deterministic regardless of HashMap iteration order.
+    let mut best: Option<(usize, u32)> = None;
 
     for (&v, &d_fwd) in dist_fwd {
         if let Some(&d_rev) = dist_rev.get(&v) {
-            let total = d_fwd + d_rev;
-            if total < best_total {
-                best_total = total;
-                best_meet = Some(v);
+            let candidate = (d_fwd + d_rev, v);
+            if best.is_none_or(|b| candidate < b) {
+                best = Some(candidate);
             }
         }
     }
 
-    let meet = best_meet?;
+    let (_, meet) = best?;
 
     // Trace path: src → ... → meet (via parent_fwd)
     let mut nodes = Vec::new();
