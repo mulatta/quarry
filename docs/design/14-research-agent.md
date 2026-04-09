@@ -194,19 +194,38 @@ Evaluation criteria before adoption:
 
 ## Orchestration Evolution
 
-### Phase A: Markdown Agents (Current)
+### Phase A: Claude Code Native (Current)
+
+Source of truth: `.claude/agents/*.md` (frontmatter + markdown).
+Skills: `.claude/skills/quarry-research/` (shared references).
+Hooks: `scripts/research-scout/` (deterministic scripts).
 
 ```
-.claude/agents/research-scout.md      (orchestrator, ~120 lines)
-.claude/agents/research-explorer.md   (worker)
-.claude/agents/research-bridger.md    (worker)
-.claude/agents/research-synthesizer.md (worker)
-.claude/skills/quarry-research/       (shared references)
+.claude/agents/                     (Claude Code native, frontmatter)
+├── research-scout.md               (orchestrator, tools: Agent(...))
+├── research-explorer.md            (worker, tools: Bash/Read/Write/Edit)
+├── research-bridger.md             (worker, tools: Bash/Read/Write/Edit)
+└── research-synthesizer.md         (worker, tools: Read/Write/Edit)
+
+.claude/skills/quarry-research/     (shared references)
+├── SKILL.md                        (index)
+└── references/                     (serendipity, context-discipline, etc.)
+
+scripts/research-scout/             (deterministic checks)
+├── serendipity-l1.sh
+├── verification.sh
+└── state-check.sh
 ```
+
+Management:
+
+- apm: external dependencies (dagster, harness, rust-skills)
+- `.claude/agents/`: agent definitions with frontmatter (tool governance, maxTurns, skill injection)
+- `.claude/skills/`: reusable knowledge shared across agents
 
 Orchestrator spawns workers via `Agent()` tool. State on disk.
-Loops capped at max 1 iteration. Sufficient for sequential pipeline
-with simple conditional branches.
+Hooks invoked explicitly via Bash in orchestrator workflow.
+Loops capped at max 1 iteration.
 
 ### Phase B: Markdown + Critic (3-5 sessions)
 
@@ -296,6 +315,10 @@ Human-rated bridge results + QA triplet quality feed the loop.
 | D8 | Shared skill with references, not inline | Progressive disclosure; references loaded only when needed; reusable across agent types | All-in-one agent md (hits 500-line limit); separate skills per agent (duplication) |
 | D9 | No orchestrator skill (agent IS orchestrator) | Single-agent-type orchestration; SKILL.md is trigger wrapper only | Full orchestrator skill (adds layer without value for single-type pipeline) |
 | D10 | Deep read = structured QA triplets (AIM-SciQA pattern) | (Q,A,E) per section enables embedding-based serendipity, multi-hop QA metrics, evidence tracing | Unstructured summary (loses structure); full text in context (overflows) |
+| D11 | Claude Code native (.claude/agents/ with frontmatter) | Frontmatter enables system-level tool governance, maxTurns, skill injection — gitagent export loses these. No export layer = no sync drift. apm manages external deps. | gitagent as source + export (frontmatter lost, sync burden); gitagent for everything (role overlap with apm) |
+| D12 | Serendipity validation at orchestrator (Phase 2.5), not synthesizer | Only orchestrator has full context: all sp definitions, all findings, all bridge sp values. Synthesizer formats validated results only. | Synthesizer validates (lacks decompose-time baseline); explorer validates (lacks cross-sp context) |
+| D13 | Tree refinement for infeasible sub-problems (depth max 1) | ★☆☆☆ sp may be a composite of solvable + unsolvable parts. Decomposing narrows the bottleneck. Triggers: 0 seeds, needs_refinement flag, "no precedent" in findings. | No refinement (report "hard" without analysis); unlimited depth (cost explosion) |
+| D14 | Bridge sp as soft signal for serendipity novelty, not hard threshold | sp < session median = likely predictable; sp > median = likely novel. But sp varies by field, graph coverage, and topic specificity. LLM makes final call with sp as evidence. | Hard sp threshold (ignores context); ignore sp entirely (loses quantitative signal) |
 
 ## Future Agent Types (Not Yet Implemented)
 
