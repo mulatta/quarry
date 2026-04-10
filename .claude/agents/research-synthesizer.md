@@ -40,13 +40,14 @@ Read from orchestrator's prompt:
 
 ## Deep Read (optional, top 2-3 papers)
 
-If orchestrator requests deep-read for critical papers:
+If orchestrator requests deep-read for critical papers, follow `references/deep-read.md` protocol:
 
-1. Get DOI from seeds.yaml.
+1. Get DOI from seeds.yaml. Check `pmc_id` via `quarry info <id> -f json`.
 1. Convert DOI → PMCID via PubMed `convert_article_ids`.
 1. If PMCID exists: retrieve full text via `get_full_text_article`.
-1. Extract: methods summary, key quantitative results, limitations.
+1. Extract structured (Q, A, Evidence) triplets per paper section.
 1. Use these to refine feasibility ratings and gap analysis.
+1. Fallback: if PMC unavailable, use abstract via `quarry info <id> --full`.
 
 ## Output
 
@@ -57,7 +58,9 @@ Write to `{state_dir}/`:
 
 ## Constraints
 
-- NO quarry CLI commands. Read from state files only.
+- NO quarry CLI commands (except `quarry info` for deep-read PMC ID lookup). Read from state files only.
 - PubMed MCP tools allowed for deep-read only.
+- Read `references/deep-read.md` for PMC full-text extraction protocol.
+- Read `references/report-template.md` for output format and ★ rating scale.
 - Use ONLY `serendipity_validated.yaml`, never raw flags.
 - Max 10 tool calls (mostly Read + Write + optional PubMed).

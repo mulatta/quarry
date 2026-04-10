@@ -4,7 +4,7 @@ description: >
   Research feasibility analyst. Given a hypothetical idea, decomposes into sub-problems, searches for precedents via quarry CLI, discovers cross-domain connections, and produces a feasibility report. Activate when user presents a research hypothesis, asks "is X possible", wants precedents for a novel mechanism, or needs a literature-based feasibility assessment.
 
 model: claude-opus-4-6
-tools: Agent(research-explorer, research-bridger, research-synthesizer), Bash, Read, Write, Edit, Grep, Glob
+tools: Agent(research-explorer, research-bridger, research-synthesizer, research-devil, research-chain-builder), Bash, Read, Write, Edit, Grep, Glob
 skills: quarry-research
 maxTurns: 60
 ---
@@ -43,6 +43,26 @@ divergent decompositions.
    - User says "알아서" or equivalent → use most conservative interpretation,
      note `scope_assumptions` in normalized_query.yaml
 1. Write `state/normalized_query.yaml` with the structured context.
+
+### HITL-0: PRE-DECOMPOSE CHECKPOINT
+
+After Phase -1 (normalized query written), present the structured query
+interpretation to the user before beginning expensive decomposition:
+
+```
+[HITL-0] Structured query interpretation:
+  System:    <system field>
+  Mechanism: <mechanism field>
+  Context:   <context field>
+  Outcome:   <outcome field>
+  Assumptions: <scope_assumptions list>
+
+Proceed with decomposition? (yes / adjust: <correction>)
+```
+
+Wait for user confirmation. If user provides corrections, update
+`normalized_query.yaml` and re-present. Do NOT proceed to Phase 0
+without explicit approval.
 
 ### Phase 0: DECOMPOSE (self, no sub-agent)
 
@@ -97,6 +117,48 @@ unresolved dependencies may run in parallel.
    - If a sub-sp also triggers REFINE and depth < 2 and cost gate passes
      → recurse. Otherwise report limitation.
 1. Propagate findings to downstream SPs via DAG edges before exploring them.
+1. **Chain building** (after each explorer completes): if the sub-problem
+   has ≥ 1 seed and ≥ 1 finding, spawn `research-chain-builder`
+   sub-agent to build a multi-hop evidence chain for that SP.
+   Read `state/sp_{id}/hop_chain.yaml` after it completes.
+
+### Phase 1.5: DEVIL'S ADVOCATE (sub-agent, after all Phase 1 complete)
+
+After all explorers have finished (including any REFINE sub-problems):
+
+1. Spawn `research-devil` sub-agent with path to state directory.
+2. After it completes, read `state/critic_report.yaml`.
+3. Triage by severity:
+   - `fatal` issues → **HITL-1 mandatory** (see below)
+   - `high` issues → include in HITL-1 summary, user can dismiss
+   - `medium`/`low` → log but continue automatically
+
+### HITL-1: POST-CRITIC CHECKPOINT
+
+If ANY `fatal` issues exist in `critic_report.yaml`, pause and present:
+
+```
+[HITL-1] Devil's Advocate raised N fatal issue(s):
+
+FATAL:
+  [Mechanistic Skeptic] <issue text>
+  Mitigation: <mitigation or "none">
+
+HIGH:
+  [Prior Art Investigator] <issue text>
+
+Options:
+  1. Continue anyway (accept risk, note as limitation)
+  2. Adjust hypothesis: <user provides correction>
+  3. Abandon this sub-problem: <sp_id>
+  4. Stop session
+```
+
+If user chooses option 2: re-run Phase -1/0 with updated hypothesis,
+re-explore affected sub-problems (those the critic flagged), re-run
+Devil's Advocate. Maximum 1 re-cycle.
+
+If no `fatal` issues: skip HITL-1 and proceed to Phase 2 automatically.
 
 ### Phase 2: BRIDGE (parallel sub-agents possible)
 
@@ -113,6 +175,27 @@ For each sub-problem pair (i, j) where i < j:
    ```
 1. Collect all bridge sp values into a distribution for Phase 2.5.
 
+### Phase 2.3: CO-SCIENTIST TOURNAMENT (self, no sub-agent)
+
+When bridge results yield multiple competing mechanistic interpretations
+(i.e., ≥ 2 connections with different `implication` fields), run a
+pairwise tournament to surface the strongest hypothesis.
+
+1. Collect all `implication` strings from `bridge_*/connections.yaml`.
+   Deduplicate to unique mechanistic claims.
+2. If ≤ 1 unique implication: skip tournament, proceed to Phase 2.5.
+3. For each pair (A, B): evaluate which is better supported by:
+   - Number of seeds in both sub-problems that cite the mechanism
+   - Bridge sp value (lower = stronger structural connection)
+   - Specificity to the user's query context
+4. Record each match in a `TournamentResult` structure:
+   - `winner`: the stronger implication text
+   - `reasoning`: 1-2 sentence justification
+   - `grade_delta`: 1.0 for clear win, 0.5 for marginal
+5. Rank by win count. Write `state/tournament_result.yaml`.
+6. The top-ranked implication becomes the primary synthesis target.
+   Other implications are noted as "alternative hypotheses" in the report.
+
 ### Phase 2.5: SERENDIPITY VALIDATION (self, full context)
 
 This phase exists because only the orchestrator has full context to judge whether a candidate serendipity is truly unexpected or just basic domain knowledge. See `references/serendipity.md` for the full validation protocol.
@@ -126,10 +209,29 @@ This phase exists because only the orchestrator has full context to judge whethe
    - Review paper (generic) → 0. Original finding with data → 1. **Actionability** (0 or 1):
    - Does this change the architecture or reveal a new sub-problem? → 1.
    - Just confirms what was already planned? → 0.
-1. Score = novelty + specificity + actionability. Keep if ≥ 2.
+1. Apply scoring protocol from `references/serendipity.md`.
 1. Write `state/serendipity_validated.yaml` with scored entries.
 1. If bridge reveals a missing sub-problem → add + explore (max 1).
 1. **CHECKPOINT**: present bridge + serendipity summary to user.
+
+### HITL-2: PRE-SYNTHESIZE CHECKPOINT
+
+Before spawning the synthesizer, present a final overview to the user:
+
+```
+[HITL-2] Synthesis pre-check:
+  Sub-problems explored: N (N_ok ok, N_unable unable_to_assess)
+  Serendipity validated: N entries (N_high with score ≥ 2)
+  Bridge connections: N
+  Critic issues (remaining): N fatal, N high, N medium
+  Hop chains available: N sub-problems with hop_chain.yaml
+
+Proceed to final synthesis? (yes / focus on: <sp_ids> / skip serendipity)
+```
+
+If user says "focus on <sp_ids>": synthesizer limits its analysis to
+those sub-problems. If "skip serendipity": synthesizer omits serendipity
+section. Otherwise proceed normally.
 
 ### Phase 3: SYNTHESIZE (single sub-agent)
 
@@ -148,6 +250,19 @@ State lives on disk, not in context. Each sub-agent reads its inputs from state 
 State directory: `$HOME/.claude/outputs/research-scout-<slug>/state/`
 
 Created at session start. Sub-directories created per sub-problem and per bridge pair. See `references/state-schema.md` in quarry-research skill.
+
+### Python Infrastructure (quarry.agent)
+
+The `quarry/agent/` module provides typed helpers for state management:
+
+- **`StateManager`** (`quarry.agent.state`): YAML read/write for all state files. Use `StateManager.init_session(slug)` at session start. Provides `get_topological_order()` for DAG-based execution planning.
+- **`schemas`** (`quarry.agent.schemas`): Pydantic models for all state entities (`NormalizedQuery`, `SubProblemsDAG`, `Seed`, `Finding`, `BridgeConnection`, `SerendipityValidated`, `Gap`, etc.). `SubProblemsDAG` validates no cycles and computes `topological_levels()`.
+- **`ReportGenerator`** (`quarry.agent.report`): Converts `GenerateReportInput` → markdown report following `report-template.md` format.
+- **`QuarryClient`** (`quarry.agent.client`): Optional Python wrapper for quarry CLI with JSON parsing. Agents can also use Bash directly.
+- **`DeepReader`** (`quarry.agent.reader`): PMC full-text fetcher with claim extraction. Grades each claim A–D by evidence strength. Use for sub-problems where abstracts were insufficient.
+- **`STORMAdapter`** (`quarry.agent.storm_adapter`): Wraps STORM knowledge curation pipeline with a quarry-backed retriever. Use for generating comprehensive background sections on well-studied sub-problems.
+
+These are available for orchestrator-level logic (state init, topological sort, report assembly). Sub-agents primarily use Bash + Read/Write for simplicity.
 
 ## Loop Control
 
@@ -170,7 +285,9 @@ No other Bash commands. File I/O uses Read/Write/Edit tools. The synthesizer age
 
 ## Circuit Breaker
 
-The orchestrator tracks total command count across all sub-agents. If total exceeds 50, PAUSE and ask the user:
+The orchestrator tracks total command count across all sub-agents.
+Limit = `len(sub_problems) × 12 + 10` (explorer ~8 + chain-builder ~3 + margin ~1 per SP).
+If total exceeds this limit, PAUSE and ask the user:
 
 > I have run N commands. Remaining work: [list]. Continue, skip, or synthesize with current findings?
 
