@@ -26,6 +26,44 @@ I orchestrate a pipeline of specialized workers (explorer, bridger, synthesizer)
 
 ## Workflow: 6-Phase Pipeline
 
+### Phase -2: RESUME CHECK (self, before anything else)
+
+Before writing any state, check whether a previous session exists:
+
+```bash
+ls $HOME/.claude/outputs/research-scout-<slug>/state/sub_problems.yaml \
+   $HOME/.claude/outputs/research-scout-<slug>/state/sp_*/seeds.yaml 2>/dev/null
+```
+
+If **non-empty state found**, count completed SPs (directories with `seeds.yaml`)
+and identify the latest completed phase, then present:
+
+```
+[RESUME] 기존 세션이 감지되었습니다.
+  Sub-problems: N개 (SP1: <name>, SP2: <name>, ...)
+  완료된 단계: <Phase -1 / Phase 0 / Phase 1 / Phase 1.5 / Phase 2>
+  재개할 단계: <next incomplete phase>
+
+  선택:
+    resume   — 이전 decomposition 유지, 미완료 단계부터 재개
+    restart  — 기존 state를 backup하고 처음부터 재시작
+```
+
+Wait for user response:
+- `resume` → skip Phase -1 and Phase 0 entirely; read existing
+  `state/sub_problems.yaml` and `state/normalized_query.yaml`; jump to
+  the earliest incomplete phase (check in order: Phase 1 → 1.5 → 2 → 3).
+  For Phase 1: skip explorers whose `state/sp_{id}/seeds.yaml` already
+  exists; only run chain-builder if `hop_chain.yaml` is missing.
+- `restart` → run:
+  ```bash
+  mv $HOME/.claude/outputs/research-scout-<slug>/state \
+     $HOME/.claude/outputs/research-scout-<slug>/state_backup_$(date +%Y%m%dT%H%M%S)
+  ```
+  Then proceed fresh from Phase -1.
+
+If **no existing state**: proceed directly to Phase -1 without prompting.
+
 ### Phase -1: CLARIFY (self, no sub-agent)
 
 Extract structured query context from the user's question. This
@@ -64,6 +102,14 @@ Wait for user confirmation. If user provides corrections, update
 `normalized_query.yaml` and re-present. Do NOT proceed to Phase 0
 without explicit approval.
 
+After approval, write `state/user_decisions.yaml` (create or append):
+
+```yaml
+hitl_0:
+  confirmed: true
+  adjustments: null          # or "description" if user adjusted
+```
+
 ### Phase 0: DECOMPOSE (self, no sub-agent)
 
 1. Read `state/normalized_query.yaml` for structured context.
@@ -79,7 +125,15 @@ without explicit approval.
    in `depends_on` exist.
 1. Write `state/sub_problems.yaml` with DAG structure.
 1. **CHECKPOINT**: present decomposition table AND dependency DAG to
-   user. Wait for approval.
+   user. Wait for approval. After approval, append to
+   `state/user_decisions.yaml`:
+
+   ```yaml
+   hitl_decompose:
+     approved: true
+     removed_sps: []     # sp ids user asked to remove before exploring
+     notes: null
+   ```
 
 ### Phase 1: EXPLORE (topological order, parallel where independent)
 
@@ -135,30 +189,66 @@ After all explorers have finished (including any REFINE sub-problems):
 
 ### HITL-1: POST-CRITIC CHECKPOINT
 
-If ANY `fatal` issues exist in `critic_report.yaml`, pause and present:
+If ANY `fatal` issues exist in `critic_report.yaml`, present each
+`fatal` issue individually, then `high` issues as a batch:
 
 ```
-[HITL-1] Devil's Advocate raised N fatal issue(s):
+[HITL-1] Devil's Advocate raised N issue(s) requiring your decision.
 
-FATAL:
-  [Mechanistic Skeptic] <issue text>
-  Mitigation: <mitigation or "none">
+--- Issue 1 / N (FATAL) ---
+Sub-problem: sp_<id> — <sp name>
+Raised by:   <persona>
+Issue:       <issue text>
+Mitigation:  <mitigation or "none found">
 
-HIGH:
-  [Prior Art Investigator] <issue text>
-
-Options:
-  1. Continue anyway (accept risk, note as limitation)
-  2. Adjust hypothesis: <user provides correction>
-  3. Abandon this sub-problem: <sp_id>
-  4. Stop session
+Decision? [continue | adjust: <new assumption> | drop | stop]
 ```
 
-If user chooses option 2: re-run Phase -1/0 with updated hypothesis,
-re-explore affected sub-problems (those the critic flagged), re-run
-Devil's Advocate. Maximum 1 re-cycle.
+Present each `fatal` issue and wait for a decision before the next.
+Then, for `high` issues together:
 
-If no `fatal` issues: skip HITL-1 and proceed to Phase 2 automatically.
+```
+--- High-severity issues (no decision required, can dismiss) ---
+  [<persona>] <issue text>
+
+Accept all / dismiss: <issue_id>
+```
+
+Valid decisions per fatal issue:
+- `continue` — accept risk, record as limitation in report
+- `adjust: <text>` — update hypothesis, re-explore flagged SP (max 1 re-cycle)
+- `drop` — remove this SP from session, mark as abandoned
+- `stop` — halt the entire session
+
+After all responses, append to `state/user_decisions.yaml`:
+
+```yaml
+hitl_1:
+  fatal_decisions:
+    - issue_id: "critic_fatal_1"
+      sp_id: sp_2
+      persona: "Mechanistic Skeptic"
+      summary: "<one-line issue summary>"
+      decision: adjust          # continue | adjust | drop | stop
+      note: "assume mineral surface catalysis"
+    - issue_id: "critic_fatal_2"
+      sp_id: sp_3
+      persona: "Prior Art Investigator"
+      summary: "<one-line issue summary>"
+      decision: drop
+      note: null
+  high_dismissed: []            # issue_ids user explicitly dismissed
+  session_action: continue      # continue | stop
+  adjusted_sps: [sp_2]          # sps whose hypothesis was updated
+  dropped_sps: [sp_3]           # sps removed from session
+```
+
+If `stop`: write file and halt. If any `adjust`: re-run Phase -1/0
+for that SP only, re-explore it, re-run Devil's Advocate on it.
+Maximum 1 re-cycle per SP.
+
+If no `fatal` issues: skip HITL-1, write `hitl_1: skipped: true` to
+`user_decisions.yaml`, and proceed to Phase 2 automatically.
 
 ### Phase 2: BRIDGE (parallel sub-agents possible)
 
@@ -225,20 +315,41 @@ Before spawning the synthesizer, present a final overview to the user:
   Bridge connections: N
   Critic issues (remaining): N fatal, N high, N medium
   Hop chains available: N sub-problems with hop_chain.yaml
+  Tournament winner: <top implication or "no tournament">
 
-Proceed to final synthesis? (yes / focus on: <sp_ids> / skip serendipity)
+Proceed to synthesis?
+  yes
+  focus: <sp_id1, sp_id2, ...>   — limit report to these SPs
+  skip-serendipity                — omit serendipity section
+  note: <free text>               — add context for synthesizer
 ```
 
-If user says "focus on <sp_ids>": synthesizer limits its analysis to
-those sub-problems. If "skip serendipity": synthesizer omits serendipity
-section. Otherwise proceed normally.
+Wait for response. Multiple directives are combinable
+(e.g., `focus: sp_1, sp_2 / note: prioritise enzyme kinetics`).
+
+After response, append to `state/user_decisions.yaml`:
+
+```yaml
+hitl_2:
+  focus_sps: null             # null = all; or [sp_1, sp_2]
+  skip_serendipity: false
+  synthesizer_notes: null     # free text forwarded to synthesizer prompt
+```
 
 ### Phase 3: SYNTHESIZE (single sub-agent)
 
+1. Read `state/user_decisions.yaml` and extract:
+   - `dropped_sps` (from hitl_1): exclude these SPs entirely
+   - `adjusted_sps` (from hitl_1): note updated hypotheses
+   - `focus_sps` (from hitl_2): restrict scope if set
+   - `skip_serendipity` (from hitl_2): omit section if true
+   - `synthesizer_notes` (from hitl_2): prepend to synthesizer prompt
 1. Spawn `research-synthesizer` sub-agent with:
    - Path to state directory (synthesizer reads validated state only)
    - `serendipity_validated.yaml` (not raw candidates)
+   - `user_decisions.yaml` (so synthesizer respects user choices)
    - Report template reference
+   - Inline summary of decisions (dropped/adjusted/focus SPs)
 1. After synthesizer completes, read `state/report.md`.
 1. If synthesizer reports gaps → re-explore specific sp (max 1 gap loop).
 1. Present final report to user.

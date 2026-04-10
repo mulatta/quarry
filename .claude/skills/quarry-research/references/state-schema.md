@@ -21,6 +21,7 @@ $HOME/.claude/outputs/research-scout-<slug>/state/
 │   ├── serendipity_flags.yaml # L1 flags from bridge results
 │   └── bridge_raw.txt         # full quarry bridge output
 ├── serendipity_validated.yaml # Phase 2.5: orchestrator-validated entries
+├── user_decisions.yaml        # HITL checkpoint decisions (all phases)
 ├── gaps.yaml                  # synthesizer output: unresolved gaps
 └── report.md                  # synthesizer output: final report
 ```
@@ -152,3 +153,54 @@ gaps:
     gap_description: "no biological system for non-destructive side chain recognition"
     severity: critical  # critical | major | minor
 ```
+
+## user_decisions.yaml
+
+Written by the orchestrator (research-scout) after each HITL checkpoint.
+Read by the synthesizer when spawned. Append each section as the session
+progresses; do not overwrite earlier sections.
+
+```yaml
+hitl_0:
+  confirmed: true
+  adjustments: null             # or "description" if user corrected query
+
+hitl_decompose:
+  approved: true
+  removed_sps: []               # sp ids user asked to remove before exploring
+  notes: null
+
+hitl_1:
+  fatal_decisions:
+    - issue_id: "critic_fatal_1"
+      sp_id: sp_2
+      persona: "Mechanistic Skeptic"
+      summary: "strand separation requires ~100 kJ/mol, no biological catalyst"
+      decision: adjust          # continue | adjust | drop | stop
+      note: "assume mineral surface catalysis"
+    - issue_id: "critic_fatal_2"
+      sp_id: sp_3
+      persona: "Prior Art Investigator"
+      summary: "Szostak 2012 negative result (PMID 22231509)"
+      decision: drop
+      note: null
+  high_dismissed: []            # issue_ids user explicitly dismissed
+  session_action: continue      # continue | stop
+  adjusted_sps: [sp_2]
+  dropped_sps: [sp_3]
+  # If no fatal issues existed:
+  # skipped: true
+
+hitl_2:
+  focus_sps: null               # null = all SPs; or [sp_1, sp_2]
+  skip_serendipity: false
+  synthesizer_notes: null       # free text prepended to synthesizer prompt
+```
+
+**Synthesizer contract**: read `user_decisions.yaml` before generating
+the report. Apply these rules strictly:
+- Any sp in `dropped_sps` → exclude from all sections
+- Any sp in `adjusted_sps` → note updated hypothesis in feasibility table
+- `focus_sps` not null → limit Feasibility Assessment section to listed SPs
+- `skip_serendipity: true` → omit Serendipity section entirely
+- `synthesizer_notes` not null → include as "User context" at top of prompt
