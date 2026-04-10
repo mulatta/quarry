@@ -6,9 +6,12 @@ distribution — never hard-coded top-N values.
 
 ## Expand results
 
-1. Read the `score` column.
-1. Find cutoff: score < 30% of rank-1 score.
+1. Read the `appr_score` column (APPR personalised PageRank value; distinct from `fused_score`
+   which blends APPR + embedding similarity).
+1. Find cutoff: appr_score < 30% of rank-1 appr_score.
 1. Keep papers above cutoff, plus ALL laterals regardless of score.
+   Recency exception: papers published within 3 years are always kept even if below cutoff
+   (young papers accumulate low APPR by definition, not by relevance).
 1. **Hard cap**: 30 papers max in context (circuit breaker).
 1. Write full output to `state/sp_{id}/expand_raw.txt`.
 
