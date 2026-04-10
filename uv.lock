@@ -2014,6 +2014,7 @@ dependencies = [
     { name = "psycopg", extra = ["binary"] },
     { name = "pydantic-settings" },
     { name = "pylance" },
+    { name = "pyyaml" },
 ]
 
 [package.optional-dependencies]
@@ -2089,6 +2090,7 @@ requires-dist = [
     { name = "pydantic-settings" },
     { name = "pylance", specifier = ">=4.0.0" },
     { name = "pytest", marker = "extra == 'dev'" },
+    { name = "pyyaml" },
     { name = "quarry", extras = ["elt"], marker = "extra == 'dev'" },
     { name = "quarry", extras = ["server"], marker = "extra == 'cli'" },
     { name = "quarry", extras = ["server"], marker = "extra == 'elt'" },
