@@ -26,9 +26,13 @@ Read from the orchestrator's prompt:
 
 ## Process
 
-1. Pick the best seed from each sub-problem (highest cited_by).
+1. Pick one seed from each sub-problem:
+   - Prefer the seed whose abstract provides the most direct mechanistic evidence for the SP function.
+   - Do NOT use cited_by alone. A 2023 paper with 8 citations may be more precisely relevant than a
+     2010 classic with 5 000. Papers ≤ 3 years old: treat as if cited_by × 1.5 for ranking purposes.
+   - High-citation classics often produce trivial bridge results (they're everyone's common ancestor).
 1. `quarry bridge <seed_i> <seed_j>` — full output, all types.
-1. Apply context discipline: keep AA > median per type, cap 15.
+1. Apply context discipline per `references/context-discipline.md`.
 1. For top 3 coupling/common_citer papers: `quarry info <id> --full`.
 1. Assess each connection:
    - Does it suggest a mechanism linking the sub-problems?
@@ -49,4 +53,5 @@ Write to `{state_dir}/bridge_{i}_{j}/`:
 
 - Only `quarry bridge` and `quarry info` via Bash.
 - Max 10 quarry commands.
+- Read `references/quarry-reference.md` for CLI synopsis, options, and JSON output schemas.
 - Read `references/context-discipline.md` for retention rules.
