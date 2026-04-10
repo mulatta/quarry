@@ -14,8 +14,10 @@ Load only the reference needed for the current task:
 
 | Reference | When to load |
 | --- | --- |
+| `references/quarry-reference.md` | During EXPLORE and BRIDGE — CLI command synopsis, options, JSON schemas |
 | `references/serendipity.md` | During EXPLORE, BRIDGE, and Phase 2.5 — serendipity detection + validation |
 | `references/context-discipline.md` | During EXPLORE and BRIDGE — deciding what to keep in context |
 | `references/state-schema.md` | Session start — state directory structure |
 | `references/report-template.md` | During SYNTHESIZE — output format |
+| `references/deep-read.md` | During SYNTHESIZE — PMC full-text extraction protocol |
 | `references/eval-metrics.md` | After session — quality measurement |
