@@ -79,6 +79,10 @@ class Settings(BaseSettings):
         "editorial",
     ]
 
+    # MCP HTTP Server
+    mcp_host: str = "127.0.0.1"  # QUARRY_MCP_HOST — set to 0.0.0.0 for nginx/Tailscale
+    mcp_port: int = 8000  # QUARRY_MCP_PORT — configurable to avoid conflicts
+
     # Download
     ftp_parallel: int = 4
 
