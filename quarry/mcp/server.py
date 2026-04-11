@@ -1,14 +1,19 @@
-"""FastMCP server exposing 8 tools for academic paper exploration.
+"""FastMCP server exposing 11 tools for academic paper exploration.
 
-Tools:
-  search_papers   — hybrid search (BM25 + ANN + reranker) + MeSH expansion
-  get_paper       — single paper detail by work_id, PMID, or DOI
-  expand_citations — citation/cited-by N-hop expansion
-  find_path       — citation chain between two papers
-  similar_papers  — embedding similarity search
-  get_subgraph    — session papers graph structure
-  query_metadata  — PG SQL (SELECT only)
-  mesh_explore    — MeSH hierarchy navigation
+CLI-equivalent tools (1:1 mapping):
+  expand          — quarry expand (APPR + wRRF citation neighborhood)
+  bridge          — quarry bridge (7 bridge types across seeds)
+  shrink          — quarry shrink (greedy min-cover from top venues)
+  search_papers   — quarry search / vsearch (hybrid BM25 + vector)
+  get_paper       — quarry info [+include_mesh for --mesh]
+  mesh_explore    — quarry mesh [+papers, +tree directions]
+
+Lower-level / utility tools:
+  expand_citations — k-hop neighborhood (kept for backward compatibility)
+  find_path        — shortest citation chain between two papers
+  similar_papers   — embedding similarity search
+  get_subgraph     — session subgraph structure + metrics
+  query_metadata   — PG SQL escape hatch (SELECT only)
 """
 
 try:
@@ -393,6 +398,137 @@ def mesh_explore(
         result["children"] = children
 
     return result
+
+
+@mcp.tool()
+def expand(
+    seed: str,
+    mode: str = "fused",
+    limit: int = 200,
+    alpha: float = 0.15,
+    epsilon: float = 1e-6,
+    min_citations: int = 0,
+    include_abstract: bool = False,
+    mesh_summary: bool = False,
+) -> dict:
+    """APPR-based citation graph expansion around a seed paper (quarry expand).
+
+    Uses Approximate Personalized PageRank + wRRF to surface the most
+    structurally relevant papers in the citation neighborhood.
+
+    Args:
+        seed: Seed paper — W<id>, DOI, or integer work_id_int
+        mode: "fused" (APPR+wRRF, default) or "separated" (APPR only)
+        limit: Max papers returned (default 200)
+        alpha: PPR teleport probability (default 0.15)
+        epsilon: PPR convergence threshold (default 1e-6)
+        min_citations: Filter out papers with fewer citations than this
+        include_abstract: Include abstract text in each paper entry
+        mesh_summary: Append top-10 MeSH descriptor distribution across results
+    """
+    from quarry.core.expand import run_expand
+
+    result = run_expand(
+        seed=seed,
+        csr_dir=str(settings.csr_dir),
+        pg_conninfo=settings.pg_conninfo,
+        mode=mode,
+        alpha=alpha,
+        epsilon=epsilon,
+        limit=limit,
+        min_citations=min_citations,
+        include_abstract=include_abstract,
+    )
+
+    if mesh_summary:
+        db = _get_db()
+        work_ids = [f"W{p['work_id']}" for p in result["papers"]]
+        result["mesh_summary"] = db.top_mesh_by_work_ids(work_ids, limit=10)
+
+    return result
+
+
+@mcp.tool()
+def bridge(
+    seeds: list[str],
+    types: list[str] | None = None,
+    limit: int = 100,
+    max_neighbor_degree: int = 10_000,
+    max_path_depth: int = 5,
+    alpha: float = 0.15,
+    epsilon: float = 1e-6,
+    include_abstract: bool = False,
+) -> dict:
+    """Find papers that connect multiple seed papers (quarry bridge).
+
+    Runs 7 bridge algorithms (common_refs, common_citers, coupling,
+    cocitation, path, ppr, steiner) to surface cross-domain connectors.
+
+    Args:
+        seeds: 2+ seed papers — W<id>, DOI, or integer work_id_int
+        types: Bridge types to run; None = all applicable types
+        limit: Max results per bridge type (default 100)
+        max_neighbor_degree: Skip hub nodes above this degree (default 10000)
+        max_path_depth: Max hops for path-based bridges (default 5)
+        alpha: PPR teleport probability (default 0.15)
+        epsilon: PPR convergence threshold (default 1e-6)
+        include_abstract: Include abstract text in each paper entry
+    """
+    from quarry.core.bridge import run_bridge
+
+    return run_bridge(
+        seeds=seeds,
+        csr_dir=str(settings.csr_dir),
+        pg_conninfo=settings.pg_conninfo,
+        types=types,
+        limit=limit,
+        max_neighbor_degree=max_neighbor_degree,
+        max_path_depth=max_path_depth,
+        alpha=alpha,
+        epsilon=epsilon,
+        include_abstract=include_abstract,
+    )
+
+
+@mcp.tool()
+def shrink(
+    seed: str,
+    top_n: int = 5,
+    venues: list[str] | None = None,
+    expand_limit: int = 200,
+    no_foundation: bool = False,
+    exclude: list[str] | None = None,
+) -> dict:
+    """Greedy minimum covering set from top-venue papers (quarry shrink).
+
+    Expands seed, filters to high-impact venues, then selects the smallest
+    set of papers that collectively cite/are-cited-by the most candidates.
+
+    Args:
+        seed: Seed paper — W<id>, DOI, or integer work_id_int
+        top_n: Number of papers to select (default 5)
+        venues: Venue names to include; None = NCS_PLUS defaults
+        expand_limit: Candidate pool size from expand (default 200)
+        no_foundation: Exclude relation=foundation papers from pool
+        exclude: Work IDs to exclude — W<id> strings (e.g., ["W12345"])
+    """
+    from quarry.core.shrink import NCS_PLUS, run_shrink
+
+    venue_set = set(venues) if venues is not None else NCS_PLUS
+    exclude_set = {
+        int(w.lstrip("W")) for w in (exclude or []) if w.lstrip("W").isdigit()
+    }
+
+    return run_shrink(
+        seed=seed,
+        csr_dir=str(settings.csr_dir),
+        pg_conninfo=settings.pg_conninfo,
+        top_n=top_n,
+        venues=venue_set,
+        expand_limit=expand_limit,
+        no_foundation=no_foundation,
+        exclude=exclude_set,
+    )
 
 
 def main():
