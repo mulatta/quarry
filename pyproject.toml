@@ -19,6 +19,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Server process: runs quarry MCP HTTP server (heavy — Rust graph, vector store)
 server = [
     "quarry-core",
     "quarry-graph",
@@ -26,6 +27,11 @@ server = [
     "numpy",
     "pyarrow",
     "mcp[cli]",
+]
+# MCP client: for Python code that programmatically calls the quarry MCP server
+# Agents and Claude Code connect via URL only — no Python install needed
+mcp = [
+    "mcp",
 ]
 cli = [
     "quarry[server]",
