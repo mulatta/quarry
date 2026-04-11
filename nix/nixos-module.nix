@@ -1,21 +1,22 @@
+{ inputs }:
 {
   config,
   lib,
+  pkgs,
   ...
 }:
 let
-  cfg = config.services.quarry-mcp;
+  cfg = config.services.quarry-server;
 in
 {
-  options.services.quarry-mcp = {
+  options.services.quarry-server = {
     enable = lib.mkEnableOption "quarry MCP HTTP server";
 
     package = lib.mkOption {
       type = lib.types.package;
-      description = ''
-        The quarry server environment to use.
-        Set to flake.packages.''${system}.quarry-server from the quarry flake.
-      '';
+      default = inputs.self.packages.${pkgs.stdenv.hostPlatform.system}.quarry-server;
+      defaultText = lib.literalExpression "quarry.packages.\${system}.quarry-server";
+      description = "The quarry-server package to use.";
     };
 
     host = lib.mkOption {
@@ -45,13 +46,13 @@ in
     user = lib.mkOption {
       type = lib.types.str;
       default = "quarry";
-      description = "System user to run the quarry-mcp service.";
+      description = "System user to run the quarry-server service.";
     };
 
     group = lib.mkOption {
       type = lib.types.str;
       default = "quarry";
-      description = "System group to run the quarry-mcp service.";
+      description = "System group to run the quarry-server service.";
     };
   };
 
@@ -62,7 +63,7 @@ in
     };
     users.groups.${cfg.group} = { };
 
-    systemd.services.quarry-mcp = {
+    systemd.services.quarry-server = {
       description = "quarry MCP HTTP server";
       wantedBy = [ "multi-user.target" ];
       after = [

@@ -39,7 +39,7 @@
         ./nix/shell.nix
       ];
 
-      flake.nixosModules.quarry-mcp = import ./nix/nixos-module.nix;
+      flake.nixosModules.quarry-server = import ./nix/nixos-module.nix { inherit inputs; };
 
       perSystem =
         { system, ... }:
