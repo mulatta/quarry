@@ -2726,7 +2726,7 @@ wheels = [
 
 [[package]]
 name = "quarry"
-version = "0.2.0"
+version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "psycopg", extra = ["binary"] },
@@ -2852,7 +2852,7 @@ provides-extras = ["server", "cli", "elt", "dev"]
 
 [[package]]
 name = "quarry-core"
-version = "0.2.0"
+version = "0.1.0"
 source = { editable = "crates/quarry-core" }
 
 [[package]]
