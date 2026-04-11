@@ -43,5 +43,5 @@ apm_modules/
 .claude/skills/*
 !.claude/skills/dogfood/
 !.claude/skills/dogfood/**
-!.claude/skills/quarry-research/
-!.claude/skills/quarry-research/**
+!.claude/skills/quarry-mcp/
+!.claude/skills/quarry-mcp/**
