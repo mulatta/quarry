@@ -8,7 +8,7 @@ $HOME/.claude/outputs/research-scout-<slug>/state/
 │   ├── seeds.yaml             # explorer output
 │   ├── findings.yaml          # explorer output
 │   ├── serendipity_flags.yaml # L1 hook output
-│   ├── expand_raw.txt         # full quarry expand output
+│   ├── expand_raw.txt         # full expand tool raw output
 │   └── summary.txt            # 1-paragraph landscape summary
 ├── sp_2/
 │   └── ...
@@ -19,7 +19,7 @@ $HOME/.claude/outputs/research-scout-<slug>/state/
 ├── bridge_1_2/
 │   ├── connections.yaml       # bridger output
 │   ├── serendipity_flags.yaml # L1 flags from bridge results
-│   └── bridge_raw.txt         # full quarry bridge output
+│   └── bridge_raw.txt         # full bridge tool raw output
 ├── serendipity_validated.yaml # Phase 2.5: orchestrator-validated entries
 ├── user_decisions.yaml        # HITL checkpoint decisions (all phases)
 ├── gaps.yaml                  # synthesizer output: unresolved gaps
