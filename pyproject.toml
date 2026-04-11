@@ -9,13 +9,10 @@ description = "PubMed-primary academic paper exploration + citation graph mining
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "dagster-postgres>=0.28.20",
-    "peft>=0.18.1",
     "psycopg[binary]",
     "pydantic>=2",
     "pydantic-settings",
     "pyyaml",
-    "pylance>=4.0.0",
 ]
 
 [project.optional-dependencies]
@@ -40,14 +37,17 @@ cli = [
 elt = [
     "quarry[server]",
     "dagster",
+    "dagster-postgres>=0.28.20",
     "dagster-webserver",
     "dagster-dg-cli>=1.12.19",
+    "peft>=0.18.1",
     "torch",
     "sentence-transformers",
     "blake3",
     "httpx",
     "boto3",
     "duckdb",
+    "pylance>=4.0.0",
 ]
 agent = [
     "knowledge-storm",
