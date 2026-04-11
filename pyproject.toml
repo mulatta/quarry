@@ -59,6 +59,7 @@ dev = [
 
 [project.scripts]
 quarry = "quarry.cli:app"
+quarry-server = "quarry.mcp.server:main"
 
 [tool.uv.workspace]
 members = [
