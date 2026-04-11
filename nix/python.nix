@@ -14,7 +14,7 @@
       # but it doesn't know about the Cargo workspace — we add cargoDeps + cargoSetupHook
       # via overrideAttrs so the pyproject-nix dependency graph stays intact.
       pyprojectOverrides =
-        _final: prev:
+        final: prev:
         let
           addCargo =
             lockFile: pkg:
@@ -31,8 +31,35 @@
                 MATURIN_NO_INSTALL_RUST = "1";
               };
             });
+
+          # Some legacy sdist packages use setuptools as build backend but omit it
+          # from build-system.requires. Inject setuptools for each affected package.
+          addSetuptools =
+            pkg:
+            pkg.overrideAttrs (old: {
+              nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ final.setuptools ];
+            });
         in
-        {
+        # nvidia-*, torch, and torchvision wheels reference CUDA runtime libs
+        # (libcudart, libcublas, libnvshmem, ...) that live in the host GPU
+        # driver, not in the Nix store. Skip autoPatchelf dep checking for these;
+        # torch finds its nvidia-* siblings at runtime via site-packages lookup.
+        (lib.mapAttrs (
+          name: pkg:
+          if
+            lib.hasPrefix "nvidia-" name
+            || builtins.elem name [
+              "torch"
+              "torchvision"
+            ]
+          then
+            pkg.overrideAttrs (_: {
+              autoPatchelfIgnoreMissingDeps = true;
+            })
+          else
+            pkg
+        ) prev)
+        // {
           quarry-core = addCargo ../crates/quarry-core/Cargo.lock prev.quarry-core;
           quarry-graph = addCargo ../crates/quarry-graph/Cargo.lock prev.quarry-graph;
           # lancedb: autoPatchelfHook applied automatically for manylinux wheels.
@@ -40,6 +67,10 @@
           # lancedb = prev.lancedb.overrideAttrs (old: {
           #   buildInputs = (old.buildInputs or []) ++ [ pkgs.openssl pkgs.zlib ];
           # });
+
+          # Packages that use setuptools as build backend without declaring it:
+          "antlr4-python3-runtime" = addSetuptools prev."antlr4-python3-runtime";
+          "pylatexenc" = addSetuptools prev."pylatexenc";
         };
 
       pythonSet =
