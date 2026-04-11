@@ -6,6 +6,10 @@
       "env": {
         "DATABASE_URI": "postgresql:///quarry?host=/tmp/quarry-pg"
       }
+    },
+    "quarry": {
+      "type": "http",
+      "url": "http://127.0.0.1:8000/mcp"
     }
   }
 }
