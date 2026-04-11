@@ -289,11 +289,6 @@ def get_subgraph(
     }
 
     if include_metrics and len(node_ids) > 0:
-        result["pagerank"] = dict(
-            graph.subgraph_pagerank(
-                node_ids, alpha=0.85, max_iter=100, tol=1e-6, restart_node=None
-            )
-        )
         if len(node_ids) < 10_000:
             result["betweenness"] = dict(
                 graph.subgraph_betweenness(node_ids, normalized=True)
