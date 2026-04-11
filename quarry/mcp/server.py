@@ -532,7 +532,10 @@ def shrink(
 
 
 def main():
-    mcp.run()
+    # host/port must be set on the FastMCP instance before run(), not passed to run()
+    mcp.settings.host = settings.mcp_host
+    mcp.settings.port = settings.mcp_port
+    mcp.run(transport="streamable-http")
 
 
 if __name__ == "__main__":
