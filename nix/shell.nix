@@ -42,6 +42,7 @@ in
           QUARRY_PG_CONNINFO = "host=${pgSocketDir} dbname=quarry";
           LD_LIBRARY_PATH = lib.makeLibraryPath [
             pkgs.stdenv.cc.cc.lib
+            pkgs.zlib
             "${pkgs.addDriverRunpath.driverLink}"
           ];
           TRITON_LIBCUDA_PATH = "${pkgs.addDriverRunpath.driverLink}/lib";
