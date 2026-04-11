@@ -61,7 +61,9 @@
       # quarry has two scripts: "quarry" (CLI) and "quarry-server" (MCP daemon).
       # mkApplication uses meta.mainProgram to select which binary `nix run` invokes.
       quarryServerPkg = pythonSet.quarry.overrideAttrs (old: {
-        meta = old.meta // { mainProgram = "quarry-server"; };
+        meta = old.meta // {
+          mainProgram = "quarry-server";
+        };
       });
     in
     {

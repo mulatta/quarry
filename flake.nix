@@ -32,6 +32,7 @@
         "aarch64-darwin"
       ];
       imports = [
+        ./nix/checks.nix
         ./nix/formatter.nix
         ./nix/packages.nix
         ./nix/python.nix
