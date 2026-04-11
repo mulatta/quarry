@@ -313,13 +313,19 @@ def mesh_explore(
     descriptor_ui: str | None = None,
     descriptor_name: str | None = None,
     direction: str = "descendants",
+    limit: int = 15,
 ) -> dict:
-    """Explore MeSH hierarchy: find descendants or ancestors of a descriptor.
+    """Explore MeSH hierarchy or discover papers tagged with a descriptor.
 
     Args:
         descriptor_ui: MeSH descriptor UI (e.g., "D009369" for Neoplasms)
         descriptor_name: Alternative: search by name (partial match)
-        direction: "descendants" (default) or "info"
+        direction: "descendants" (default), "info", "papers", or "tree"
+            - "descendants": all descendant descriptors in hierarchy
+            - "info": descriptor metadata only
+            - "papers": top cited papers tagged with this descriptor (quarry mesh default)
+            - "tree": parent descriptor + direct children in hierarchy (quarry mesh --tree)
+        limit: Max papers returned when direction="papers" (default 15)
     """
     db = _get_db()
 
@@ -341,10 +347,11 @@ def mesh_explore(
     if not tree_entries:
         return {"error": f"Descriptor {descriptor_ui} not found in mesh_tree"}
 
-    result = {
+    tree_numbers = [e["tree_number"] for e in tree_entries]
+    result: dict = {
         "descriptor_ui": descriptor_ui,
         "descriptor_name": tree_entries[0]["descriptor_name"],
-        "tree_numbers": [e["tree_number"] for e in tree_entries],
+        "tree_numbers": tree_numbers,
     }
 
     if direction == "descendants":
@@ -352,7 +359,7 @@ def mesh_explore(
         for entry in tree_entries:
             descendants = db.mesh_descendants(entry["tree_number"])
             all_descendants.extend(descendants)
-        seen = set()
+        seen: set = set()
         unique = []
         for d in all_descendants:
             key = (d["descriptor_ui"], d["tree_number"])
@@ -361,6 +368,29 @@ def mesh_explore(
                 unique.append(d)
         result["descendants"] = unique
         result["descendant_count"] = len(unique)
+
+    elif direction == "papers":
+        works, total = db.get_top_works_by_mesh(descriptor_ui, limit=limit)
+        result["papers"] = works
+        result["total_count"] = total
+
+    elif direction == "tree":
+        parents = [db.mesh_parent(tn) for tn in tree_numbers]
+        result["parents"] = [p for p in parents if p is not None]
+        children: list[dict] = []
+        seen_children: set = set()
+        for tn in tree_numbers:
+            for c in db.mesh_descendants(tn):
+                # Only direct children: one level deeper, not self
+                if (
+                    c["tree_number"] != tn
+                    and c["tree_number"].startswith(tn + ".")
+                    and c["tree_number"].count(".") == tn.count(".") + 1
+                    and c["descriptor_ui"] not in seen_children
+                ):
+                    seen_children.add(c["descriptor_ui"])
+                    children.append(c)
+        result["children"] = children
 
     return result
 
