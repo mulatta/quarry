@@ -4,15 +4,21 @@ Combines JinaEncoder (query encoding) with LanceStore (hybrid search).
 Enriches results with PG metadata and supports MeSH expansion.
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 try:
     import numpy as np
 except ImportError:
     raise ImportError("pip install quarry[server]") from None
 
 from quarry.config import settings
-from quarry.embed.jina import JinaEncoder
 from quarry.store.lance import LanceStore
 from quarry.store.pg import PGStore
+
+if TYPE_CHECKING:
+    from quarry.embed.jina import JinaEncoder
 
 
 class HybridSearcher:
@@ -30,6 +36,8 @@ class HybridSearcher:
 
     def _get_encoder(self) -> JinaEncoder:
         if self._encoder is None:
+            from quarry.embed.jina import JinaEncoder
+
             self._encoder = JinaEncoder(dim=256)
         return self._encoder
 
