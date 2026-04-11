@@ -88,6 +88,7 @@ def get_paper(
     work_id: str | None = None,
     pmid: int | None = None,
     doi: str | None = None,
+    include_mesh: bool = False,
 ) -> dict | None:
     """Get detailed paper metadata by work_id, PMID, or DOI.
 
@@ -95,15 +96,20 @@ def get_paper(
         work_id: OpenAlex work ID (e.g., "W2741809807")
         pmid: PubMed ID (integer)
         doi: DOI string
+        include_mesh: If true, include MeSH descriptor tags (equiv. quarry info --mesh)
     """
     db = _get_db()
     if work_id is not None:
-        return db.get_work(work_id)
-    if pmid is not None:
-        return db.get_work_by_pmid(pmid)
-    if doi is not None:
-        return db.get_work_by_doi(doi)
-    return None
+        result = db.get_work(work_id)
+    elif pmid is not None:
+        result = db.get_work_by_pmid(pmid)
+    elif doi is not None:
+        result = db.get_work_by_doi(doi)
+    else:
+        return None
+    if result and include_mesh:
+        result["mesh"] = db.get_work_mesh(result["work_id"])
+    return result
 
 
 @mcp.tool()
