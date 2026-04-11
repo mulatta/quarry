@@ -1,4 +1,4 @@
-"""FastMCP server exposing 11 tools for academic paper exploration.
+"""FastMCP server exposing 12 tools for academic paper exploration.
 
 CLI-equivalent tools (1:1 mapping):
   expand          — quarry expand (APPR + wRRF citation neighborhood)
@@ -94,6 +94,7 @@ def get_paper(
     pmid: int | None = None,
     doi: str | None = None,
     include_mesh: bool = False,
+    include_abstract: bool = False,
 ) -> dict | None:
     """Get detailed paper metadata by work_id, PMID, or DOI.
 
@@ -102,6 +103,7 @@ def get_paper(
         pmid: PubMed ID (integer)
         doi: DOI string
         include_mesh: If true, include MeSH descriptor tags (equiv. quarry info --mesh)
+        include_abstract: If true, include abstract text (equiv. quarry info --full)
     """
     db = _get_db()
     if work_id is not None:
@@ -112,6 +114,8 @@ def get_paper(
         result = db.get_work_by_doi(doi)
     else:
         return None
+    if result is not None and not include_abstract:
+        result.pop("abstract", None)
     if result and include_mesh:
         result["mesh"] = db.get_work_mesh(result["work_id"])
     return result
@@ -378,6 +382,11 @@ def mesh_explore(
         works, total = db.get_top_works_by_mesh(descriptor_ui, limit=limit)
         result["papers"] = works
         result["total_count"] = total
+        if total > 50_000:
+            result["breadth_warning"] = (
+                f"{total:,} papers — too broad for seed discovery. "
+                "Use direction='tree' to find sub-descriptors."
+            )
 
     elif direction == "tree":
         parents = [db.mesh_parent(tn) for tn in tree_numbers]
@@ -458,6 +467,7 @@ def bridge(
     alpha: float = 0.15,
     epsilon: float = 1e-6,
     include_abstract: bool = False,
+    mesh_summary: bool = False,
 ) -> dict:
     """Find papers that connect multiple seed papers (quarry bridge).
 
@@ -473,10 +483,11 @@ def bridge(
         alpha: PPR teleport probability (default 0.15)
         epsilon: PPR convergence threshold (default 1e-6)
         include_abstract: Include abstract text in each paper entry
+        mesh_summary: Append top-10 MeSH descriptor distribution across all bridge results
     """
     from quarry.core.bridge import run_bridge
 
-    return run_bridge(
+    result = run_bridge(
         seeds=seeds,
         csr_dir=str(settings.csr_dir),
         pg_conninfo=settings.pg_conninfo,
@@ -488,6 +499,29 @@ def bridge(
         epsilon=epsilon,
         include_abstract=include_abstract,
     )
+
+    if mesh_summary:
+        db = _get_db()
+        bridge_type_keys = [
+            "common_refs",
+            "common_citers",
+            "coupling_bridges",
+            "cocitation_bridges",
+            "path_bridges",
+            "ppr_bridges",
+            "steiner_bridges",
+        ]
+        seen: set[str] = set()
+        all_work_ids: list[str] = []
+        for key in bridge_type_keys:
+            for p in result.get(key, []):
+                wid = f"W{p['work_id']}"
+                if wid not in seen:
+                    seen.add(wid)
+                    all_work_ids.append(wid)
+        result["mesh_summary"] = db.top_mesh_by_work_ids(all_work_ids, limit=10)
+
+    return result
 
 
 @mcp.tool()
@@ -529,6 +563,98 @@ def shrink(
         no_foundation=no_foundation,
         exclude=exclude_set,
     )
+
+
+@mcp.tool()
+async def get_full_text(
+    work_id: str | None = None,
+    pmid: int | None = None,
+    doi: str | None = None,
+) -> dict:
+    """Fetch full text for a paper using a three-source fallback chain.
+
+    Source priority:
+      1. PMC full-text  — if pmc_id available (PDF then HTML)
+      2. Unpaywall      — resolves best OA URL via Unpaywall API
+      3. oa_url         — OpenAlex OA URL (oa_url column in works table)
+
+    Each source runs through the fetch waterfall:
+      L1 httpx → L2 Playwright+stealth → L3 HTML text
+
+    Args:
+        work_id: OpenAlex work ID (e.g., "W2741809807")
+        pmid: PubMed ID (integer)
+        doi: DOI string
+    """
+    from quarry.fetch import fetch, fetch_pmc, fetch_unpaywall
+
+    db = _get_db()
+    if work_id is not None:
+        row = db.get_work(work_id)
+    elif pmid is not None:
+        row = db.get_work_by_pmid(pmid)
+    elif doi is not None:
+        row = db.get_work_by_doi(doi)
+    else:
+        return {"error": "Provide work_id, pmid, or doi"}
+
+    if row is None:
+        return {"error": "Paper not found"}
+
+    pmc_id: str | None = row.get("pmc_id")
+    paper_doi: str | None = row.get("doi")
+    oa_url: str | None = row.get("oa_url")
+    source_tried: list[str] = []
+
+    result = None
+
+    # 1. PMC
+    if pmc_id:
+        source_tried.append(f"PMC:{pmc_id}")
+        result = await fetch_pmc(pmc_id)
+        if result.success:
+            source = f"PMC:{pmc_id}"
+            return _full_text_response(row, result, source)
+
+    # 2. Unpaywall
+    if paper_doi:
+        source_tried.append(f"unpaywall:{paper_doi}")
+        result = await fetch_unpaywall(paper_doi)
+        if result.success:
+            return _full_text_response(row, result, f"unpaywall:{paper_doi}")
+
+    # 3. oa_url
+    if oa_url:
+        source_tried.append(f"oa_url:{oa_url[:60]}")
+        result = await fetch(oa_url)
+        if result.success:
+            return _full_text_response(row, result, "oa_url")
+
+    # All sources exhausted
+    last_notes = result.notes if result else []
+    return {
+        "work_id": row.get("work_id"),
+        "pmid": row.get("pmid"),
+        "doi": paper_doi,
+        "success": False,
+        "sources_tried": source_tried,
+        "notes": last_notes,
+    }
+
+
+def _full_text_response(row: dict, result, source: str) -> dict:
+    return {
+        "work_id": row.get("work_id"),
+        "pmid": row.get("pmid"),
+        "doi": row.get("doi"),
+        "source": source,
+        "layer": result.layer,
+        "success": True,
+        "pdf_bytes": result.pdf_bytes,
+        "text_chars": len(result.text),
+        "text": result.text,
+        "notes": result.notes,
+    }
 
 
 def main():
