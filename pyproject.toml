@@ -5,23 +5,18 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "quarry"
 version = "0.2.0"
-description = "PubMed-primary academic paper exploration + citation graph mining system"
+description = "Academic paper discovery via citation graph traversal, MeSH ontology, and semantic search"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "docling>=2.86.0",
-    "httpx>=0.28.1",
-    "playwright>=1.58.0",
-    "playwright-stealth>=2.0.3",
     "psycopg[binary]",
     "pydantic>=2",
     "pydantic-settings",
-    "pymupdf>=1.27.2.2",
     "pyyaml",
 ]
 
 [project.optional-dependencies]
-# Server process: runs quarry MCP HTTP server (heavy — Rust graph, vector store)
+# Server process: MCP HTTP server + full-text fetch pipeline
 server = [
     "quarry-core",
     "quarry-graph",
@@ -29,11 +24,11 @@ server = [
     "numpy",
     "pyarrow",
     "mcp[cli]",
-]
-# MCP client: for Python code that programmatically calls the quarry MCP server
-# Agents and Claude Code connect via URL only — no Python install needed
-mcp = [
-    "mcp",
+    "docling>=2.86.0",
+    "httpx>=0.28.1",
+    "playwright>=1.58.0",
+    "playwright-stealth>=2.0.3",
+    "pymupdf>=1.27.2.2",
 ]
 cli = [
     "quarry[server]",
@@ -53,9 +48,6 @@ elt = [
     "boto3",
     "duckdb",
     "pylance>=4.0.0",
-]
-agent = [
-    "knowledge-storm",
 ]
 dev = [
     "quarry[elt]",
