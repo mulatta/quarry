@@ -39,6 +39,8 @@
         ./nix/shell.nix
       ];
 
+      flake.nixosModules.quarry-mcp = import ./nix/nixos-module.nix;
+
       perSystem =
         { system, ... }:
         {
