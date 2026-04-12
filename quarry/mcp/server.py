@@ -313,6 +313,8 @@ def similar_papers(
         if work_id is None:
             return []
 
+    if work_id is None:
+        return []
     searcher = HybridSearcher(db=db)
     return searcher.similar(work_id, limit=limit)
 
