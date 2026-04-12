@@ -41,6 +41,7 @@ from typing import Annotated
 
 try:
     from mcp.server.fastmcp import FastMCP
+    from mcp.types import ToolAnnotations
 except ImportError:
     raise ImportError("pip install quarry[server]") from None
 
@@ -90,7 +91,7 @@ def _resolve_graph_id(
         return row[0] if row else None
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 def search_papers(
     query: Annotated[
         str, "Natural language query — topic, title fragment, or author+year"
@@ -121,7 +122,7 @@ def search_papers(
     return searcher.search(query, limit=limit, mode=mode, enrich=enrich)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 def get_paper(
     work_id: Annotated[
         str | None, "OpenAlex work ID — format W<digits>, e.g. 'W2741809807'"
@@ -170,7 +171,7 @@ def get_paper(
     return result
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 def expand_citations(
     work_id: Annotated[str | None, "OpenAlex work ID (W<digits>)"] = None,
     pmid: Annotated[int | None, "PubMed ID (alternative to work_id)"] = None,
@@ -228,7 +229,7 @@ def expand_citations(
     return result
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 def find_path(
     source_work_id: Annotated[str | None, "Starting paper work_id (W<digits>)"] = None,
     source_pmid: Annotated[
@@ -289,7 +290,7 @@ def find_path(
     return result
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 def similar_papers(
     work_id: Annotated[str | None, "OpenAlex work ID (W<digits>)"] = None,
     pmid: Annotated[int | None, "PubMed ID (alternative to work_id)"] = None,
@@ -319,7 +320,7 @@ def similar_papers(
     return searcher.similar(work_id, limit=limit)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 def get_subgraph(
     work_ids: Annotated[
         list[str] | None, "List of OpenAlex work IDs (W<digits>)"
@@ -373,7 +374,7 @@ def get_subgraph(
     return result
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 def query_metadata(
     sql: Annotated[
         str,
@@ -397,7 +398,7 @@ def query_metadata(
     return db.query(sql)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 def mesh_explore(
     descriptor_ui: Annotated[
         str | None,
@@ -506,7 +507,7 @@ def mesh_explore(
     return result
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 def expand(
     seed: Annotated[
         str,
@@ -577,7 +578,7 @@ def expand(
     return result
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 def bridge(
     seeds: Annotated[
         list[str],
@@ -669,7 +670,7 @@ def bridge(
     return result
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO)
 def shrink(
     seed: Annotated[str, "Seed paper: W<id>, DOI, or integer work_id_int"],
     top_n: Annotated[
@@ -726,7 +727,7 @@ def shrink(
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations=_RO_OPEN)
 async def get_full_text(
     work_id: Annotated[
         str | None,
