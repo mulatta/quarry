@@ -40,6 +40,7 @@ from __future__ import annotations
 from typing import Annotated
 
 try:
+    from mcp.server.auth.settings import AuthSettings
     from mcp.server.fastmcp import FastMCP
     from mcp.types import ToolAnnotations
 except ImportError:
@@ -61,13 +62,24 @@ _RO_OPEN = ToolAnnotations(
     readOnlyHint=True, destructiveHint=False, idempotentHint=False, openWorldHint=True
 )
 
-_token_verifier = (
-    PgTokenVerifier(server_settings.pg_conninfo)
-    if server_settings.require_auth
-    else None
-)
+# token_verifier requires auth (AuthSettings) per FastMCP validation.
+# issuer_url / resource_server_url are set to the server's own URL —
+# we don't implement a full OAuth flow, but FastMCP needs these for
+# its /.well-known/oauth-authorization-server metadata endpoint.
+if server_settings.require_auth:
+    _server_url = f"http://{server_settings.host}:{server_settings.port}"
+    _auth = AuthSettings(
+        issuer_url=_server_url,  # type: ignore[arg-type]
+        resource_server_url=_server_url,  # type: ignore[arg-type]
+    )
+    _token_verifier: PgTokenVerifier | None = PgTokenVerifier(
+        server_settings.pg_conninfo
+    )
+else:
+    _auth = None
+    _token_verifier = None
 
-mcp = FastMCP("quarry", token_verifier=_token_verifier)
+mcp = FastMCP("quarry", auth=_auth, token_verifier=_token_verifier)
 
 # Lazy-initialized singletons
 _db: PGStore | None = None
