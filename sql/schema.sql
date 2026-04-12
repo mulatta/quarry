@@ -6,6 +6,16 @@
 
 CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
 
+-- ── API keys (quarry-server auth) ──
+
+CREATE TABLE IF NOT EXISTS api_keys (
+    client_id  TEXT PRIMARY KEY,
+    key_hash   TEXT NOT NULL UNIQUE,  -- sha256(token), hex-encoded
+    scopes     TEXT[] DEFAULT '{}',
+    created_at TIMESTAMPTZ DEFAULT now(),
+    expires_at TIMESTAMPTZ            -- NULL = no expiry
+);
+
 -- ── Read-only role for MCP / ad-hoc queries ──
 
 DO $$ BEGIN
