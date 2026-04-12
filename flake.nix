@@ -32,12 +32,15 @@
         "aarch64-darwin"
       ];
       imports = [
+        # keep-sorted start
         ./nix/checks.nix
         ./nix/formatter.nix
+        ./nix/nixos-test.nix
         ./nix/packages.nix
         ./nix/python.nix
         ./nix/services.nix
         ./nix/shell.nix
+        # keep-sorted end
       ];
 
       flake.nixosModules.quarry-server = import ./nix/nixos-module.nix { inherit inputs; };
