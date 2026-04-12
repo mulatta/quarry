@@ -50,7 +50,8 @@ try:
 except ImportError:
     raise ImportError("pip install quarry[server]") from None
 
-from quarry.config import settings
+from quarry.server.auth import PgTokenVerifier
+from quarry.server.config import server_settings
 from quarry.store.pg import PGStore
 
 _RO = ToolAnnotations(
@@ -60,7 +61,13 @@ _RO_OPEN = ToolAnnotations(
     readOnlyHint=True, destructiveHint=False, idempotentHint=False, openWorldHint=True
 )
 
-mcp = FastMCP("quarry")
+_token_verifier = (
+    PgTokenVerifier(server_settings.pg_conninfo)
+    if server_settings.require_auth
+    else None
+)
+
+mcp = FastMCP("quarry", token_verifier=_token_verifier)
 
 # Lazy-initialized singletons
 _db: PGStore | None = None
@@ -70,14 +77,14 @@ _graph: quarry_graph.Graph | None = None
 def _get_db() -> PGStore:
     global _db
     if _db is None:
-        _db = PGStore(settings.pg_conninfo)
+        _db = PGStore(server_settings.pg_conninfo)
     return _db
 
 
 def _get_graph() -> quarry_graph.Graph:
     global _graph
     if _graph is None:
-        _graph = quarry_graph.Graph(str(settings.csr_dir))
+        _graph = quarry_graph.Graph(str(server_settings.csr_dir))
     return _graph
 
 
@@ -500,7 +507,6 @@ def mesh_explore(
         seen_children: set = set()
         for tn in tree_numbers:
             for c in db.mesh_descendants(tn):
-                # Only direct children: one level deeper, not self
                 if (
                     c["tree_number"] != tn
                     and c["tree_number"].startswith(tn + ".")
@@ -567,8 +573,8 @@ def expand(
 
     result = run_expand(
         seed=seed,
-        csr_dir=str(settings.csr_dir),
-        pg_conninfo=settings.pg_conninfo,
+        csr_dir=str(server_settings.csr_dir),
+        pg_conninfo=server_settings.pg_conninfo,
         mode=mode,
         alpha=alpha,
         epsilon=epsilon,
@@ -642,8 +648,8 @@ def bridge(
 
     result = run_bridge(
         seeds=seeds,
-        csr_dir=str(settings.csr_dir),
-        pg_conninfo=settings.pg_conninfo,
+        csr_dir=str(server_settings.csr_dir),
+        pg_conninfo=server_settings.pg_conninfo,
         types=types,
         limit=limit,
         max_neighbor_degree=max_neighbor_degree,
@@ -724,8 +730,8 @@ def shrink(
 
     return run_shrink(
         seed=seed,
-        csr_dir=str(settings.csr_dir),
-        pg_conninfo=settings.pg_conninfo,
+        csr_dir=str(server_settings.csr_dir),
+        pg_conninfo=server_settings.pg_conninfo,
         top_n=top_n,
         venues=venue_set,
         expand_limit=expand_limit,
@@ -789,8 +795,7 @@ async def get_full_text(
         source_tried.append(f"PMC:{pmc_id}")
         result = await fetch_pmc(pmc_id)
         if result.success:
-            source = f"PMC:{pmc_id}"
-            return _full_text_response(row, result, source)
+            return _full_text_response(row, result, f"PMC:{pmc_id}")
 
     # 2. Unpaywall
     if paper_doi:
@@ -806,7 +811,6 @@ async def get_full_text(
         if result.success:
             return _full_text_response(row, result, "oa_url")
 
-    # All sources exhausted
     last_notes = result.notes if result else []
     return {
         "work_id": row.get("work_id"),
@@ -868,14 +872,3 @@ def _full_text_response(row: dict, result, source: str) -> dict:
         "text": result.text,
         "notes": result.notes,
     }
-
-
-def main():
-    # host/port must be set on the FastMCP instance before run(), not passed to run()
-    mcp.settings.host = settings.mcp_host
-    mcp.settings.port = settings.mcp_port
-    mcp.run(transport="streamable-http")
-
-
-if __name__ == "__main__":
-    main()
