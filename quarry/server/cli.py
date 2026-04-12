@@ -15,7 +15,9 @@ app = typer.Typer(
 )
 
 keys_app = typer.Typer(help="API key management.", no_args_is_help=True)
+db_app = typer.Typer(help="Database management.", no_args_is_help=True)
 app.add_typer(keys_app, name="keys")
+app.add_typer(db_app, name="db")
 
 
 @app.command()
@@ -27,6 +29,17 @@ def serve() -> None:
     mcp.settings.host = server_settings.host
     mcp.settings.port = server_settings.port
     mcp.run(transport="streamable-http")
+
+
+@db_app.command("init")
+def db_init() -> None:
+    """Apply schema DDL to the database (idempotent — safe to re-run)."""
+    from quarry.server.config import server_settings
+    from quarry.store.pg import PGStore
+
+    store = PGStore(server_settings.pg_conninfo)
+    store.init_schema()
+    typer.echo("Schema applied.")
 
 
 @keys_app.command("create")
