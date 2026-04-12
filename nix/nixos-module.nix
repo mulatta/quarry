@@ -23,7 +23,7 @@ in
       type = lib.types.str;
       default = "127.0.0.1";
       description = ''
-        Address to bind the MCP HTTP server (QUARRY_MCP_HOST).
+        Address to bind the MCP HTTP server (QUARRY_SERVER_HOST).
         Set to 0.0.0.0 for nginx reverse proxy or Tailscale.
       '';
     };
@@ -31,15 +31,24 @@ in
     port = lib.mkOption {
       type = lib.types.port;
       default = 8000;
-      description = "Port for the MCP HTTP server (QUARRY_MCP_PORT).";
+      description = "Port for the MCP HTTP server (QUARRY_SERVER_PORT).";
     };
 
-    dataDir = lib.mkOption {
+    csrDir = lib.mkOption {
       type = lib.types.path;
-      default = "/var/lib/quarry";
+      default = "/var/lib/quarry/serving/csr";
       description = ''
-        Base data directory (QUARRY_DATA_DIR).
-        All serving paths (csr/, lancedb/) are resolved relative to this.
+        Path to the mmap-backed CSR binary files (indptr.bin, indices.bin, id_map.bin).
+        Passed as QUARRY_SERVER_CSR_DIR.
+      '';
+    };
+
+    requireAuth = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = ''
+        Require a valid Bearer API key on every request (QUARRY_SERVER_REQUIRE_AUTH).
+        Issue keys with: quarry-server keys create <name>
       '';
     };
 
@@ -48,7 +57,7 @@ in
       default = null;
       description = ''
         Path to a file containing secret environment variables.
-        Use for QUARRY_PG_CONNINFO and other credentials (e.g., managed by sops-nix).
+        Use for QUARRY_SERVER_PG_CONNINFO and other credentials (e.g., managed by sops-nix).
       '';
     };
 
@@ -81,13 +90,14 @@ in
       ];
 
       environment = {
-        QUARRY_MCP_HOST = cfg.host;
-        QUARRY_MCP_PORT = toString cfg.port;
-        QUARRY_DATA_DIR = cfg.dataDir;
+        QUARRY_SERVER_HOST = cfg.host;
+        QUARRY_SERVER_PORT = toString cfg.port;
+        QUARRY_SERVER_CSR_DIR = cfg.csrDir;
+        QUARRY_SERVER_REQUIRE_AUTH = lib.boolToString cfg.requireAuth;
       };
 
       serviceConfig = {
-        ExecStart = "${cfg.package}/bin/quarry-server";
+        ExecStart = "${cfg.package}/bin/quarry-server serve";
         EnvironmentFile = lib.mkIf (cfg.environmentFile != null) cfg.environmentFile;
         User = cfg.user;
         Group = cfg.group;
@@ -98,12 +108,12 @@ in
         PrivateTmp = true;
         ProtectSystem = "strict";
         ProtectHome = true;
-        ReadWritePaths = [ cfg.dataDir ];
+        ReadOnlyPaths = [ cfg.csrDir ];
       };
     };
 
     systemd.tmpfiles.rules = [
-      "d ${cfg.dataDir} 0750 ${cfg.user} ${cfg.group} -"
+      "d ${cfg.csrDir} 0750 ${cfg.user} ${cfg.group} -"
     ];
   };
 }
