@@ -34,6 +34,15 @@ in
       description = "Port for the MCP HTTP server (QUARRY_MCP_PORT).";
     };
 
+    dataDir = lib.mkOption {
+      type = lib.types.path;
+      default = "/var/lib/quarry";
+      description = ''
+        Base data directory (QUARRY_DATA_DIR).
+        All serving paths (csr/, lancedb/) are resolved relative to this.
+      '';
+    };
+
     environmentFile = lib.mkOption {
       type = lib.types.nullOr lib.types.path;
       default = null;
@@ -74,6 +83,7 @@ in
       environment = {
         QUARRY_MCP_HOST = cfg.host;
         QUARRY_MCP_PORT = toString cfg.port;
+        QUARRY_DATA_DIR = cfg.dataDir;
       };
 
       serviceConfig = {
@@ -88,12 +98,12 @@ in
         PrivateTmp = true;
         ProtectSystem = "strict";
         ProtectHome = true;
-        ReadWritePaths = [ "/var/lib/quarry" ];
+        ReadWritePaths = [ cfg.dataDir ];
       };
     };
 
     systemd.tmpfiles.rules = [
-      "d /var/lib/quarry 0750 ${cfg.user} ${cfg.group} -"
+      "d ${cfg.dataDir} 0750 ${cfg.user} ${cfg.group} -"
     ];
   };
 }
