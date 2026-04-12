@@ -2,37 +2,37 @@
 
 ## Tool overview
 
-| Tool              | When to use                                                  |
-|-------------------|--------------------------------------------------------------|
-| mesh_explore      | Discover MeSH descriptors; find field entry-point papers     |
-| search_papers     | Keyword/semantic search when you have a natural-language topic|
-| get_paper         | Look up a specific paper by work_id / PMID / DOI             |
-| expand            | Map citation neighborhood of a seed (APPR + wRRF)           |
-| bridge            | Find cross-domain connectors between 2+ seeds                |
-| shrink            | Build a minimal reading list from top-venue papers           |
-| get_full_text     | Fetch full text (PMC → Unpaywall → OA URL)                   |
-| similar_papers    | Embedding-based similarity search                            |
-| expand_citations  | Raw k-hop graph walk (simpler than expand)                   |
-| find_path         | Shortest citation chain between two papers                   |
-| get_subgraph      | Structural metrics for a set of papers                       |
-| query_metadata    | SQL escape hatch for ad-hoc metadata queries                 |
+| Tool                      | When to use                                                  |
+|---------------------------|--------------------------------------------------------------|
+| quarry_mesh_explore       | Discover MeSH descriptors; find field entry-point papers     |
+| quarry_search_papers      | Keyword/semantic search when you have a natural-language topic|
+| quarry_get_paper          | Look up a specific paper by work_id / PMID / DOI             |
+| quarry_expand             | Map citation neighborhood of a seed (APPR + wRRF)           |
+| quarry_bridge             | Find cross-domain connectors between 2+ seeds                |
+| quarry_shrink             | Build a minimal reading list from top-venue papers           |
+| quarry_get_full_text      | Fetch full text (PMC → Unpaywall → OA URL)                   |
+| quarry_similar_papers     | Embedding-based similarity search                            |
+| quarry_expand_citations   | Raw k-hop graph walk (simpler than expand)                   |
+| quarry_find_path          | Shortest citation chain between two papers                   |
+| quarry_get_subgraph       | Structural metrics for a set of papers                       |
+| quarry_query_metadata     | SQL escape hatch for ad-hoc metadata queries                 |
 
 ## Typical exploration sequences
 
 Discovery (unknown field):
-  mesh_explore(descriptor_name) → mesh_explore(direction="papers") → expand(mesh_summary=True)
+  quarry_mesh_explore(descriptor_name) → quarry_mesh_explore(direction="papers") → quarry_expand(mesh_summary=True)
 
 From a known paper:
-  get_paper(include_mesh=True) → expand → bridge([seed1, seed2])
+  quarry_get_paper(include_mesh=True) → quarry_expand → quarry_bridge([seed1, seed2])
 
 Reading list:
-  expand → shrink
+  quarry_expand → quarry_shrink
 
 Full-text:
-  get_paper → get_full_text(work_id/pmid/doi)
+  quarry_get_paper → quarry_get_full_text(work_id/pmid/doi)
 
-Fallback when mesh_explore misses:
-  query_metadata("SELECT ... FROM mesh_lookup WHERE descriptor_name ILIKE '%term%'")
+Fallback when quarry_mesh_explore misses:
+  quarry_query_metadata("SELECT ... FROM mesh_lookup WHERE descriptor_name ILIKE '%term%'")
 """
 
 from __future__ import annotations
@@ -52,6 +52,13 @@ except ImportError:
 
 from quarry.config import settings
 from quarry.store.pg import PGStore
+
+_RO = ToolAnnotations(
+    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+)
+_RO_OPEN = ToolAnnotations(
+    readOnlyHint=True, destructiveHint=False, idempotentHint=False, openWorldHint=True
+)
 
 mcp = FastMCP("quarry")
 
@@ -91,7 +98,7 @@ def _resolve_graph_id(
         return row[0] if row else None
 
 
-@mcp.tool(annotations=_RO)
+@mcp.tool(name="quarry_search_papers", annotations=_RO)
 def search_papers(
     query: Annotated[
         str, "Natural language query — topic, title fragment, or author+year"
@@ -122,7 +129,7 @@ def search_papers(
     return searcher.search(query, limit=limit, mode=mode, enrich=enrich)
 
 
-@mcp.tool(annotations=_RO)
+@mcp.tool(name="quarry_get_paper", annotations=_RO)
 def get_paper(
     work_id: Annotated[
         str | None, "OpenAlex work ID — format W<digits>, e.g. 'W2741809807'"
@@ -171,7 +178,7 @@ def get_paper(
     return result
 
 
-@mcp.tool(annotations=_RO)
+@mcp.tool(name="quarry_expand_citations", annotations=_RO)
 def expand_citations(
     work_id: Annotated[str | None, "OpenAlex work ID (W<digits>)"] = None,
     pmid: Annotated[int | None, "PubMed ID (alternative to work_id)"] = None,
@@ -229,7 +236,7 @@ def expand_citations(
     return result
 
 
-@mcp.tool(annotations=_RO)
+@mcp.tool(name="quarry_find_path", annotations=_RO)
 def find_path(
     source_work_id: Annotated[str | None, "Starting paper work_id (W<digits>)"] = None,
     source_pmid: Annotated[
@@ -290,7 +297,7 @@ def find_path(
     return result
 
 
-@mcp.tool(annotations=_RO)
+@mcp.tool(name="quarry_similar_papers", annotations=_RO)
 def similar_papers(
     work_id: Annotated[str | None, "OpenAlex work ID (W<digits>)"] = None,
     pmid: Annotated[int | None, "PubMed ID (alternative to work_id)"] = None,
@@ -320,7 +327,7 @@ def similar_papers(
     return searcher.similar(work_id, limit=limit)
 
 
-@mcp.tool(annotations=_RO)
+@mcp.tool(name="quarry_get_subgraph", annotations=_RO)
 def get_subgraph(
     work_ids: Annotated[
         list[str] | None, "List of OpenAlex work IDs (W<digits>)"
@@ -374,7 +381,7 @@ def get_subgraph(
     return result
 
 
-@mcp.tool(annotations=_RO)
+@mcp.tool(name="quarry_query_metadata", annotations=_RO)
 def query_metadata(
     sql: Annotated[
         str,
@@ -398,7 +405,7 @@ def query_metadata(
     return db.query(sql)
 
 
-@mcp.tool(annotations=_RO)
+@mcp.tool(name="quarry_mesh_explore", annotations=_RO)
 def mesh_explore(
     descriptor_ui: Annotated[
         str | None,
@@ -507,7 +514,7 @@ def mesh_explore(
     return result
 
 
-@mcp.tool(annotations=_RO)
+@mcp.tool(name="quarry_expand", annotations=_RO)
 def expand(
     seed: Annotated[
         str,
@@ -578,7 +585,7 @@ def expand(
     return result
 
 
-@mcp.tool(annotations=_RO)
+@mcp.tool(name="quarry_bridge", annotations=_RO)
 def bridge(
     seeds: Annotated[
         list[str],
@@ -670,7 +677,7 @@ def bridge(
     return result
 
 
-@mcp.tool(annotations=_RO)
+@mcp.tool(name="quarry_shrink", annotations=_RO)
 def shrink(
     seed: Annotated[str, "Seed paper: W<id>, DOI, or integer work_id_int"],
     top_n: Annotated[
@@ -727,7 +734,7 @@ def shrink(
     )
 
 
-@mcp.tool(annotations=_RO_OPEN)
+@mcp.tool(name="quarry_get_full_text", annotations=_RO_OPEN)
 async def get_full_text(
     work_id: Annotated[
         str | None,
