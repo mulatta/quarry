@@ -5,22 +5,11 @@ Two LoRA tasks: retrieval (search) and clustering (UMAP viz).
 """
 
 import numpy as np
-import torch
-from sentence_transformers import SentenceTransformer
 
 MODEL_NAME = "jinaai/jina-embeddings-v5-text-nano"
 FULL_DIM = 768
 DEFAULT_DIM = 256
 DEFAULT_BATCH_SIZE = 32
-
-
-def _default_device() -> str:
-    """Pick best available device: cuda > mps > cpu."""
-    if torch.cuda.is_available():
-        return "cuda"
-    if torch.backends.mps.is_available():
-        return "mps"
-    return "cpu"
 
 
 def _truncate_norm(embs: np.ndarray, dim: int) -> np.ndarray:
@@ -43,9 +32,23 @@ class JinaEncoder:
         batch_size: int = DEFAULT_BATCH_SIZE,
         max_tokens: int | None = None,
     ):
+        try:
+            import torch
+            from sentence_transformers import SentenceTransformer
+        except ImportError:
+            raise ImportError("pip install quarry[elt]") from None
+
         self.dim = dim
         self.batch_size = batch_size
         self.max_tokens = max_tokens
+
+        def _default_device() -> str:
+            if torch.cuda.is_available():
+                return "cuda"
+            if torch.backends.mps.is_available():
+                return "mps"
+            return "cpu"
+
         self.device = device or _default_device()
         # mem_efficient SDPA is 34% faster than flash on A6000 (cc 8.6) for this model
         if torch.cuda.is_available():
@@ -66,6 +69,8 @@ class JinaEncoder:
         # from rotary embeddings; reduce-overhead causes 18GB graph pool → OOM)
         if self.device == "cuda":
             self._model[0].model = torch.compile(self._model[0].model)
+
+        self._torch = torch
 
     def _encode(
         self, texts: list[str], task: str, prompt_name: str | None = None
@@ -97,5 +102,5 @@ class JinaEncoder:
     def unload(self):
         """Free GPU/device memory."""
         del self._model
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        if self._torch.cuda.is_available():
+            self._torch.cuda.empty_cache()
