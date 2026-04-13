@@ -45,3 +45,4 @@ apm_modules/
 !.claude/skills/dogfood/**
 !.claude/skills/quarry-mcp/
 !.claude/skills/quarry-mcp/**
+.mcp.json

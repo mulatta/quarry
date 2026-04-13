@@ -11,13 +11,24 @@
 default:
     @just --list
 
+# ── ELT (Dagster) ──
+
+# Run dg commands against the quarry-elt project (separate venv, antlr4 4.13).
+# QUARRY_ENV_FILE points pydantic-settings to the root .env regardless of cwd.
+dg *args:
+    cd quarry-elt && VIRTUAL_ENV="$(pwd)/.venv" .venv/bin/dg {{args}}
+
 # ── Sync (uv) ──
 
-# Sync Python deps + rebuild Rust extensions (uv sync overwrites maturin .so)
+# Sync Python deps for quarry (server) + quarry-elt (dagster), rebuild Rust extensions.
+# Two separate venvs: quarry/.venv (server+docling) and quarry-elt/.venv (dagster, no docling).
 sync:
     uv sync --all-extras
     maturin develop --release -m crates/quarry-core/Cargo.toml
     maturin develop --release -m crates/quarry-graph/Cargo.toml
+    uv sync --project quarry-elt --all-extras
+    VIRTUAL_ENV=quarry-elt/.venv maturin develop --release -m crates/quarry-core/Cargo.toml
+    VIRTUAL_ENV=quarry-elt/.venv maturin develop --release -m crates/quarry-graph/Cargo.toml
 
 # ── Dev (debug) ──
 

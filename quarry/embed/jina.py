@@ -7,6 +7,9 @@ Two LoRA tasks: retrieval (search) and clustering (UMAP viz).
 import numpy as np
 
 MODEL_NAME = "jinaai/jina-embeddings-v5-text-nano"
+# Pinned to the revision used for all existing embeddings in LanceDB.
+# Changing this requires full re-indexing of the entire LanceDB table.
+MODEL_REVISION = "d4284353aeba17ef438d3f0214f2ca866cbcd29e"
 FULL_DIM = 768
 DEFAULT_DIM = 256
 DEFAULT_BATCH_SIZE = 32
@@ -57,6 +60,7 @@ class JinaEncoder:
 
         self._model = SentenceTransformer(
             MODEL_NAME,
+            revision=MODEL_REVISION,
             device=self.device,
             model_kwargs={"torch_dtype": torch.bfloat16},
             trust_remote_code=True,

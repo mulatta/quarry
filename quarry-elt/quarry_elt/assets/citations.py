@@ -13,7 +13,7 @@ from dagster import (
     asset,
 )
 
-from quarry.assets.load import parquet_export
+from quarry_elt.assets.load import parquet_export
 from quarry.config import settings
 
 

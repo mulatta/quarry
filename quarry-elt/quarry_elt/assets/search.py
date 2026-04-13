@@ -11,7 +11,7 @@ from dagster import (
     asset,
 )
 
-from quarry.assets.load import ch_transform
+from quarry_elt.assets.load import ch_transform
 from quarry.config import settings
 from quarry.etl.embeddings import run as run_embeddings
 

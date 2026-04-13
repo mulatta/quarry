@@ -161,8 +161,7 @@ def _resolve_and_get(identifier: str, db) -> dict | None:
 
     # DOI
     if identifier.startswith("10.") or identifier.startswith("https://doi.org/"):
-        doi = "https://doi.org/" + identifier.removeprefix("https://doi.org/").lower()
-        return db.get_work_by_doi(doi)
+        return db.get_work_by_doi(identifier)
 
     return None
 

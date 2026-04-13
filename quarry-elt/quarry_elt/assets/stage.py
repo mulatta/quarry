@@ -11,8 +11,8 @@ from dagster import (
     asset,
 )
 
-from quarry.assets.download import mesh_descriptor_sync
-from quarry.assets.helpers import run_parse
+from quarry_elt.assets.download import mesh_descriptor_sync
+from quarry_elt.assets.helpers import run_parse
 from quarry.config import settings
 
 

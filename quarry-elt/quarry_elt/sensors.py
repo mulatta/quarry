@@ -14,7 +14,7 @@ from dagster import (
     asset_sensor,
 )
 
-from quarry.jobs import load_job, r2_download_job, r2_upload_job
+from quarry_elt.jobs import load_job, r2_download_job, r2_upload_job
 
 
 @asset_sensor(asset_key=AssetKey("parquet_export"), job=r2_upload_job)
