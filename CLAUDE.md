@@ -14,6 +14,16 @@ bibliographic coupling, co-citation, and MeSH ontology.
 
 Design docs: `docs/design/10-architecture-decisions.md` (AD-1 through AD-10)
 
+## MCP Server
+
+Connect the quarry MCP server to Claude Code or Claude Desktop:
+
+```bash
+claude mcp add --transport http quarry http://<host>:8000/mcp
+```
+
+Use the `/quarry-mcp` skill for tool reference, exploration sequences, and fallback patterns.
+
 ## Paper Exploration
 
 When exploring papers, building reading lists, or tracing technology
@@ -23,7 +33,7 @@ results to `docs/dogfood/`.
 
 Previous session scores and findings: `docs/dogfood/README.md`
 
-## CLI Commands
+## CLI Commands (dev only)
 
 ```
 quarry search     — hybrid search (BM25 + embedding, building)
@@ -55,7 +65,8 @@ nix build .#quarry-parse  # Rust parser build + tests
 
 | Skill | When |
 |-------|------|
-| `/dogfood` | Paper exploration, CLI UX testing |
+| `/quarry-mcp` | MCP tool reference, exploration sequences |
+| `/dogfood` | Paper exploration, MCP UX testing |
 | `/dagster-expert` | ELT pipeline, asset definitions |
 | `/clickhouse-best-practices` | CH schema/query review |
 | `/dignified-python` | Python code standards |

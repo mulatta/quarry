@@ -24,6 +24,7 @@ Scores are 5 dimensions × 1-5 scale = max 25.
 | 2026-04-08 | surveyor | [prime editing efficiency](2026-04-08-prime-editing-efficiency.md) | 20/25 | -4 | 8 efficiency factor categories mapped; SQL 1m18s bottleneck |
 | 2026-04-08 | reader | [Cas9→PE lineage](2026-04-08-cas9-pe-lineage.md) | 14/25 | -6 | R4+S3+R2+B2 chain: classic expand fails, sp bug found, lineage ≠ citation |
 | 2026-04-08 | reader | [F1+F2 regression](2026-04-08-f1-f2-regression.md) | 20/25 | +6 | sp fix verified, --min-citations surfaces CBE/ABE/PE from Cas9 seed |
+| 2026-04-08 | surveyor | [reverse central dogma](2026-04-08-reverse-central-dogma.md) | 20/25 | 0 | Rqc2p as protein→RNA precedent via MeSH serendipity; SQL 94% of time |
 
 Scenario coverage and priorities: [scenarios.md](scenarios.md)
 

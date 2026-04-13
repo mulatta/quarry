@@ -4,19 +4,19 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "quarry"
-version = "0.2.0"
-description = "PubMed-primary academic paper exploration + citation graph mining system"
+version = "0.1.0"
+description = "Academic paper discovery via citation graph traversal, MeSH ontology, and semantic search"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "dagster-postgres>=0.28.20",
-    "peft>=0.18.1",
     "psycopg[binary]",
+    "pydantic>=2",
     "pydantic-settings",
-    "pylance>=4.0.0",
+    "pyyaml",
 ]
 
 [project.optional-dependencies]
+# Server process: MCP HTTP server + full-text fetch pipeline
 server = [
     "quarry-core",
     "quarry-graph",
@@ -24,6 +24,11 @@ server = [
     "numpy",
     "pyarrow",
     "mcp[cli]",
+    "docling>=2.86.0",
+    "httpx>=0.28.1",
+    "playwright>=1.58.0",
+    "playwright-stealth>=2.0.3",
+    "pymupdf>=1.27.2.2",
 ]
 cli = [
     "quarry[server]",
@@ -32,14 +37,17 @@ cli = [
 elt = [
     "quarry[server]",
     "dagster",
+    "dagster-postgres>=0.28.20",
     "dagster-webserver",
     "dagster-dg-cli>=1.12.19",
+    "peft>=0.18.1",
     "torch",
     "sentence-transformers",
     "blake3",
     "httpx",
     "boto3",
     "duckdb",
+    "pylance>=4.0.0",
 ]
 dev = [
     "quarry[elt]",
@@ -48,6 +56,7 @@ dev = [
 
 [project.scripts]
 quarry = "quarry.cli:app"
+quarry-server = "quarry.server.cli:app"
 
 [tool.uv.workspace]
 members = [

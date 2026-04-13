@@ -180,15 +180,21 @@ direction, producing 80-100% unique results vs Type 1-4.
 **Computation**:
 
 ```
+For pairwise sp and path_bridges, both directions are computed:
+  sp = min(sp(i→j), sp(j→i))                      (AD-11)
+
+Per direction:
 1. Forward BFS from src (fwd_neighbors, max_depth)
 2. Reverse BFS from dst (rev_neighbors, max_depth)
 3. Find minimum total_dist where dist_fwd[v] + dist_rev[v] is minimized
 4. Collect bridge nodes where dist_fwd[v] + dist_rev[v] == total_dist
 5. path_count = count_fwd[v] × count_rev[v]
+
+The shorter direction's bridges are returned.
 ```
 
 **Cost**: O(V+E) bounded by max_depth (default 5) and max_visited (500K).
-Typical: 30-400ms.
+2× BFS calls per pair (both directions). Typical: 30-400ms.
 
 **Parameters**: `--max-path-depth N` (default 5). Determines max BFS
 expansion from each side. Effective sp range = 2 × max_path_depth.

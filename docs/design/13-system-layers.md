@@ -8,22 +8,24 @@
 ```
 ┌───────────────────────────────────────────────────────────┐
 │  User Interface                                           │
-│  CLI (human) / Claude Code SKILL / MCP Client (agent)     │
+│  CLI (human) / .claude/agents/ (interactive) / Web (TBD)  │
 └──────────────────┬────────────────────────────────────────┘
                    │
 ┌──────────────────▼────────────────────────────────────────┐
 │  Agent Layer (LLM judgment)                               │
-│  BAML: type-safe LLM function definitions                 │
-│  DSPy: pipeline optimization (Phase 2)                    │
-│  SKILL: workflow orchestration                            │
+│  Python orchestrator: DAG, resume, cost gate              │
+│  Pydantic schemas + provider-agnostic LLM (httpx)         │
+│  DSPy: prompt optimization (deferred, 200+ eval)          │
 └──────────────────┬────────────────────────────────────────┘
-                   │ MCP tool calls
+                   │ QuarryClient (local import or HTTP)
 ┌──────────────────▼────────────────────────────────────────┐
-│  quarry MCP Server (atomic tools, no LLM)                 │
+│  quarry Service (data + compute, no LLM)                  │
+│  Phase 2: Python server (Starlette, unix socket)          │
+│  Phase 3: Rust server (axum), protocol TBD                │
 └──────────────────┬────────────────────────────────────────┘
                    │ Rust FFI + PG + LanceDB
 ┌──────────────────▼────────────────────────────────────────┐
-│  quarry Core (Rust + Python, no LLM)                      │
+│  quarry Core (Rust graph + Python enrichment)             │
 └───────────────────────────────────────────────────────────┘
 ```
 
@@ -77,13 +79,18 @@ to keyword search. See AD-9 for ontology strategy.
 | get_subgraph | Graph | Session subgraph + metrics |
 | mesh_explore | Browse | MeSH hierarchy navigation |
 
-### Planned additions
+### Planned additions (deferred — CLI-first, MCP after CLI validation)
 
-| Tool | Category | Description | Rationale |
-|------|----------|-------------|-----------|
-| bridge | Analysis | Multi-seed bridge (7 types) | Agent needs bridge access |
-| diagnose_seeds | Analysis | Seed quality assessment | Agent needs pre-check before bridge |
-| expand | Graph | APPR-based expand (= CLI expand) | Current expand_citations is N-hop only, mismatches CLI |
+MCP additions are deferred until all CLI commands are validated via
+dogfood sessions. Rationale: CLI is the primary interface for research
+workflows; MCP duplication adds maintenance burden without proven need.
+See AD-14 for agent architecture that uses CLI via Bash tool.
+
+| Tool | Category | Description | Status |
+|------|----------|-------------|--------|
+| bridge | Analysis | Multi-seed bridge (7 types) | **Deferred** — CLI bridge complete and validated |
+| diagnose_seeds | Analysis | Seed quality assessment | **Deferred** — agent handles via expand + info |
+| expand | Graph | APPR-based expand (= CLI expand) | **Deferred** — CLI expand complete with --min-citations |
 
 ### CLI ↔ MCP alignment
 
@@ -116,100 +123,85 @@ Bridge discovery has three scenarios requiring judgment:
 These judgments are **not** in quarry Core or MCP — they require
 understanding paper content and user intent.
 
-### BAML: Type-safe LLM functions
+### LLM Functions (Pydantic schemas, provider-agnostic)
 
-Individual LLM calls with structured input/output:
-
-```
-ClassifyPaper(title, abstract) -> PaperType
-  enum PaperType { Original, Review, Preprint, Meta }
-
-AssessSeedQuality(paper, graph_stats) -> SeedAssessment
-  class SeedAssessment {
-    quality: Good | Hub | LowCitation | TooOld
-    reason: string
-    suggestion: string?   // "Try a more specific paper on X"
-  }
-
-JudgeRelevance(bridge_paper, seeds) -> float
-  // 0.0 = noise, 1.0 = highly relevant bridge
-
-SelectSeed(papers, intent) -> WorkId
-  // Pick best seed from candidates given user intent
-
-SuggestNextSeed(bridge_results, seeds) -> WorkId?
-  // Iterative: pick 3rd seed from bridge results
-```
-
-BAML provides: type safety, structured parsing, retry on parse
-failure, test harness for LLM functions.
-
-### DSPy: Pipeline optimization (Phase 2)
-
-After BAML functions are stable and eval dataset exists:
+Structured LLM calls via OpenAI-compatible tool_use. Pydantic models
+define input/output schemas. No framework dependency — BAML dropped
+(solves 20% of problem with 100% dependency; Claude tool_use sufficient).
 
 ```python
-class BridgeDiscovery(dspy.Module):
-    def __init__(self):
-        self.search = dspy.Predict("intent -> query")
-        self.select_seed = dspy.ChainOfThought("papers, intent -> seed")
-        self.evaluate = dspy.Predict("bridge_results, seeds -> relevance_score")
+# quarry/agents/schemas.py — Pydantic models
+class SeedEvaluation(BaseModel):
+    relevance: int = Field(ge=0, le=10)
+    keep: bool
+    reason: str
 
-    def forward(self, intent):
-        # search → select seeds → bridge → evaluate → refine
-        ...
-
-# Optimize with human-rated bridge results
-optimizer = MIPROv2(metric=bridge_relevance_metric)
-optimized = optimizer.compile(BridgeDiscovery(), trainset=eval_data)
+class SerendipityScore(BaseModel):
+    novelty: Literal[0, 1]
+    specificity: Literal[0, 1]
+    actionability: Literal[0, 1]
+    verdict: Literal["validated", "rejected", "related_finding"]
 ```
 
-DSPy requires: metric definition + labeled eval data. Deferred until
-bridge usage accumulates quality ratings.
+Provider-agnostic: httpx + configurable base_url (Anthropic, OpenRouter,
+vLLM, Ollama). Model per function (haiku for bulk eval, opus for report).
 
-### SKILL: Workflow orchestration
+### DSPy: Prompt optimization (deferred)
 
-Claude Code SKILL wrapping the above into user-facing workflows:
+After Pydantic-based LLM functions are stable and eval dataset exists
+(200+ labeled examples from seed-recall + agent runs). Pydantic schemas
+convert to dspy.Signature. Blocked by eval data accumulation.
+
+### Python Orchestrator (replaces md agent for automation)
+
+Python code controls DAG, resume, cost gate. LLM called only for
+judgment. md agent retained for interactive use.
 
 ```
-Skill(bridge-discovery)
-  Input: user intent (natural language) or seed paper(s)
-  Steps:
-    1. If no seeds: search → SelectSeed (BAML)
-    2. If seeds: diagnose_seeds (MCP) → AssessSeedQuality (BAML)
-    3. If quality warning: expand → SelectSeed for better seed
-    4. bridge (MCP) → results
-    5. JudgeRelevance (BAML) on top results
-    6. Optional: SuggestNextSeed → bridge with 3rd seed
-  Output: ranked bridge papers with relevance scores
+quarry/agents/scout.py    — DAG orchestration, resume, cost gate
+quarry/agents/llm.py      — provider-agnostic LLM (httpx + OpenAI-compat)
+quarry/agents/schemas.py  — Pydantic (structured output)
+quarry/agents/state.py    — YAML state + DAG topological sort
 ```
 
 ### Layer boundary: what goes where
 
-| Function | SKILL | BAML | DSPy | MCP | Core |
-|----------|-------|------|------|-----|------|
-| "Find bridges between progeria and protein eng" | ✅ orchestrate | | | | |
+| Function | Orchestrator | LLM (Pydantic) | DSPy | QuarryClient | Core |
+|----------|-------------|----------------|------|-------------|------|
+| DAG execution, resume, cost gate | ✅ Python code | | | | |
 | "Is this paper a review?" | | ✅ classify | | | |
 | "Optimize seed selection prompts" | | | ✅ optimize | | |
-| bridge(seeds) → results | | | | ✅ tool | |
+| bridge(seeds) → results | | | | ✅ client | |
 | APPR + geometric mean | | | | | ✅ compute |
 | "Which search result is best seed?" | | ✅ judge | | | |
-| search("progeria") → papers | | | | ✅ tool | |
+| search("progeria") → papers | | | | ✅ client | |
 
 ## Implementation Roadmap
 
-| Phase | Work | Layer |
-|-------|------|-------|
-| **Now** | MCP: add bridge, diagnose_seeds, APPR expand | MCP |
-| **Now** | CLI: rename similar → vsearch | CLI |
-| **Next** | BAML: ClassifyPaper, AssessSeedQuality | Agent |
-| **Next** | SKILL: bridge-discovery workflow | Agent |
-| **Later** | DSPy: pipeline optimization with eval data | Agent |
-| **Later** | Phase 3 embedding integration | Core + MCP |
+| Phase | Work | Layer | Status |
+|-------|------|-------|--------|
+| **Done** | CLI: bridge (7 types), shrink, mesh, expand (--min-citations), sp fix | CLI | ✅ AD-10,11,12 |
+| **Done** | CLI: rename similar → vsearch | CLI | ✅ |
+| **Done** | Bridge: rayon parallelization (5-6x), deterministic sort | Core | ✅ |
+| **Done** | Agent: research-scout (Claude Code native, CLARIFY+DAG) | Agent | ✅ AD-14,D11-D16 |
+| **Done** | Agent: .claude/agents/ with frontmatter + .claude/skills/quarry-research | Agent | ✅ |
+| **Done** | Eval: seed-recall framework (sysrev-seed-collection, 40 reviews) | Eval | ✅ data + prep.py |
+| **Now** | Eval: run.py + report.py (recall@K per method) | Eval | |
+| **Now** | QuarryClient interface (local/remote) | Core | |
+| **Now** | Python orchestrator (scout.py, DAG, resume) | Agent | |
+| **Next** | LLM functions: Pydantic schemas + provider-agnostic llm.py | Agent | |
+| **Next** | Server API (Python, HTTP+JSON, unix socket) | Core | |
+| **Later** | DSPy: prompt optimization (after 200+ eval examples) | Agent | Blocked by eval data |
+| **Later** | Real-time viz: streaming protocol + concept graph schema (TBD) | Server | Workload-dependent |
+| **Later** | Rust server (axum) | Core | When PG enrichment migrated |
+| **Later** | MCP: bridge, expand (after server API validated) | MCP | Deferred |
 
 ## References
 
 - AD-2: Quality signals as metadata only (no opinions in pipeline)
 - AD-3: No --sort/--filter in CLI (downstream processing)
+- AD-11: Bridge sp bidirectional minimum
+- AD-12: Expand --min-citations post-filter
+- AD-14: Research agent architecture (14-research-agent.md)
 - 11-bridge.md: Bridge types, seed quality criteria
 - 12-graph-algorithms.md: Algorithm catalog

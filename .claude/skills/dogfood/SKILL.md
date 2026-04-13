@@ -1,19 +1,19 @@
 ---
 name: dogfood
 description: >-
-  Dogfood the quarry CLI by role-playing a research persona.
-  Use this skill when testing quarry CLI UX, evaluating CLI workflows,
+  Dogfood the quarry MCP tools by role-playing a research persona.
+  Use this skill when testing quarry UX, evaluating MCP tool workflows,
   finding friction points in the paper exploration experience, or when
   the user says "dogfood", "test quarry UX", "try quarry as a researcher",
-  or "CLI friction test". Also trigger when the user asks to find papers,
+  or "UX friction test". Also trigger when the user asks to find papers,
   explore a research topic, build a reading list, or trace a technology
   lineage using quarry — these are implicit dogfood opportunities.
   Supports 4 personas — newbie, reader, bridger, surveyor.
 ---
 
-# quarry CLI Dogfood
+# quarry MCP Dogfood
 
-You are about to role-play as a researcher using the quarry CLI.
+You are about to role-play as a researcher using the quarry MCP tools.
 Your goal is to accomplish a real research task while noting every
 point of friction, confusion, or delight.
 
@@ -21,11 +21,10 @@ point of friction, confusion, or delight.
 
 Based on the input, adopt ONE persona:
 
-**newbie** — You just installed quarry. You have a topic keyword but
-no specific papers. You've never used the tool before. You don't
+**newbie** — You just connected to quarry. You have a topic keyword but
+no specific papers. You've never used the tools before. You don't
 know what "expand" or "bridge" means. You explore by trying things
-and reading help text / output. Your goal: find interesting papers
-on your topic.
+and reading output. Your goal: find interesting papers on your topic.
 
 **reader** — You have exactly one paper (given as work_id or DOI).
 You read it and want to understand the research landscape around it.
@@ -51,11 +50,12 @@ If the user specifies a persona, use it. Otherwise, infer from input:
 
 ## How to Explore
 
-Read `references/cli-reference.md` for available commands.
+Use the quarry MCP tools directly. Refer to the `/quarry-mcp` skill
+for tool reference, exploration sequences, and fallback patterns.
 
-There is NO prescribed workflow. Use whichever commands make sense
+There is NO prescribed workflow. Use whichever tools make sense
 for your persona's goal. Try things. Make mistakes. Go down wrong
-paths. That's the point — we want to find where the CLI is confusing
+paths. That's the point — we want to find where the tool UX is confusing
 or insufficient.
 
 Key behaviors:

@@ -26,13 +26,22 @@ data/
 # test
 tests/data/
 
+# eval outputs (generated from tracked source data)
+eval/seed-recall/reviews.jsonl
+eval/seed-recall/summary.json
+eval/seed-recall/results/
+
 
 # agents
 apm_modules/
 .claude/*
 !CLAUDE.md
 !.claude/CLAUDE.md
+!.claude/agents/
+!.claude/agents/**
 !.claude/skills/
 .claude/skills/*
 !.claude/skills/dogfood/
 !.claude/skills/dogfood/**
+!.claude/skills/quarry-mcp/
+!.claude/skills/quarry-mcp/**

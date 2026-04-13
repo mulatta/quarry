@@ -14,6 +14,8 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::Instant;
 
+use rayon::prelude::*;
+
 use crate::graph::Graph;
 
 // ---------------------------------------------------------------------------
@@ -228,85 +230,122 @@ pub fn compute(graph: &Graph, seeds: &[i64], params: &BridgeParams) -> BridgeRes
     result.stats.per_seed_ref_count = neighbors.refs.iter().map(|s| s.len()).collect();
     result.stats.per_seed_citer_count = neighbors.citers.iter().map(|s| s.len()).collect();
 
-    // Pairwise shortest path — min of both directions (directed graph is asymmetric)
+    // Pairwise shortest path — min of both directions (directed graph is asymmetric).
+    // Pairs are independent: parallelise with rayon.
     let k = seed_indices.len();
-    for i in 0..k {
-        for j in (i + 1)..k {
-            let sp_ij = shortest_path_length(graph, seed_indices[i], seed_indices[j], params.max_path_depth);
-            let sp_ji = shortest_path_length(graph, seed_indices[j], seed_indices[i], params.max_path_depth);
+    let pairs: Vec<(usize, usize)> = (0..k)
+        .flat_map(|i| ((i + 1)..k).map(move |j| (i, j)))
+        .collect();
+    result.stats.pairwise_sp = pairs
+        .par_iter()
+        .map(|&(i, j)| {
+            let sp_ij = shortest_path_length(
+                graph,
+                seed_indices[i],
+                seed_indices[j],
+                params.max_path_depth,
+            );
+            let sp_ji = shortest_path_length(
+                graph,
+                seed_indices[j],
+                seed_indices[i],
+                params.max_path_depth,
+            );
             let sp = match (sp_ij, sp_ji) {
                 (Some(a), Some(b)) => Some(a.min(b)),
                 (a @ Some(_), None) | (None, a @ Some(_)) => a,
                 (None, None) => None,
             };
-            result.stats.pairwise_sp.push((i, j, sp));
+            (i, j, sp)
+        })
+        .collect();
+
+    // Compute bridge types. Coupling and cocitation are the most expensive
+    // (O(degree² × seeds)), so run them in parallel via rayon::join.
+    // The remaining types are comparatively cheap and run sequentially.
+    let type_set: HashSet<BridgeType> = types.iter().copied().collect();
+
+    if type_set.contains(&BridgeType::CommonRefs) {
+        let (entries, overlap) = common_refs(graph, &seed_set, &neighbors, params.limit);
+        result.stats.overlap_refs = overlap;
+        result.common_refs = entries;
+    }
+    if type_set.contains(&BridgeType::CommonCiters) {
+        let (entries, overlap) = common_citers(graph, &seed_set, &neighbors, params.limit);
+        result.stats.overlap_citers = overlap;
+        result.common_citers = entries;
+    }
+
+    // Coupling ‖ cocitation — both are O(degree² × seeds), independent reads only.
+    let want_coupling = type_set.contains(&BridgeType::Coupling);
+    let want_cocitation = type_set.contains(&BridgeType::Cocitation);
+    if want_coupling || want_cocitation {
+        let (coup, cocit) = rayon::join(
+            || {
+                if want_coupling {
+                    Some(coupling_bridges(
+                        graph,
+                        &seed_indices,
+                        &seed_set,
+                        &neighbors,
+                        params.limit,
+                        params.max_neighbor_degree,
+                    ))
+                } else {
+                    None
+                }
+            },
+            || {
+                if want_cocitation {
+                    Some(cocitation_bridges(
+                        graph,
+                        &seed_indices,
+                        &seed_set,
+                        &neighbors,
+                        params.limit,
+                        params.max_neighbor_degree,
+                    ))
+                } else {
+                    None
+                }
+            },
+        );
+        if let Some(c) = coup {
+            result.coupling_bridges = c;
+        }
+        if let Some(c) = cocit {
+            result.cocitation_bridges = c;
         }
     }
 
-    for &ty in &types {
-        match ty {
-            BridgeType::CommonRefs => {
-                let (entries, overlap) =
-                    common_refs(graph, &seed_set, &neighbors, params.limit);
-                result.stats.overlap_refs = overlap;
-                result.common_refs = entries;
-            }
-            BridgeType::CommonCiters => {
-                let (entries, overlap) =
-                    common_citers(graph, &seed_set, &neighbors, params.limit);
-                result.stats.overlap_citers = overlap;
-                result.common_citers = entries;
-            }
-            BridgeType::Coupling => {
-                result.coupling_bridges = coupling_bridges(
-                    graph,
-                    &seed_indices,
-                    &seed_set,
-                    &neighbors,
-                    params.limit,
-                    params.max_neighbor_degree,
-                );
-            }
-            BridgeType::Cocitation => {
-                result.cocitation_bridges = cocitation_bridges(
-                    graph,
-                    &seed_indices,
-                    &seed_set,
-                    &neighbors,
-                    params.limit,
-                    params.max_neighbor_degree,
-                );
-            }
-            BridgeType::Path => {
-                let (entries, sp_len) = path_bridges(
-                    graph,
-                    &seed_indices,
-                    &seed_set,
-                    params.limit,
-                    params.max_path_depth,
-                );
-                result.stats.shortest_path_length = sp_len;
-                result.path_bridges = entries;
-            }
-            BridgeType::Ppr => {
-                result.ppr_bridges = ppr_bridges(
-                    graph,
-                    &seed_indices,
-                    &seed_set,
-                    params.alpha,
-                    params.epsilon,
-                    params.limit,
-                );
-            }
-            BridgeType::Steiner => {
-                result.steiner_bridges = steiner_bridges(
-                    graph,
-                    &seed_indices,
-                    &seed_set,
-                    params.max_path_depth,
-                );
-            }
-        }
+    if type_set.contains(&BridgeType::Path) {
+        let (entries, sp_len) = path_bridges(
+            graph,
+            &seed_indices,
+            &seed_set,
+            params.limit,
+            params.max_path_depth,
+        );
+        result.stats.shortest_path_length = sp_len;
+        result.path_bridges = entries;
+    }
+    if type_set.contains(&BridgeType::Ppr) {
+        result.ppr_bridges = ppr_bridges(
+            graph,
+            &seed_indices,
+            &seed_set,
+            params.alpha,
+            params.epsilon,
+            params.limit,
+        );
+    }
+    if type_set.contains(&BridgeType::Steiner) {
+        result.steiner_bridges = steiner_bridges(
+            graph,
+            &seed_indices,
+            &seed_set,
+            params.max_path_depth,
+        );
     }
 
     result.stats.elapsed_ms = start.elapsed().as_millis() as u64;
@@ -354,11 +393,12 @@ fn common_refs(
 
     let overlap = entries.len();
 
-    // Sort by seed_count desc, then aa_weight desc
+    // Sort by seed_count desc, aa_weight desc, work_id asc (deterministic tiebreaker)
     entries.sort_unstable_by(|a, b| {
         b.seed_count
             .cmp(&a.seed_count)
             .then_with(|| b.aa_weight.partial_cmp(&a.aa_weight).unwrap_or(std::cmp::Ordering::Equal))
+            .then_with(|| a.work_id.cmp(&b.work_id))
     });
     entries.truncate(limit);
 
@@ -408,6 +448,7 @@ fn common_citers(
         b.seed_count
             .cmp(&a.seed_count)
             .then_with(|| b.aa_weight.partial_cmp(&a.aa_weight).unwrap_or(std::cmp::Ordering::Equal))
+            .then_with(|| a.work_id.cmp(&b.work_id))
     });
     entries.truncate(limit);
 
@@ -543,6 +584,7 @@ fn score_cross_seed(
         b.score
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.work_id.cmp(&b.work_id))
     });
     entries.truncate(limit);
     entries
@@ -588,36 +630,64 @@ fn path_bridges(
         };
     }
 
-    // k > 2: pairwise, merge results
-    let mut merged: HashMap<u32, (Vec<usize>, usize)> = HashMap::new();
-    let mut min_sp_len: Option<usize> = None;
+    // k > 2: pairwise, merge results.
+    // Step 1 — parallel: each pair computes fwd+rev BFS independently.
+    let n = seed_indices.len();
+    let pairs: Vec<(usize, usize)> = (0..n)
+        .flat_map(|i| ((i + 1)..n).map(move |j| (i, j)))
+        .collect();
 
-    for i in 0..seed_indices.len() {
-        for j in (i + 1)..seed_indices.len() {
+    let pair_results: Vec<(Vec<PathEntry>, Option<usize>)> = pairs
+        .par_iter()
+        .map(|&(i, j)| {
             let (e_fwd, sp_fwd) = path_bridges_pair(
-                graph, seed_indices[i], seed_indices[j],
-                seed_set, 0, max_depth,
+                graph,
+                seed_indices[i],
+                seed_indices[j],
+                seed_set,
+                0,
+                max_depth,
             );
             let (e_rev, sp_rev) = path_bridges_pair(
-                graph, seed_indices[j], seed_indices[i],
-                seed_set, 0, max_depth,
+                graph,
+                seed_indices[j],
+                seed_indices[i],
+                seed_set,
+                0,
+                max_depth,
             );
-            let (entries, sp_len) = match (sp_fwd, sp_rev) {
+            match (sp_fwd, sp_rev) {
                 (Some(a), Some(b)) if a <= b => (e_fwd, sp_fwd),
                 (Some(_), Some(_)) => (e_rev, sp_rev),
                 (Some(_), None) => (e_fwd, sp_fwd),
                 (None, Some(_)) => (e_rev, sp_rev),
                 (None, None) => (vec![], None),
-            };
-            if let Some(d) = sp_len {
-                min_sp_len = Some(min_sp_len.map_or(d, |m: usize| m.min(d)));
             }
-            for e in entries {
-                let idx = graph.resolve(e.work_id).unwrap();
-                merged
-                    .entry(idx)
-                    .and_modify(|(_, count)| *count += e.path_count)
-                    .or_insert((e.hop_from, e.path_count));
+        })
+        .collect();
+
+    // Step 2 — sequential merge: deterministic because pair_results
+    // preserves input order (rayon IndexedParallelIterator guarantee).
+    let mut merged: HashMap<u32, (Vec<usize>, usize)> = HashMap::new();
+    let mut min_sp_len: Option<usize> = None;
+
+    for (entries, sp_len) in pair_results {
+        if let Some(d) = sp_len {
+            min_sp_len = Some(min_sp_len.map_or(d, |m: usize| m.min(d)));
+        }
+        for e in entries {
+            let idx = graph.resolve(e.work_id).unwrap();
+            match merged.entry(idx) {
+                std::collections::hash_map::Entry::Occupied(mut o) => {
+                    let (existing_hop, count) = o.get_mut();
+                    *count += e.path_count;
+                    if e.hop_from < *existing_hop {
+                        *existing_hop = e.hop_from;
+                    }
+                }
+                std::collections::hash_map::Entry::Vacant(v) => {
+                    v.insert((e.hop_from, e.path_count));
+                }
             }
         }
     }
@@ -631,7 +701,11 @@ fn path_bridges(
         })
         .collect();
 
-    result.sort_unstable_by(|a, b| b.path_count.cmp(&a.path_count));
+    result.sort_unstable_by(|a, b| {
+        b.path_count
+            .cmp(&a.path_count)
+            .then_with(|| a.work_id.cmp(&b.work_id))
+    });
     if limit > 0 {
         result.truncate(limit);
     }
@@ -778,7 +852,11 @@ fn collect_bridge_entries(
         })
         .collect();
 
-    entries.sort_unstable_by(|a, b| b.path_count.cmp(&a.path_count));
+    entries.sort_unstable_by(|a, b| {
+        b.path_count
+            .cmp(&a.path_count)
+            .then_with(|| a.work_id.cmp(&b.work_id))
+    });
     if limit > 0 {
         entries.truncate(limit);
     }
@@ -857,6 +935,7 @@ fn ppr_bridges(
         b.score
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.work_id.cmp(&b.work_id))
     });
     entries.truncate(limit);
     entries
@@ -888,16 +967,15 @@ fn steiner_bridges(
 
     const MAX_VISITED: usize = 500_000;
 
-    // Step 1: All-pairs directed BFS
-    // For each seed, run forward BFS and collect distances + parents
+    // Step 1: All-pairs directed BFS (parallelised per seed).
+    // Forward and reverse BFS are independent — run each set in parallel.
     let bfs_results: Vec<(HashMap<u32, usize>, HashMap<u32, u32>)> = seed_indices
-        .iter()
+        .par_iter()
         .map(|&idx| directed_bfs_with_parent(graph, idx, max_depth, MAX_VISITED, Direction::Forward))
         .collect();
 
-    // Also run reverse BFS from each seed (for bidirectional path finding)
     let bfs_rev_results: Vec<(HashMap<u32, usize>, HashMap<u32, u32>)> = seed_indices
-        .iter()
+        .par_iter()
         .map(|&idx| directed_bfs_with_parent(graph, idx, max_depth, MAX_VISITED, Direction::Reverse))
         .collect();
 
@@ -1102,21 +1180,20 @@ fn find_meeting_path(
     src: u32,
     dst: u32,
 ) -> Option<Vec<u32>> {
-    // Find meeting point with minimum total distance
-    let mut best_total = usize::MAX;
-    let mut best_meet = None;
+    // Find meeting point with minimum (total_distance, node_id).
+    // Tuple ordering makes ties deterministic regardless of HashMap iteration order.
+    let mut best: Option<(usize, u32)> = None;
 
     for (&v, &d_fwd) in dist_fwd {
         if let Some(&d_rev) = dist_rev.get(&v) {
-            let total = d_fwd + d_rev;
-            if total < best_total {
-                best_total = total;
-                best_meet = Some(v);
+            let candidate = (d_fwd + d_rev, v);
+            if best.is_none_or(|b| candidate < b) {
+                best = Some(candidate);
             }
         }
     }
 
-    let meet = best_meet?;
+    let (_, meet) = best?;
 
     // Trace path: src → ... → meet (via parent_fwd)
     let mut nodes = Vec::new();

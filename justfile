@@ -174,3 +174,17 @@ cleanup:
         exit 1
     fi
     echo "All project processes stopped"
+
+# ── Evaluation ──
+
+# Prepare seed-recall eval: resolve PMIDs → OpenAlex work_ids (requires PG)
+eval-prep:
+    python eval/seed-recall/prep.py
+
+# Run seed-recall evaluation (requires PG + CSR graph)
+eval-run:
+    python eval/seed-recall/run.py
+
+# Show evaluation report
+eval-report:
+    python eval/seed-recall/report.py

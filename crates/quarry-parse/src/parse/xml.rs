@@ -530,12 +530,12 @@ fn resolve_date(d: &XmlDate) -> Option<String> {
 }
 
 fn resolve_pub_date(d: &XmlDate) -> (Option<i16>, Option<String>) {
-    if let Some(ref y_str) = d.year {
-        if let Ok(y) = y_str.parse::<u32>() {
-            let month = d.month.as_deref().map(month_to_num).unwrap_or(1);
-            let day: u32 = d.day.as_deref().and_then(|s| s.parse().ok()).unwrap_or(1);
-            return (i16::try_from(y).ok(), Some(format_date(y, month, day)));
-        }
+    if let Some(ref y_str) = d.year
+        && let Ok(y) = y_str.parse::<u32>()
+    {
+        let month = d.month.as_deref().map(month_to_num).unwrap_or(1);
+        let day: u32 = d.day.as_deref().and_then(|s| s.parse().ok()).unwrap_or(1);
+        return (i16::try_from(y).ok(), Some(format_date(y, month, day)));
     }
     if let Some(ref ml) = d.medline_date {
         let first4: String = ml.chars().take(4).collect();
@@ -548,6 +548,7 @@ fn resolve_pub_date(d: &XmlDate) -> (Option<i16>, Option<String>) {
 
 // ── Conversion: serde structs → output structs ──
 
+#[allow(clippy::field_reassign_with_default)]
 fn convert_article(xml: XmlPubmedArticle, title: Option<String>, r#abstract: Option<String>) -> ParseResult {
     let mut result = ParseResult::default();
     let mc = xml.medline_citation;
