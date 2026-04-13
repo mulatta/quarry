@@ -13,7 +13,8 @@ default:
 
 # ── ELT (Dagster) ──
 
-# Run dg commands against the quarry-elt project (separate venv, antlr4 4.13)
+# Run dg commands against the quarry-elt project (separate venv, antlr4 4.13).
+# QUARRY_ENV_FILE points pydantic-settings to the root .env regardless of cwd.
 dg *args:
     cd quarry-elt && VIRTUAL_ENV="$(pwd)/.venv" .venv/bin/dg {{args}}
 

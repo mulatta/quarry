@@ -116,8 +116,27 @@ def _load_lance_hashes_to_ch(lance: LanceStore, logger) -> int:
     )
     _ch_exec("TRUNCATE TABLE _tmp_lance_hashes")
 
-    # Stream from LanceDB → CH INSERT via pipe
+    # Stream from LanceDB → CH INSERT via pipe.
+    # Collect rows first: CH rejects an INSERT with zero RowBinary rows (Code 108).
     logger.info("[Diff] Exporting LanceDB hashes to CH...")
+    rows: list[tuple[bytes, bytes]] = []
+    for batch in (
+        lance.table.to_lance()
+        .scanner(columns=["work_id", "content_hash"], batch_size=100_000)
+        .to_batches()
+    ):
+        wids = batch.column("work_id").to_pylist()
+        hashes = batch.column("content_hash").to_pylist()
+        for wid, h in zip(wids, hashes):
+            if not wid or h is None:
+                continue
+            rows.append((wid.encode("utf-8"), bytes(h)))
+
+    count = len(rows)
+    if count == 0:
+        logger.info("[Diff] LanceDB is empty — skipping CH INSERT")
+        return 0
+
     proc = subprocess.Popen(
         _ch_cmd()
         + [
@@ -129,28 +148,15 @@ def _load_lance_hashes_to_ch(lance: LanceStore, logger) -> int:
     )
     assert proc.stdin is not None
 
-    count = 0
-    for batch in (
-        lance.table.to_lance()
-        .scanner(columns=["work_id", "content_hash"], batch_size=100_000)
-        .to_batches()
-    ):
-        wids = batch.column("work_id").to_pylist()
-        hashes = batch.column("content_hash").to_pylist()
-        for wid, h in zip(wids, hashes):
-            if not wid or h is None:
-                continue
-            wid_bytes = wid.encode("utf-8")
-            # RowBinary: String = varint_len + bytes, FixedString(32) = 32 raw bytes
-            # Varint encoding for string length
-            length = len(wid_bytes)
-            while length >= 0x80:
-                proc.stdin.write(bytes([length & 0x7F | 0x80]))
-                length >>= 7
-            proc.stdin.write(bytes([length]))
-            proc.stdin.write(wid_bytes)
-            proc.stdin.write(bytes(h))
-            count += 1
+    for wid_bytes, h in rows:
+        # RowBinary: String = varint_len + bytes, FixedString(32) = 32 raw bytes
+        length = len(wid_bytes)
+        while length >= 0x80:
+            proc.stdin.write(bytes([length & 0x7F | 0x80]))
+            length >>= 7
+        proc.stdin.write(bytes([length]))
+        proc.stdin.write(wid_bytes)
+        proc.stdin.write(h)
 
     proc.stdin.close()
     proc.wait()
