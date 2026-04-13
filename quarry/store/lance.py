@@ -17,7 +17,7 @@ try:
     import pyarrow as pa
     from lancedb.rerankers import RRFReranker
 except ImportError:
-    raise ImportError("pip install quarry[server]") from None
+    raise ImportError("pip install lancedb numpy pyarrow") from None
 
 _WORK_ID_RE = re.compile(r"^W\d+$")
 

@@ -9,6 +9,9 @@ description = "Dagster ELT pipeline for quarry data ingestion and embedding"
 requires-python = ">=3.13"
 dependencies = [
     "quarry",
+    "lancedb",
+    "numpy",
+    "pyarrow",
     "dagster",
     "dagster-postgres>=0.28.20",
     "dagster-webserver",
@@ -32,7 +35,7 @@ quarry-elt = "quarry_elt.cli:app"
 [tool.uv.sources]
 # Editable path dep — not a workspace member, so quarry-elt gets its own
 # uv.lock and .venv, isolating dagster's antlr4 4.13 from server's antlr4 4.9.
-quarry = { path = "../quarry", editable = true }
+quarry = { path = "..", editable = true }  # quarry-elt/ is inside quarry project root
 
 [tool.setuptools.packages.find]
 where = ["."]
