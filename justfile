@@ -11,6 +11,12 @@
 default:
     @just --list
 
+# ── ELT (Dagster) ──
+
+# Run dg commands against the quarry-elt project (separate venv, antlr4 4.13)
+dg *args:
+    cd quarry-elt && VIRTUAL_ENV="$(pwd)/.venv" .venv/bin/dg {{args}}
+
 # ── Sync (uv) ──
 
 # Sync Python deps for quarry (server) + quarry-elt (dagster), rebuild Rust extensions.
