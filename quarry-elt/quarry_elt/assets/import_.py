@@ -10,7 +10,7 @@ from dagster import (
     asset,
 )
 
-from quarry.assets.helpers import run
+from quarry_elt.assets.helpers import run
 from quarry.config import settings
 
 

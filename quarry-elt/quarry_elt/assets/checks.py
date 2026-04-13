@@ -5,8 +5,8 @@ DO NOT use `from __future__ import annotations` here — Dagster inspects types 
 
 from dagster import AssetCheckResult, asset_check
 
-from quarry.assets.load import pg_load
-from quarry.resources import PGResource
+from quarry_elt.assets.load import pg_load
+from quarry_elt.resources import PGResource
 
 # Minimum expected row counts (order-of-magnitude sanity check).
 _MIN_ROWS = {

@@ -27,16 +27,16 @@ from dagster import (
     asset,
 )
 
-from quarry.assets.download import (
+from quarry_elt.assets.download import (
     icite_metadata_sync,
     oa_sync,
     pubmed_baseline_sync,
     pubmed_updates_sync,
 )
-from quarry.assets.helpers import run, run_parse
-from quarry.assets.stage import mesh_stage
+from quarry_elt.assets.helpers import run, run_parse
+from quarry_elt.assets.stage import mesh_stage
 from quarry.config import settings
-from quarry.resources import PGResource
+from quarry_elt.resources import PGResource
 
 
 def _ch_client_cmd() -> list[str]:

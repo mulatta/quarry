@@ -1,5 +1,6 @@
 """Shared subprocess helpers for pipeline assets."""
 
+import json
 import subprocess
 
 from dagster import AssetExecutionContext
@@ -27,8 +28,6 @@ def run(
     if proc.returncode != 0:
         raise RuntimeError(f"Command failed (exit {proc.returncode}): {' '.join(cmd)}")
     if stdout.strip():
-        import json
-
         try:
             stats = json.loads(stdout)
             for k, v in stats.items():

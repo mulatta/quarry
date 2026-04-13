@@ -10,8 +10,8 @@ from dagster import (
     asset,
 )
 
-from quarry.assets.helpers import run
-from quarry.assets.load import parquet_export
+from quarry_elt.assets.helpers import run
+from quarry_elt.assets.load import parquet_export
 from quarry.config import settings
 
 
