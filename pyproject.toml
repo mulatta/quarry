@@ -34,23 +34,8 @@ cli = [
     "quarry[server]",
     "typer",
 ]
-elt = [
-    "quarry[server]",
-    "dagster",
-    "dagster-postgres>=0.28.20",
-    "dagster-webserver",
-    "dagster-dg-cli>=1.12.19",
-    "peft>=0.18.1",
-    "torch",
-    "sentence-transformers",
-    "blake3",
-    "httpx",
-    "boto3",
-    "duckdb",
-    "pylance>=4.0.0",
-]
 dev = [
-    "quarry[elt]",
+    "quarry[server]",
     "pytest",
 ]
 
@@ -77,10 +62,3 @@ log_cli = true
 log_cli_level = "INFO"
 log_cli_format = "%(asctime)s %(name)s %(levelname)s %(message)s"
 log_cli_date_format = "%H:%M:%S"
-
-[tool.dg]
-directory_type = "project"
-
-[tool.dg.project]
-root_module = "quarry"
-code_location_target_module = "quarry.defs"
