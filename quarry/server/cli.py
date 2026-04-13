@@ -16,8 +16,10 @@ app = typer.Typer(
 
 keys_app = typer.Typer(help="API key management.", no_args_is_help=True)
 db_app = typer.Typer(help="Database management.", no_args_is_help=True)
+config_app = typer.Typer(help="Configuration inspection.", no_args_is_help=True)
 app.add_typer(keys_app, name="keys")
 app.add_typer(db_app, name="db")
+app.add_typer(config_app, name="config")
 
 
 @app.command()
@@ -29,6 +31,32 @@ def serve() -> None:
     mcp.settings.host = server_settings.host
     mcp.settings.port = server_settings.port
     mcp.run(transport="streamable-http")
+
+
+@config_app.command("path")
+def config_path_cmd() -> None:
+    """Print the config file path (may not exist yet)."""
+    from quarry.server.config import config_path
+
+    typer.echo(config_path())
+
+
+@config_app.command("show")
+def config_show() -> None:
+    """Show effective configuration (all sources merged). Secrets are redacted."""
+    from quarry.server.config import _SECRET_FIELDS, config_path, server_settings
+
+    path = config_path()
+    status = "found" if path.is_file() else "not found"
+    typer.echo(f"Config file: {path}  [{status}]")
+    typer.echo("")
+
+    fields = server_settings.model_fields
+    width = max(len(k) for k in fields)
+    for name in fields:
+        val = getattr(server_settings, name)
+        display = "***" if name in _SECRET_FIELDS else str(val)
+        typer.echo(f"  {name:<{width}} = {display}")
 
 
 @db_app.command("init")
