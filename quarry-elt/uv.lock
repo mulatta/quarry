@@ -2039,6 +2039,11 @@ requires-dist = [
 provides-extras = ["server", "cli", "dev"]
 
 [[package]]
+name = "quarry-core"
+version = "0.1.0"
+source = { editable = "../crates/quarry-core" }
+
+[[package]]
 name = "quarry-elt"
 version = "0.1.0"
 source = { editable = "." }
@@ -2057,6 +2062,8 @@ dependencies = [
     { name = "pyarrow" },
     { name = "pylance" },
     { name = "quarry" },
+    { name = "quarry-core" },
+    { name = "quarry-graph" },
     { name = "sentence-transformers" },
     { name = "torch" },
 ]
@@ -2083,10 +2090,17 @@ requires-dist = [
     { name = "pylance", specifier = ">=4.0.0" },
     { name = "pytest", marker = "extra == 'dev'" },
     { name = "quarry", editable = "../" },
+    { name = "quarry-core", editable = "../crates/quarry-core" },
+    { name = "quarry-graph", editable = "../crates/quarry-graph" },
     { name = "sentence-transformers" },
     { name = "torch" },
 ]
 provides-extras = ["dev"]
+
+[[package]]
+name = "quarry-graph"
+version = "0.1.0"
+source = { editable = "../crates/quarry-graph" }
 
 [[package]]
 name = "questionary"
