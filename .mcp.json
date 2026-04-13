@@ -9,7 +9,10 @@
     },
     "quarry": {
       "type": "http",
-      "url": "http://127.0.0.1:8000/mcp"
+      "url": "http://127.0.0.1:8000/mcp",
+      "headers": {
+        "Authorization": "Bearer qry_402dd42f7fd41d67cac7dca33870b7ffcf8e72835c96b7be3326418822207fc8"
+      }
     }
   }
 }
