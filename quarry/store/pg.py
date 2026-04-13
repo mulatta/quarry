@@ -196,6 +196,7 @@ class PGStore:
 
     def get_work_by_doi(self, doi: str) -> dict | None:
         """Get a single work by DOI, enriched with pmc_id."""
+        doi = "https://doi.org/" + doi.removeprefix("https://doi.org/").lower()
         with self.conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 "SELECT w.*, c.pmc_id "
