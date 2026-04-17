@@ -117,6 +117,10 @@ test: test-parse test-graph
 test-py:
     python -m pytest tests/integration -v
 
+# Test quarry-elt Dagster pipeline (requires CH/PG + quarry-elt venv)
+test-elt:
+    cd quarry-elt && .venv/bin/python -m pytest tests -v
+
 # Clippy + test all (Rust + Python)
 check: clippy test test-py
 
