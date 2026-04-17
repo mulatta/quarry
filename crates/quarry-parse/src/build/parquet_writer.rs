@@ -158,6 +158,7 @@ pub fn write_oa_work_authors(authors: &[OaAuthor], path: &Path) -> Result<usize,
 
     let schema = Arc::new(Schema::new(vec![
         Field::new("work_id", DataType::Utf8, false),
+        Field::new("author_id", DataType::Utf8, true),
         Field::new("author_position", DataType::UInt16, false),
         Field::new("display_name", DataType::Utf8, true),
         Field::new("orcid", DataType::Utf8, true),
@@ -168,6 +169,7 @@ pub fn write_oa_work_authors(authors: &[OaAuthor], path: &Path) -> Result<usize,
 
     let batch = RecordBatch::try_new(schema, vec![
         Arc::new(StringArray::from_iter_values(authors.iter().map(|a| &*a.work_id))),
+        Arc::new(StringArray::from_iter(authors.iter().map(|a| a.author_id.as_deref()))),
         Arc::new(UInt16Array::from_iter_values(authors.iter().map(|a| i16_to_u16(a.author_position).unwrap_or(0)))),
         Arc::new(StringArray::from_iter(authors.iter().map(|a| a.display_name.as_deref()))),
         Arc::new(StringArray::from_iter(authors.iter().map(|a| a.orcid.as_deref()))),

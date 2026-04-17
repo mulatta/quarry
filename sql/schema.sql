@@ -178,6 +178,7 @@ CREATE TABLE IF NOT EXISTS work_counts_by_year (
 
 CREATE TABLE IF NOT EXISTS work_authors (
     work_id          TEXT NOT NULL,
+    author_id        TEXT,
     author_position  SMALLINT,
     display_name     TEXT,
     orcid            TEXT,

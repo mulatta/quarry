@@ -45,6 +45,7 @@ PARTITION BY toYear(updated_date);
 
 CREATE TABLE IF NOT EXISTS oa_work_authors (
     work_id          String,
+    author_id        Nullable(String),
     author_position  UInt16,
     display_name     Nullable(String),
     orcid            Nullable(String),
