@@ -29,6 +29,7 @@ sync:
     uv sync --project quarry-elt --all-extras
     VIRTUAL_ENV=quarry-elt/.venv maturin develop --release -m crates/quarry-core/Cargo.toml
     VIRTUAL_ENV=quarry-elt/.venv maturin develop --release -m crates/quarry-graph/Cargo.toml
+    VIRTUAL_ENV=quarry-elt/.venv maturin develop --release -m crates/quarry-parse/Cargo.toml
 
 # ── Dev (debug) ──
 

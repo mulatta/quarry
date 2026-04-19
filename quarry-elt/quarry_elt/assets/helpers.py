@@ -36,6 +36,3 @@ def run(
             pass
 
 
-def run_parse(args: list[str], context: AssetExecutionContext) -> None:
-    """Run quarry-parse subprocess."""
-    run(["quarry-parse"] + args, context)

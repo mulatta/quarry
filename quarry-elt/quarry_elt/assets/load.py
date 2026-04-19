@@ -33,7 +33,7 @@ from quarry_elt.assets.download import (
     pubmed_baseline_sync,
     pubmed_updates_sync,
 )
-from quarry_elt.assets.helpers import run, run_parse
+from quarry_elt.assets.helpers import run
 from quarry_elt.assets.init import ch_init
 from quarry_elt.assets.stage import mesh_stage
 from quarry.config import settings
@@ -128,18 +128,16 @@ _SQL_DIR = Path(__file__).resolve().parent.parent.parent.parent / "sql"
     automation_condition=AutomationCondition.eager(),
 )
 def oa_parse(context: AssetExecutionContext) -> MaterializeResult:
-    run_parse(
-        [
-            "oa",
-            "--input-dir",
-            str(settings.oa_local_dir),
-            "--output-dir",
-            str(settings.oa_parquet_dir),
-        ],
-        context,
+    import quarry_parse
+
+    context.log.info(f"[OA] parsing {settings.oa_local_dir} → {settings.oa_parquet_dir}")
+    stats = quarry_parse.parse_oa(
+        input_dir=str(settings.oa_local_dir),
+        output_dir=str(settings.oa_parquet_dir),
     )
+    context.log.info(f"[OA] done: {stats}")
     return MaterializeResult(
-        metadata={"status": MetadataValue.text("ok")},
+        metadata={k: MetadataValue.int(v) for k, v in stats.items() if isinstance(v, int)},
     )
 
 
@@ -151,20 +149,20 @@ def oa_parse(context: AssetExecutionContext) -> MaterializeResult:
     automation_condition=AutomationCondition.eager(),
 )
 def pm_parse(context: AssetExecutionContext) -> MaterializeResult:
-    args = [
-        "pubmed",
-        "--input-dir",
-        str(settings.pubmed_baseline_dir),
-        "--output-dir",
-        str(settings.pm_parquet_dir),
-    ]
-    update_dir = settings.pubmed_update_dir
-    if update_dir.exists() and any(update_dir.glob("pubmed*.xml.gz")):
-        args += ["--updates-dir", str(update_dir)]
+    import quarry_parse
 
-    run_parse(args, context)
+    update_dir = settings.pubmed_update_dir
+    updates = str(update_dir) if update_dir.exists() and any(update_dir.glob("pubmed*.xml.gz")) else None
+
+    context.log.info(f"[PM] parsing {settings.pubmed_baseline_dir} → {settings.pm_parquet_dir}")
+    stats = quarry_parse.parse_pubmed(
+        input_dir=str(settings.pubmed_baseline_dir),
+        output_dir=str(settings.pm_parquet_dir),
+        updates_dir=updates,
+    )
+    context.log.info(f"[PM] done: {stats}")
     return MaterializeResult(
-        metadata={"status": MetadataValue.text("ok")},
+        metadata={k: MetadataValue.int(v) for k, v in stats.items() if isinstance(v, int)},
     )
 
 
