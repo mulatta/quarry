@@ -114,7 +114,7 @@ def _psql(
     run(cmd, context, label=label or f"[PG] {sql}", env=env)
 
 
-_SQL_DIR = Path(__file__).resolve().parent.parent.parent / "sql"
+_SQL_DIR = Path(__file__).resolve().parent.parent.parent.parent / "sql"
 
 
 # ── Parse assets ──

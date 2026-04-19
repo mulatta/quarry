@@ -18,7 +18,7 @@ from dagster import (
 from quarry_elt.assets.helpers import run
 from quarry.config import settings
 
-_SQL_DIR = Path(__file__).resolve().parent.parent.parent / "sql"
+_SQL_DIR = Path(__file__).resolve().parent.parent.parent.parent / "sql"
 _CH_SCHEMA_SQL = _SQL_DIR / "ch_schema.sql"
 
 
