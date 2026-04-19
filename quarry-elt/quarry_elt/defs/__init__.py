@@ -7,6 +7,7 @@ from quarry_elt.assets import (
     download,
     export,
     import_,
+    init,
     load,
     search,
     stage,
@@ -29,7 +30,7 @@ from quarry_elt.sensors import distributed_r2_sync, distributed_serve, r2_upload
 
 defs = Definitions(
     assets=load_assets_from_modules(
-        [download, stage, load, export, import_, citations, search],
+        [download, stage, init, load, export, import_, citations, search],
     ),
     asset_checks=[pg_row_count_check],
     jobs=[
