@@ -50,6 +50,10 @@ def _ch_query_init(
         str(settings.ch_port),
         "--database",
         settings.ch_database,
+        "--max_table_size_to_drop",
+        "0",
+        "--max_partition_size_to_drop",
+        "0",
         "--query",
         query,
     ]
