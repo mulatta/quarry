@@ -135,7 +135,7 @@ struct XmlMedlineCitation {
 
 #[derive(Deserialize, Debug)]
 struct XmlPmid {
-    #[serde(rename = "$text")]
+    #[serde(rename = "$text", default)]
     value: String,
 }
 
@@ -157,7 +157,7 @@ struct XmlArticle {
     journal: XmlJournal,
     // ArticleTitle: extracted via SAX (mixed content), not serde
     #[serde(rename = "Language", default)]
-    language: Option<String>,
+    language: Vec<String>,
     #[serde(rename = "AuthorList", default)]
     author_list: Option<XmlAuthorList>,
     #[serde(rename = "GrantList", default)]
@@ -183,7 +183,7 @@ struct XmlJournal {
 
 #[derive(Deserialize, Debug)]
 struct XmlIssn {
-    #[serde(rename = "$text")]
+    #[serde(rename = "$text", default)]
     value: String,
 }
 
@@ -211,7 +211,7 @@ struct XmlPublicationTypeList {
 
 #[derive(Deserialize, Debug)]
 struct XmlPublicationType {
-    #[serde(rename = "$text")]
+    #[serde(rename = "$text", default)]
     name: String,
 }
 
@@ -241,7 +241,7 @@ struct XmlAuthor {
 struct XmlIdentifier {
     #[serde(rename = "@Source", default)]
     source: Option<String>,
-    #[serde(rename = "$text")]
+    #[serde(rename = "$text", default)]
     value: String,
 }
 
@@ -293,7 +293,7 @@ struct XmlChemical {
 struct XmlNameOfSubstance {
     #[serde(rename = "@UI", default)]
     ui: Option<String>,
-    #[serde(rename = "$text")]
+    #[serde(rename = "$text", default)]
     name: String,
 }
 
@@ -317,7 +317,7 @@ struct XmlDescriptorName {
     ui: String,
     #[serde(rename = "@MajorTopicYN", default)]
     major_topic_yn: Option<String>,
-    #[serde(rename = "$text")]
+    #[serde(rename = "$text", default)]
     name: String,
 }
 
@@ -327,7 +327,7 @@ struct XmlQualifierName {
     ui: String,
     #[serde(rename = "@MajorTopicYN", default)]
     major_topic_yn: Option<String>,
-    #[serde(rename = "$text")]
+    #[serde(rename = "$text", default)]
     name: String,
 }
 
@@ -367,7 +367,7 @@ struct XmlArticleIdList {
 struct XmlArticleId {
     #[serde(rename = "@IdType")]
     id_type: String,
-    #[serde(rename = "$text")]
+    #[serde(rename = "$text", default)]
     value: String,
 }
 
@@ -585,7 +585,11 @@ fn convert_article(xml: XmlPubmedArticle, title: Option<String>, r#abstract: Opt
     }
 
     // Language, pages, pub types
-    paper.language = mc.article.language.as_deref().and_then(non_empty_ref);
+    paper.language = if mc.article.language.is_empty() {
+        None
+    } else {
+        Some(mc.article.language.join(";"))
+    };
     if let Some(pag) = &mc.article.pagination {
         paper.pages = pag.medline_pgn.as_deref().and_then(non_empty_ref);
     }

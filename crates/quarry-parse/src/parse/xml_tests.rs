@@ -494,6 +494,27 @@ mod tests {
     // ── Multiple articles ──
 
     #[test]
+    fn test_multiple_languages_joined() {
+        let xml = r#"<PubmedArticle>
+  <MedlineCitation Status="MEDLINE" Owner="NLM">
+    <PMID Version="1">99</PMID>
+    <Article>
+      <Journal><JournalIssue><PubDate><Year>2024</Year></PubDate></JournalIssue></Journal>
+      <ArticleTitle>Bilingual</ArticleTitle>
+      <Language>eng</Language>
+      <Language>fre</Language>
+    </Article>
+  </MedlineCitation>
+  <PubmedData><ArticleIdList/></PubmedData>
+</PubmedArticle>"#;
+        let result = parse_xml(xml);
+        assert_eq!(result.papers.len(), 1);
+        assert_eq!(result.papers[0].language.as_deref(), Some("eng;fre"));
+    }
+
+    // ── Multiple articles ──
+
+    #[test]
     fn test_multiple_articles() {
         let xml = format!(
             "{}{}",
