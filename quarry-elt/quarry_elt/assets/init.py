@@ -76,6 +76,17 @@ def ch_init(context: AssetExecutionContext) -> MaterializeResult:
         elif stmt.upper().startswith("USE"):
             continue  # --database flag handles this
         else:
+            # DROP + CREATE to ensure schema matches ch_schema.sql.
+            # CH tables are staging-only; data is rebuilt every pipeline run.
+            m = re.match(
+                r"CREATE TABLE IF NOT EXISTS\s+(\S+)",
+                stmt,
+                re.IGNORECASE,
+            )
+            if m:
+                table = m.group(1)
+                _ch_query_init(f"DROP TABLE IF EXISTS {table}", context)
+                stmt = stmt.replace("IF NOT EXISTS ", "", 1)
             _ch_query_init(stmt, context)
 
     return MaterializeResult(
