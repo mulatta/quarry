@@ -34,5 +34,3 @@ def run(
                 context.log.info(f"  {k}: {v}")
         except json.JSONDecodeError:
             pass
-
-

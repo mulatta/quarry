@@ -132,14 +132,18 @@ _SQL_DIR = Path(__file__).resolve().parent.parent.parent.parent / "sql"
 def oa_parse(context: AssetExecutionContext) -> MaterializeResult:
     import quarry_parse
 
-    context.log.info(f"[OA] parsing {settings.oa_local_dir} → {settings.oa_parquet_dir}")
+    context.log.info(
+        f"[OA] parsing {settings.oa_local_dir} → {settings.oa_parquet_dir}"
+    )
     stats = quarry_parse.parse_oa(
         input_dir=str(settings.oa_local_dir),
         output_dir=str(settings.oa_parquet_dir),
     )
     context.log.info(f"[OA] done: {stats}")
     return MaterializeResult(
-        metadata={k: MetadataValue.int(v) for k, v in stats.items() if isinstance(v, int)},
+        metadata={
+            k: MetadataValue.int(v) for k, v in stats.items() if isinstance(v, int)
+        },
     )
 
 
@@ -154,9 +158,15 @@ def pm_parse(context: AssetExecutionContext) -> MaterializeResult:
     import quarry_parse
 
     update_dir = settings.pubmed_update_dir
-    updates = str(update_dir) if update_dir.exists() and any(update_dir.glob("pubmed*.xml.gz")) else None
+    updates = (
+        str(update_dir)
+        if update_dir.exists() and any(update_dir.glob("pubmed*.xml.gz"))
+        else None
+    )
 
-    context.log.info(f"[PM] parsing {settings.pubmed_baseline_dir} → {settings.pm_parquet_dir}")
+    context.log.info(
+        f"[PM] parsing {settings.pubmed_baseline_dir} → {settings.pm_parquet_dir}"
+    )
     stats = quarry_parse.parse_pubmed(
         input_dir=str(settings.pubmed_baseline_dir),
         output_dir=str(settings.pm_parquet_dir),
@@ -164,7 +174,9 @@ def pm_parse(context: AssetExecutionContext) -> MaterializeResult:
     )
     context.log.info(f"[PM] done: {stats}")
     return MaterializeResult(
-        metadata={k: MetadataValue.int(v) for k, v in stats.items() if isinstance(v, int)},
+        metadata={
+            k: MetadataValue.int(v) for k, v in stats.items() if isinstance(v, int)
+        },
     )
 
 

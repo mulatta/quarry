@@ -457,6 +457,23 @@ fn read_text_content<R: BufRead>(reader: &mut Reader<R>, buf: &mut Vec<u8>) -> S
     text.trim().to_string()
 }
 
+// ── Inline markup stripping ──
+
+/// Remove inline formatting tags (`<i>`, `<sup>`, `<sub>`, `<b>`, `<u>`)
+/// from raw XML before serde deserialization.
+///
+/// PubMed XML uses these as text formatting in fields like ArticleTitle,
+/// Reference, ISOAbbreviation, etc. quick-xml serde cannot skip unknown
+/// fields that contain nested elements, so we strip them beforehand.
+/// Title and abstract are already extracted via SAX from the original.
+fn strip_inline_markup(raw: &str) -> String {
+    raw.replace("<i>", "").replace("</i>", "").replace("<i/>", "")
+        .replace("<b>", "").replace("</b>", "").replace("<b/>", "")
+        .replace("<sup>", "").replace("</sup>", "").replace("<sup/>", "")
+        .replace("<sub>", "").replace("</sub>", "").replace("<sub/>", "")
+        .replace("<u>", "").replace("</u>", "")
+}
+
 // ── Mixed content extraction from raw XML ──
 
 /// Extract title and abstract from raw PubmedArticle XML via SAX.
@@ -769,11 +786,14 @@ pub fn parse_from_reader<R: BufRead>(reader: R) -> std::io::Result<ParseResult> 
                         }
                     };
 
-                    // Extract mixed-content fields via SAX
+                    // Extract mixed-content fields via SAX (before stripping)
                     let (title, r#abstract) = extract_mixed_content(&raw);
 
+                    // Strip inline formatting tags that break serde's unknown-field skip
+                    let clean = strip_inline_markup(&raw);
+
                     // Deserialize structural fields via serde
-                    match quick_xml::de::from_str::<XmlPubmedArticle>(&raw) {
+                    match quick_xml::de::from_str::<XmlPubmedArticle>(&clean) {
                         Ok(article) => {
                             let article_result = convert_article(article, title, r#abstract);
                             result.extend(article_result);
