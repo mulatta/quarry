@@ -66,7 +66,7 @@ def _ch_client_cmd() -> list[str]:
         "--max_insert_threads",
         "8",
         "--max_memory_usage",
-        "64000000000",
+        "128000000000",
     ]
 
 
@@ -77,6 +77,8 @@ _GRACE_HASH_SETTINGS = [
     "10000000000",
     "--grace_hash_join_initial_buckets",
     "4",
+    "--max_bytes_before_external_sort",
+    "32000000000",
 ]
 
 
