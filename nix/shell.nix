@@ -58,8 +58,6 @@ in
         };
 
         shellHook = ''
-          uv sync --all-extras --quiet
-          source .venv/bin/activate
           export DAGSTER_HOME="$(git rev-parse --show-toplevel)/.dg-home"
           export DAGSTER_PG_URL="postgresql:///dagster?host=${pgSocketDir}"
           mkdir -p "$DAGSTER_HOME" 2>/dev/null || true
