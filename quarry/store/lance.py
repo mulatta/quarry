@@ -131,8 +131,13 @@ class LanceStore:
         self.table.optimize(cleanup_older_than=timedelta(seconds=0))
 
     def create_fts_index(self):
-        """Build BM25 full-text index on title and abstract."""
-        self.table.create_fts_index(["title", "abstract"], replace=True)
+        """Build BM25 full-text index on title and abstract.
+
+        Native FTS requires one index per column; queries can still span both
+        via `fts_columns=["title", "abstract"]` at search time.
+        """
+        self.table.create_fts_index("title", replace=True)
+        self.table.create_fts_index("abstract", replace=True)
 
     def create_scalar_index(self, column: str = "work_id"):
         """Build b-tree scalar index for fast equality lookups."""
@@ -157,7 +162,13 @@ class LanceStore:
 
     def text_search(self, query: str, limit: int = 20) -> list[dict]:
         """BM25 full-text search on title + abstract."""
-        return self.table.search(query, query_type="fts").limit(limit).to_list()
+        return (
+            self.table.search(
+                query, query_type="fts", fts_columns=["title", "abstract"]
+            )
+            .limit(limit)
+            .to_list()
+        )
 
     def hybrid_search(
         self,
@@ -168,7 +179,11 @@ class LanceStore:
     ) -> list[dict]:
         """Hybrid search: ANN + BM25 fused with RRF."""
         return (
-            self.table.search(query_type="hybrid", vector_column_name=column)
+            self.table.search(
+                query_type="hybrid",
+                vector_column_name=column,
+                fts_columns=["title", "abstract"],
+            )
             .vector(query_vec)
             .text(query_text)
             .rerank(RRFReranker())
