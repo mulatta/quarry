@@ -130,22 +130,37 @@ class LanceStore:
 
         self.table.optimize(cleanup_older_than=timedelta(seconds=0))
 
-    def create_fts_index(self):
-        """Build BM25 full-text index on title and abstract.
+    def create_fts_index(self, column: str):
+        """Build BM25 full-text index on a single column.
 
-        Native FTS requires one index per column; queries can still span both
-        via `fts_columns=["title", "abstract"]` at search time.
+        Native FTS requires one index per column; queries can still span
+        multiple columns via `fts_columns=[...]` at search time.
         """
-        self.table.create_fts_index("title", replace=True)
-        self.table.create_fts_index("abstract", replace=True)
+        self.table.create_fts_index(column, replace=True)
 
     def create_scalar_index(self, column: str = "work_id"):
         """Build b-tree scalar index for fast equality lookups."""
         self.table.create_scalar_index(column, index_type="BTREE", replace=True)
 
-    def create_vector_index(self, column: str = "vec_retrieval"):
-        """Build IVF_PQ vector index for ANN search."""
-        self.table.create_index(metric="cosine", vector_column_name=column)
+    def create_vector_index(
+        self, column: str = "vec_retrieval", accelerator: str | None = None
+    ):
+        """Build IVF_PQ vector index for ANN search.
+
+        accelerator: pass "cuda" for GPU-accelerated k-means (5–10x faster).
+
+        num_sub_vectors=16 assumes 256-dim Jina embeddings (16-dim per subvec).
+        Required explicitly because the CUDA path doesn't handle None default
+        (CPU path auto-computes from dim, but accelerator path raises TypeError).
+        """
+        kwargs: dict = {
+            "metric": "cosine",
+            "vector_column_name": column,
+            "num_sub_vectors": 16,
+        }
+        if accelerator:
+            kwargs["accelerator"] = accelerator
+        self.table.create_index(**kwargs)
 
     # -- Search methods --
 

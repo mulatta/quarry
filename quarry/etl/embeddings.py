@@ -437,20 +437,47 @@ def run(limit: int | None = None, logger=None):
                 "No data changes: encoded=0, skipped=%d, orphans=0", total_skipped
             )
 
-        # Always rebuild indices when table has data — idempotent via replace=True.
-        # Recovers from prior partial-build failures even when nothing changed.
+        # Index maintenance: incremental update for existing indices,
+        # full build only for missing ones (auto-recovery from prior failures).
         if lance.table.count_rows() > 0:
-            if total_encoded > 0 or orphan_ids:
-                logger.info("Final LanceDB optimize...")
+            dirty = total_encoded > 0 or bool(orphan_ids)
+            indexed_cols = {cfg.columns[0] for cfg in lance.table.list_indices()}
+            needed = {
+                "title",
+                "abstract",
+                "work_id",
+                "vec_retrieval",
+                "vec_cluster",
+            }
+            missing = needed - indexed_cols
+
+            if dirty:
+                logger.info(
+                    "Optimizing LanceDB (compact + prune + incremental index update)..."
+                )
                 lance.optimize()
-            logger.info("Building FTS index (title, abstract)...")
-            lance.create_fts_index()
-            logger.info("Building scalar index on work_id...")
-            lance.create_scalar_index("work_id")
-            logger.info("Building vector indices...")
-            lance.create_vector_index("vec_retrieval")
-            lance.create_vector_index("vec_cluster")
-            logger.info("Indices built.")
+
+            if missing:
+                logger.info("Building missing indices: %s", sorted(missing))
+                accelerator = settings.embed_index_accelerator
+                for col in ("title", "abstract"):
+                    if col in missing:
+                        logger.info("Building FTS index on %s...", col)
+                        lance.create_fts_index(col)
+                if "work_id" in missing:
+                    logger.info("Building scalar index on work_id...")
+                    lance.create_scalar_index("work_id")
+                for col in ("vec_retrieval", "vec_cluster"):
+                    if col in missing:
+                        logger.info(
+                            "Building vector index on %s (accelerator=%s)...",
+                            col,
+                            accelerator or "cpu",
+                        )
+                        lance.create_vector_index(col, accelerator=accelerator)
+                logger.info("Indices built.")
+            else:
+                logger.info("All indices present — incremental update only.")
 
     finally:
         _cleanup_temp(logger)
