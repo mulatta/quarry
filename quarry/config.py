@@ -74,6 +74,18 @@ class Settings(BaseSettings):
     embed_index_accelerator: str | None = (
         None  # "cuda" for GPU-accelerated IVF_PQ k-means, None for CPU
     )
+
+    # Reranker (search-time cross-encoder, qmd-style multi-stage retrieval)
+    rerank_model: str = "jinaai/jina-reranker-v3"  # CC BY-NC 4.0
+    rerank_enabled: bool = True
+    rerank_candidate_multiplier: int = 3  # over-fetch limit×N before rerank
+    rerank_max_pairs: int = 24  # cap (Jina v3 60-doc OOMs at ~22GB on 48GB GPU)
+    rerank_batch_size: int = 12  # split rerank calls; <=24 for headroom
+    rerank_min_score: float = 0.0  # blended-score cutoff
+    rerank_blend_top: float = 0.75  # rrf weight for rank 1-3
+    rerank_blend_mid: float = 0.60  # rrf weight for rank 4-10
+    rerank_blend_tail: float = 0.40  # rrf weight for rank 11+
+    rerank_truncate_chars: int = 2000  # title+abstract char cap (~500 tokens)
     embed_allowed_types: list[str] = [
         "article",
         "preprint",
