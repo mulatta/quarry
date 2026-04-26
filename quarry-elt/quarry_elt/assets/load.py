@@ -33,7 +33,8 @@ from quarry_elt.assets.download import (
     pubmed_baseline_sync,
     pubmed_updates_sync,
 )
-from quarry_elt.assets.helpers import run, run_parse
+from quarry_elt.assets.helpers import run
+from quarry_elt.assets.init import ch_init
 from quarry_elt.assets.stage import mesh_stage
 from quarry.config import settings
 from quarry_elt.resources import PGResource
@@ -113,53 +114,7 @@ def _psql(
     run(cmd, context, label=label or f"[PG] {sql}", env=env)
 
 
-# ── CH init asset ──
-
-_SQL_DIR = Path(__file__).resolve().parent.parent.parent / "sql"
-_CH_SCHEMA_SQL = _SQL_DIR / "ch_schema.sql"
-
-
-def _ch_query_no_db(
-    query: str, context: AssetExecutionContext, label: str | None = None
-) -> None:
-    """Run a CH query without --database (for CREATE DATABASE)."""
-    cmd = [
-        "clickhouse-client",
-        "--host",
-        settings.ch_host,
-        "--port",
-        str(settings.ch_port),
-        "--query",
-        query,
-    ]
-    run(cmd, context, label=label or f"[CH] {query}")
-
-
-@asset(
-    group_name="init",
-    description="Create CH database + tables from ch_schema.sql (idempotent).",
-    kinds={"clickhouse"},
-)
-def ch_init(context: AssetExecutionContext) -> MaterializeResult:
-    content = _CH_SCHEMA_SQL.read_text()
-    # Strip block comments (/* ... */) before splitting
-    cleaned = re.sub(r"/\*.*?\*/", "", content, flags=re.DOTALL)
-    stmts = [s.strip() for s in cleaned.split(";") if s.strip()]
-
-    for stmt in stmts:
-        if stmt.startswith("--"):
-            continue
-        # CREATE DATABASE runs without --database flag
-        if stmt.upper().startswith("CREATE DATABASE"):
-            _ch_query_no_db(stmt, context, label=f"[CH] {stmt.split(chr(10))[0]}")
-        elif stmt.upper().startswith("USE"):
-            continue  # --database flag handles this
-        else:
-            _ch_query(stmt, context)
-
-    return MaterializeResult(
-        metadata={"status": MetadataValue.text("ok")},
-    )
+_SQL_DIR = Path(__file__).resolve().parent.parent.parent.parent / "sql"
 
 
 # ── Parse assets ──
@@ -173,18 +128,16 @@ def ch_init(context: AssetExecutionContext) -> MaterializeResult:
     automation_condition=AutomationCondition.eager(),
 )
 def oa_parse(context: AssetExecutionContext) -> MaterializeResult:
-    run_parse(
-        [
-            "oa",
-            "--input-dir",
-            str(settings.oa_local_dir),
-            "--output-dir",
-            str(settings.oa_parquet_dir),
-        ],
-        context,
+    import quarry_parse
+
+    context.log.info(f"[OA] parsing {settings.oa_local_dir} → {settings.oa_parquet_dir}")
+    stats = quarry_parse.parse_oa(
+        input_dir=str(settings.oa_local_dir),
+        output_dir=str(settings.oa_parquet_dir),
     )
+    context.log.info(f"[OA] done: {stats}")
     return MaterializeResult(
-        metadata={"status": MetadataValue.text("ok")},
+        metadata={k: MetadataValue.int(v) for k, v in stats.items() if isinstance(v, int)},
     )
 
 
@@ -196,20 +149,20 @@ def oa_parse(context: AssetExecutionContext) -> MaterializeResult:
     automation_condition=AutomationCondition.eager(),
 )
 def pm_parse(context: AssetExecutionContext) -> MaterializeResult:
-    args = [
-        "pubmed",
-        "--input-dir",
-        str(settings.pubmed_baseline_dir),
-        "--output-dir",
-        str(settings.pm_parquet_dir),
-    ]
-    update_dir = settings.pubmed_update_dir
-    if update_dir.exists() and any(update_dir.glob("pubmed*.xml.gz")):
-        args += ["--updates-dir", str(update_dir)]
+    import quarry_parse
 
-    run_parse(args, context)
+    update_dir = settings.pubmed_update_dir
+    updates = str(update_dir) if update_dir.exists() and any(update_dir.glob("pubmed*.xml.gz")) else None
+
+    context.log.info(f"[PM] parsing {settings.pubmed_baseline_dir} → {settings.pm_parquet_dir}")
+    stats = quarry_parse.parse_pubmed(
+        input_dir=str(settings.pubmed_baseline_dir),
+        output_dir=str(settings.pm_parquet_dir),
+        updates_dir=updates,
+    )
+    context.log.info(f"[PM] done: {stats}")
     return MaterializeResult(
-        metadata={"status": MetadataValue.text("ok")},
+        metadata={k: MetadataValue.int(v) for k, v in stats.items() if isinstance(v, int)},
     )
 
 

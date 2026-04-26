@@ -6,7 +6,6 @@ in
   perSystem =
     {
       pkgs,
-      self',
       lib,
       ...
     }:
@@ -33,8 +32,7 @@ in
             awscli2
             cudaPackages.cuda_cudart
             cudaPackages.cuda_nvcc
-          ])
-          ++ [ self'.packages.quarry-parse ];
+          ]);
 
         env = {
           UV_PYTHON_DOWNLOADS = "never";
