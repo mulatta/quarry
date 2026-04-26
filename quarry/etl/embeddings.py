@@ -369,87 +369,115 @@ def run(limit: int | None = None, logger=None):
         if limit:
             to_encode_ids = to_encode_ids[:limit]
 
-        if not to_encode_ids and not orphan_ids:
-            logger.info(
-                "Nothing to do: encoded=0, skipped=%d, orphans=0", total_skipped
-            )
-            return
-
-        # Step 3: load diff IDs → CH temp table, then fetch + encode
-        _load_ids_to_ch(to_encode_ids, "_tmp_encode_ids", logger)
-
-        encoder = JinaEncoder(
-            dim=256,
-            batch_size=settings.embed_batch_size,
-            max_tokens=settings.embed_max_tokens,
-        )
-
-        encode_batch = settings.embed_encode_batch
         total_encoded = 0
-        batch_num = 0
 
-        for to_encode, hashes in _prefetch(encode_batch, logger):
-            texts = [f"{w['title']}. {w['abstract']}" for w in to_encode]
-            t0 = time.time()
-            vec_ret = encoder.encode_passages(texts)
-            vec_clust = encoder.encode_clustering(texts)
-            elapsed = time.time() - t0
+        if to_encode_ids or orphan_ids:
+            # Step 3: load diff IDs → CH temp table, then fetch + encode
+            _load_ids_to_ch(to_encode_ids, "_tmp_encode_ids", logger)
 
-            lance_rows = [
-                {
-                    "work_id": w["work_id"],
-                    "content_hash": hashes[w["work_id"]],
-                    "title": w["title"],
-                    "abstract": w["abstract"],
-                    "vec_retrieval": vec_ret[i].tolist(),
-                    "vec_cluster": vec_clust[i].tolist(),
-                }
-                for i, w in enumerate(to_encode)
-            ]
-
-            lance.upsert(lance_rows)
-
-            total_encoded += len(to_encode)
-            batch_num += 1
-            throughput = len(texts) / elapsed if elapsed > 0 else 0
-
-            logger.info(
-                "batch %d: encoded=%d, total=%d/%d, %.0f vec/s, %.1fs",
-                batch_num,
-                len(to_encode),
-                total_encoded,
-                len(to_encode_ids),
-                throughput,
-                elapsed,
+            encoder = JinaEncoder(
+                dim=256,
+                batch_size=settings.embed_batch_size,
+                max_tokens=settings.embed_max_tokens,
             )
 
-            if batch_num % _OPTIMIZE_EVERY == 0:
-                logger.info("batch %d: optimizing LanceDB...", batch_num)
+            encode_batch = settings.embed_encode_batch
+            batch_num = 0
+
+            for to_encode, hashes in _prefetch(encode_batch, logger):
+                texts = [f"{w['title']}. {w['abstract']}" for w in to_encode]
+                t0 = time.time()
+                vec_ret = encoder.encode_passages(texts)
+                vec_clust = encoder.encode_clustering(texts)
+                elapsed = time.time() - t0
+
+                lance_rows = [
+                    {
+                        "work_id": w["work_id"],
+                        "content_hash": hashes[w["work_id"]],
+                        "title": w["title"],
+                        "abstract": w["abstract"],
+                        "vec_retrieval": vec_ret[i].tolist(),
+                        "vec_cluster": vec_clust[i].tolist(),
+                    }
+                    for i, w in enumerate(to_encode)
+                ]
+
+                lance.upsert(lance_rows)
+
+                total_encoded += len(to_encode)
+                batch_num += 1
+                throughput = len(texts) / elapsed if elapsed > 0 else 0
+
+                logger.info(
+                    "batch %d: encoded=%d, total=%d/%d, %.0f vec/s, %.1fs",
+                    batch_num,
+                    len(to_encode),
+                    total_encoded,
+                    len(to_encode_ids),
+                    throughput,
+                    elapsed,
+                )
+
+                if batch_num % _OPTIMIZE_EVERY == 0:
+                    logger.info("batch %d: optimizing LanceDB...", batch_num)
+                    lance.optimize()
+
+            encoder.unload()
+
+            logger.info("Done: encoded=%d, skipped=%d", total_encoded, total_skipped)
+
+            # Orphan GC
+            if orphan_ids and not limit:
+                logger.info("[GC] Deleting %d orphans...", len(orphan_ids))
+                deleted = lance.delete_work_ids_batch(set(orphan_ids))
+                logger.info("[GC] Deleted %d orphans", deleted)
+        else:
+            logger.info(
+                "No data changes: encoded=0, skipped=%d, orphans=0", total_skipped
+            )
+
+        # Index maintenance: incremental update for existing indices,
+        # full build only for missing ones (auto-recovery from prior failures).
+        if lance.table.count_rows() > 0:
+            dirty = total_encoded > 0 or bool(orphan_ids)
+            indexed_cols = {cfg.columns[0] for cfg in lance.table.list_indices()}
+            needed = {
+                "title",
+                "abstract",
+                "work_id",
+                "vec_retrieval",
+                "vec_cluster",
+            }
+            missing = needed - indexed_cols
+
+            if dirty:
+                logger.info(
+                    "Optimizing LanceDB (compact + prune + incremental index update)..."
+                )
                 lance.optimize()
 
-        encoder.unload()
-
-        logger.info("Done: encoded=%d, skipped=%d", total_encoded, total_skipped)
-
-        # Orphan GC
-        if orphan_ids and not limit:
-            logger.info("[GC] Deleting %d orphans...", len(orphan_ids))
-            deleted = lance.delete_work_ids_batch(set(orphan_ids))
-            logger.info("[GC] Deleted %d orphans", deleted)
-
-        dirty = total_encoded > 0 or bool(orphan_ids)
-
-        if dirty:
-            logger.info("Final LanceDB optimize...")
-            lance.optimize()
-            logger.info("Building FTS index...")
-            lance.create_fts_index()
-            logger.info("Building scalar index on work_id...")
-            lance.create_scalar_index("work_id")
-            logger.info("Building vector index...")
-            lance.create_vector_index("vec_retrieval")
-            lance.create_vector_index("vec_cluster")
-            logger.info("Indices built.")
+            if missing:
+                logger.info("Building missing indices: %s", sorted(missing))
+                accelerator = settings.embed_index_accelerator
+                for col in ("title", "abstract"):
+                    if col in missing:
+                        logger.info("Building FTS index on %s...", col)
+                        lance.create_fts_index(col)
+                if "work_id" in missing:
+                    logger.info("Building scalar index on work_id...")
+                    lance.create_scalar_index("work_id")
+                for col in ("vec_retrieval", "vec_cluster"):
+                    if col in missing:
+                        logger.info(
+                            "Building vector index on %s (accelerator=%s)...",
+                            col,
+                            accelerator or "cpu",
+                        )
+                        lance.create_vector_index(col, accelerator=accelerator)
+                logger.info("Indices built.")
+            else:
+                logger.info("All indices present — incremental update only.")
 
     finally:
         _cleanup_temp(logger)

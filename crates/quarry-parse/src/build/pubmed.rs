@@ -30,6 +30,7 @@ pub struct PubmedParseStats {
     pub num_mesh: usize,
     pub num_grants: usize,
     pub num_chemicals: usize,
+    pub num_delete_pmids: usize,
     pub num_files_processed: usize,
     pub num_failed_files: usize,
     pub elapsed_secs: f64,
@@ -74,6 +75,7 @@ pub fn parse_pubmed(
     let mesh_count = Arc::new(AtomicUsize::new(0));
     let grants_count = Arc::new(AtomicUsize::new(0));
     let chemicals_count = Arc::new(AtomicUsize::new(0));
+    let delete_count = Arc::new(AtomicUsize::new(0));
     let failed_count = Arc::new(AtomicUsize::new(0));
     let files_done = Arc::new(AtomicUsize::new(0));
     let out_dir = output_dir.to_path_buf();
@@ -92,10 +94,7 @@ pub fn parse_pubmed(
             };
 
             if !pr.delete_pmids.is_empty() {
-                eprintln!(
-                    "pubmed: WARN: {} has {} delete_pmids (ignored in parse-only mode)",
-                    part_name, pr.delete_pmids.len()
-                );
+                delete_count.fetch_add(pr.delete_pmids.len(), Ordering::Relaxed);
             }
 
             if let Err(e) = write_pubmed_output(&pr, &out_dir, &part_name) {
@@ -129,6 +128,7 @@ pub fn parse_pubmed(
         num_mesh: mesh_count.load(Ordering::Relaxed),
         num_grants: grants_count.load(Ordering::Relaxed),
         num_chemicals: chemicals_count.load(Ordering::Relaxed),
+        num_delete_pmids: delete_count.load(Ordering::Relaxed),
         num_files_processed: num_todo,
         num_failed_files: failed_count.load(Ordering::Relaxed),
         elapsed_secs: elapsed,

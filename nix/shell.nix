@@ -30,28 +30,37 @@ in
             clickhouse
             duckdb
             awscli2
-            cudaPackages.cuda_cudart
-            cudaPackages.cuda_nvcc
-          ]);
+          ])
+          ++ lib.optionals pkgs.stdenv.isLinux (
+            with pkgs;
+            [
+              cudaPackages.cuda_cudart
+              cudaPackages.cuda_nvcc
+            ]
+          );
 
         env = {
           UV_PYTHON_DOWNLOADS = "never";
           PGHOST = pgSocketDir;
           QUARRY_PG_CONNINFO = "host=${pgSocketDir} dbname=quarry";
-          LD_LIBRARY_PATH = lib.makeLibraryPath [
-            pkgs.stdenv.cc.cc.lib
-            pkgs.zlib
-            "${pkgs.addDriverRunpath.driverLink}"
-          ];
+          LD_LIBRARY_PATH = lib.makeLibraryPath (
+            [
+              pkgs.stdenv.cc.cc.lib
+              pkgs.zlib
+            ]
+            ++ lib.optionals pkgs.stdenv.isLinux [
+              "${pkgs.addDriverRunpath.driverLink}"
+            ]
+          );
+        }
+        // lib.optionalAttrs pkgs.stdenv.isLinux {
           TRITON_LIBCUDA_PATH = "${pkgs.addDriverRunpath.driverLink}/lib";
         };
 
         shellHook = ''
-          uv sync --all-extras --quiet
-          source .venv/bin/activate
           export DAGSTER_HOME="$(git rev-parse --show-toplevel)/.dg-home"
           export DAGSTER_PG_URL="postgresql:///dagster?host=${pgSocketDir}"
-          mkdir -p "$DAGSTER_HOME"
+          mkdir -p "$DAGSTER_HOME" 2>/dev/null || true
         '';
       };
 

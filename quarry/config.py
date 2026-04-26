@@ -71,6 +71,9 @@ class Settings(BaseSettings):
         1024  # tokenizer truncation; prevents GPU OOM from long texts
     )
     embed_encode_batch: int = 1024  # works per GPU encode batch (CH fetch → encode)
+    embed_index_accelerator: str | None = (
+        None  # "cuda" for GPU-accelerated IVF_PQ k-means, None for CPU
+    )
     embed_allowed_types: list[str] = [
         "article",
         "preprint",

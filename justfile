@@ -26,6 +26,10 @@ sync:
     uv sync --all-extras
     maturin develop --release -m crates/quarry-core/Cargo.toml
     maturin develop --release -m crates/quarry-graph/Cargo.toml
+    maturin develop --release -m crates/quarry-parse/Cargo.toml
+    rm -f .venv/bin/quarry-parse
+    printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'exec cargo run --manifest-path "$(pwd)/crates/quarry-parse/Cargo.toml" --bin quarry-parse -- "$@"' > .venv/bin/quarry-parse
+    chmod +x .venv/bin/quarry-parse
     uv sync --project quarry-elt --all-extras
     VIRTUAL_ENV=quarry-elt/.venv maturin develop --release -m crates/quarry-core/Cargo.toml
     VIRTUAL_ENV=quarry-elt/.venv maturin develop --release -m crates/quarry-graph/Cargo.toml
