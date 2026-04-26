@@ -16,6 +16,11 @@ def search(
     query: str = typer.Argument(..., help="Search query"),
     limit: int = typer.Option(20, "--limit", "-n", help="Max results"),
     mode: str = typer.Option("hybrid", "--mode", "-m", help="hybrid|vector|text"),
+    rerank: bool = typer.Option(
+        True,
+        "--rerank/--no-rerank",
+        help="Cross-encoder rerank (default on, see settings.rerank_enabled)",
+    ),
 ):
     """Hybrid search for papers."""
     from quarry.search.hybrid import HybridSearcher
@@ -24,7 +29,7 @@ def search(
 
     db = PGStore(settings.pg_conninfo)
     searcher = HybridSearcher(db=db)
-    results = searcher.search(query, limit=limit, mode=mode)
+    results = searcher.search(query, limit=limit, mode=mode, rerank=rerank)
     for r in results:
         wid = r.get("work_id", "?")
         title = r.get("title", "")[:80]
