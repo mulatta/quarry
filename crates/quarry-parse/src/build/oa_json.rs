@@ -69,6 +69,7 @@ pub struct OaWork {
 
 pub struct OaAuthor {
     pub work_id: Arc<str>,
+    pub author_id: Option<String>,
     pub author_position: i16,
     pub display_name: Option<String>,
     pub orcid: Option<String>,
@@ -202,6 +203,7 @@ struct RawAuthorship {
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct RawAuthor {
+    id: Option<String>,
     display_name: Option<String>,
     orcid: Option<String>,
 }
@@ -342,9 +344,9 @@ pub fn parse_line(
             .into_iter()
             .enumerate()
             .map(|(i, a)| {
-                let (display_name, orcid) = match a.author {
-                    Some(au) => (au.display_name, au.orcid),
-                    None => (None, None),
+                let (author_id, display_name, orcid) = match a.author {
+                    Some(au) => (au.id, au.display_name, au.orcid),
+                    None => (None, None, None),
                 };
                 let (inst_name, inst_ror) = a
                     .institutions
@@ -354,6 +356,7 @@ pub fn parse_line(
 
                 OaAuthor {
                     work_id: Arc::clone(&work_id),
+                    author_id,
                     author_position: i16::try_from(i + 1).unwrap_or(i16::MAX),
                     display_name,
                     orcid,
@@ -474,7 +477,7 @@ mod tests {
             "primary_location": {"source": {"display_name": "Nature"}},
             "open_access": {"oa_status": "gold", "oa_url": "https://example.com"},
             "authorships": [
-                {"author": {"display_name": "Alice", "orcid": "https://orcid.org/0000-0001-2345-6789"},
+                {"author": {"id": "https://openalex.org/A5001", "display_name": "Alice", "orcid": "https://orcid.org/0000-0001-2345-6789"},
                  "institutions": [{"display_name": "MIT", "ror": "https://ror.org/042nb2s44"}],
                  "raw_affiliation_strings": ["MIT, Cambridge"]}
             ],
@@ -516,6 +519,7 @@ mod tests {
         assert_eq!(&*result.counts_by_year[1].work_id, "W12345");
 
         assert_eq!(result.authors.len(), 1);
+        assert_eq!(result.authors[0].author_id.as_deref(), Some("https://openalex.org/A5001"));
         assert_eq!(result.authors[0].display_name.as_deref(), Some("Alice"));
         assert_eq!(result.authors[0].author_position, 1);
         assert_eq!(

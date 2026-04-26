@@ -516,7 +516,7 @@ _EXPORT_TABLES: list[tuple[str, str, str]] = [
     (
         "oa_work_authors",
         "work_authors",
-        "work_id, author_position, display_name, orcid, "
+        "work_id, author_id, author_position, display_name, orcid, "
         "institution_name, institution_ror, raw_affiliation",
     ),
     (
