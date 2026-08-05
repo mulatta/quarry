@@ -12,6 +12,8 @@ DO NOT use `from __future__ import annotations` here — Dagster inspects types 
 """
 
 import hashlib
+import subprocess
+from pathlib import Path
 
 from dagster import (
     AssetExecutionContext,
@@ -24,15 +26,12 @@ from dagster import (
 )
 
 from quarry.config import settings
-from pathlib import Path
-
 from quarry.etl.fetch import (
     download_and_extract_zip,
     find_latest_ftp_file,
     resolve_figshare_files,
     sync_ftp_dir,
 )
-import subprocess
 
 _DOWNLOAD_RETRY = RetryPolicy(max_retries=3, delay=30, backoff=Backoff.EXPONENTIAL)
 
@@ -239,6 +238,7 @@ def oa_sync(
         base_cmd + ["--dryrun"],
         capture_output=True,
         text=True,
+        check=False,
     )
     pending = dry.stdout.count("\n") if dry.returncode == 0 else 0
 

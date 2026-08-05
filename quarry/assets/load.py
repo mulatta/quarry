@@ -404,6 +404,7 @@ def ch_transform(context: AssetExecutionContext) -> MaterializeResult:
             _ch_client_cmd() + ["--query", query],
             capture_output=True,
             text=True,
+            check=False,
         )
         return table, proc.returncode, proc.stderr
 
@@ -507,17 +508,21 @@ _EXPORT_TABLES: list[tuple[str, str, str]] = [
     (
         "papers_export",
         "papers",
-        "pmid, doi, pmc_id, title, abstract, pub_year, pub_date, "
-        "journal_title, journal_issn, journal_abbr, volume, issue, pages, "
-        "language, pub_type, country, medline_status, created_date, revised_date, "
-        "indexed_date, is_deleted, deleted_date, rcr, nih_percentile, apt, "
-        "is_clinical, human, animal, molecular_cellular, field_citation_rate",
+        (
+            "pmid, doi, pmc_id, title, abstract, pub_year, pub_date, "
+            "journal_title, journal_issn, journal_abbr, volume, issue, pages, "
+            "language, pub_type, country, medline_status, created_date, revised_date, "
+            "indexed_date, is_deleted, deleted_date, rcr, nih_percentile, apt, "
+            "is_clinical, human, animal, molecular_cellular, field_citation_rate"
+        ),
     ),
     (
         "oa_work_authors",
         "work_authors",
-        "work_id, author_position, display_name, orcid, "
-        "institution_name, institution_ror, raw_affiliation",
+        (
+            "work_id, author_position, display_name, orcid, "
+            "institution_name, institution_ror, raw_affiliation"
+        ),
     ),
     (
         "oa_work_topics",
@@ -527,14 +532,18 @@ _EXPORT_TABLES: list[tuple[str, str, str]] = [
     (
         "pm_authors",
         "authors",
-        "pmid, author_position, last_name, fore_name, initials, "
-        "orcid, affiliation, is_collective",
+        (
+            "pmid, author_position, last_name, fore_name, initials, "
+            "orcid, affiliation, is_collective"
+        ),
     ),
     (
         "pm_mesh_headings",
         "mesh_headings",
-        "pmid, descriptor_ui, descriptor_name, qualifier_ui, "
-        "qualifier_name, is_major_topic",
+        (
+            "pmid, descriptor_ui, descriptor_name, qualifier_ui, "
+            "qualifier_name, is_major_topic"
+        ),
     ),
     ("pm_grants", "grants", "pmid, grant_id, acronym, agency, country"),
     (
@@ -554,8 +563,10 @@ _EXPORT_TABLES: list[tuple[str, str, str]] = [
     (
         "work_mesh_export",
         "work_mesh",
-        "work_id, descriptor_ui, descriptor_name, qualifier_ui, "
-        "qualifier_name, is_major_topic",
+        (
+            "work_id, descriptor_ui, descriptor_name, qualifier_ui, "
+            "qualifier_name, is_major_topic"
+        ),
     ),
     ("cited_by_clin_export", "cited_by_clin", "pmid, citing_pmid"),
     ("oa_counts_by_year", "work_counts_by_year", "work_id, year, cited_by_count"),
@@ -571,7 +582,9 @@ def _ch_export_one(
         query += f" WHERE {where}"
     cmd = _ch_client_cmd() + ["--query", query + " FORMAT Parquet"]
     with open(out_path, "wb") as f:
-        return subprocess.run(cmd, stdout=f, stderr=subprocess.PIPE, text=True)
+        return subprocess.run(
+            cmd, stdout=f, stderr=subprocess.PIPE, text=True, check=False
+        )
 
 
 def _split_parquet_by_bucket(src: Path, dest_dir: Path) -> int:
@@ -840,7 +853,7 @@ def pg_load(context: AssetExecutionContext, pg: PGResource) -> MaterializeResult
                 future.result()
                 done += 1
                 context.log.info(f"[PG] {name} done [{done}/{total}]")
-            except Exception as exc:
+            except (OSError, RuntimeError, ValueError) as exc:
                 context.log.error(f"[PG] {name} failed: {exc}")
                 failed.append(name)
 

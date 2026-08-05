@@ -15,10 +15,7 @@ import pytest
 def _quarry(*args: str, timeout: int = 60) -> subprocess.CompletedProcess:
     """Run quarry CLI command and return result."""
     return subprocess.run(
-        ["quarry", *args],
-        capture_output=True,
-        text=True,
-        timeout=timeout,
+        ["quarry", *args], capture_output=True, text=True, timeout=timeout, check=False
     )
 
 

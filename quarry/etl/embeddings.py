@@ -61,6 +61,7 @@ def _ch_exec(query: str) -> str:
         _ch_cmd() + ["--query", query],
         capture_output=True,
         text=True,
+        check=False,
     )
     if proc.returncode != 0:
         raise RuntimeError(f"CH query failed: {proc.stderr.strip()}")
@@ -303,7 +304,7 @@ def _prefetch(encode_batch: int, logger):
 
             if buf:
                 q.put((list(buf), dict(buf_hashes)))
-        except Exception as exc:
+        except (OSError, RuntimeError, ValueError) as exc:
             logger.exception("prefetch producer failed")
             q.put(exc)
         finally:
@@ -332,7 +333,7 @@ def _cleanup_temp(logger):
     for table in ["_tmp_lance_hashes", "_tmp_encode_ids", "_tmp_representative"]:
         try:
             _ch_exec(f"DROP TABLE IF EXISTS {table}")
-        except Exception as exc:
+        except (OSError, RuntimeError, ValueError) as exc:
             logger.warning("Failed to drop %s: %s", table, exc)
 
 
@@ -349,7 +350,7 @@ def run(limit: int | None = None, logger=None):
         if lance.table.count_rows() > 0:
             logger.info("Building work_id BTree index for hash lookups...")
             lance.create_scalar_index("work_id")
-    except Exception:
+    except (OSError, RuntimeError, ValueError):
         lance.create_table()
 
     try:
@@ -380,9 +381,9 @@ def run(limit: int | None = None, logger=None):
 
         encode_batch = settings.embed_encode_batch
         total_encoded = 0
-        batch_num = 0
-
-        for to_encode, hashes in _prefetch(encode_batch, logger):
+        for batch_num, (to_encode, hashes) in enumerate(
+            _prefetch(encode_batch, logger), start=1
+        ):
             texts = [f"{w['title']}. {w['abstract']}" for w in to_encode]
             t0 = time.time()
             vec_ret = encoder.encode_passages(texts)
@@ -404,7 +405,6 @@ def run(limit: int | None = None, logger=None):
             lance.upsert(lance_rows)
 
             total_encoded += len(to_encode)
-            batch_num += 1
             throughput = len(texts) / elapsed if elapsed > 0 else 0
 
             logger.info(

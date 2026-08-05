@@ -73,7 +73,7 @@ def _api_get(url: str) -> bytes:
             req = urllib.request.Request(url, headers={"User-Agent": "quarry-test/1.0"})
             with urllib.request.urlopen(req, timeout=30) as resp:
                 return resp.read()
-        except Exception as e:
+        except (OSError, RuntimeError, ValueError) as e:
             if attempt == 2:
                 raise
             print(f"  retry {attempt + 1}: {e}")
@@ -284,6 +284,7 @@ class TestParse:
             ],
             capture_output=True,
             text=True,
+            check=False,
         )
         print(r.stderr)
         assert r.returncode == 0, f"quarry-parse oa failed: {r.stderr}"
@@ -303,6 +304,7 @@ class TestParse:
             ],
             capture_output=True,
             text=True,
+            check=False,
         )
         print(r.stderr)
         assert r.returncode == 0, f"quarry-parse pubmed failed: {r.stderr}"
@@ -323,6 +325,7 @@ class TestParse:
             ],
             capture_output=True,
             text=True,
+            check=False,
         )
         print(r.stderr)
         assert r.returncode == 0, f"quarry-parse mesh failed: {r.stderr}"
@@ -415,6 +418,7 @@ class TestDagsterPipeline:
             ["psql", settings.pg_conninfo, "-t", "-c", "SELECT count(*) FROM works"],
             capture_output=True,
             text=True,
+            check=False,
         )
         count = int(r.stdout.strip())
         assert count > 0, f"Expected works in PG, got {count}"
@@ -431,6 +435,7 @@ class TestDagsterPipeline:
             ],
             capture_output=True,
             text=True,
+            check=False,
         )
         enriched = int(r.stdout.strip())
         print(f"=== Works with iCite RCR: {enriched} ===")
@@ -454,6 +459,7 @@ class TestDagsterPipeline:
                 ["psql", settings.pg_conninfo, "-t", "-c", f"SELECT count(*) FROM {t}"],
                 capture_output=True,
                 text=True,
+                check=False,
             )
             cnt = r.stdout.strip() if r.returncode == 0 else "ERROR"
             print(f"  {t}: {cnt}")
