@@ -56,8 +56,9 @@ class _TomlConfigSource(PydanticBaseSettingsSource):
     def get_field_value(
         self,
         field: FieldInfo,
-        field_name: str,  # noqa: ARG002
+        field_name: str,
     ) -> tuple[Any, str, bool]:
+        del field
         val = self._data.get(field_name)
         return val, field_name, val is not None
 
@@ -83,9 +84,10 @@ class ServerSettings(BaseSettings):
         settings_cls: type[BaseSettings],
         init_settings: PydanticBaseSettingsSource,
         env_settings: PydanticBaseSettingsSource,
-        dotenv_settings: PydanticBaseSettingsSource,  # noqa: ARG002
-        file_secret_settings: PydanticBaseSettingsSource,  # noqa: ARG002
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
     ) -> tuple[PydanticBaseSettingsSource, ...]:
+        del dotenv_settings, file_secret_settings
         return (
             init_settings,
             env_settings,  # QUARRY_SERVER_* — highest priority

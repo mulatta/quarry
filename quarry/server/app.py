@@ -39,6 +39,8 @@ from __future__ import annotations
 
 from typing import Annotated
 
+from pydantic import AnyHttpUrl
+
 try:
     from mcp.server.auth.settings import AuthSettings
     from mcp.server.fastmcp import FastMCP
@@ -69,8 +71,8 @@ _RO_OPEN = ToolAnnotations(
 if server_settings.require_auth:
     _server_url = f"http://{server_settings.host}:{server_settings.port}"
     _auth = AuthSettings(
-        issuer_url=_server_url,  # type: ignore[arg-type]
-        resource_server_url=_server_url,  # type: ignore[arg-type]
+        issuer_url=AnyHttpUrl(_server_url),
+        resource_server_url=AnyHttpUrl(_server_url),
     )
     _token_verifier: PgTokenVerifier | None = PgTokenVerifier(
         server_settings.pg_conninfo

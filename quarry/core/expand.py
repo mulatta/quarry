@@ -208,7 +208,7 @@ def resolve_seed(seed: str, pg_conninfo: str) -> int:
         pass
 
     # DOI — normalize to OA format
-    if seed.startswith("10.") or seed.startswith("https://doi.org/"):
+    if seed.startswith(("10.", "https://doi.org/")):
         doi = "https://doi.org/" + seed.removeprefix("https://doi.org/").lower()
         with psycopg.connect(pg_conninfo) as conn, conn.cursor() as cur:
             cur.execute("SELECT work_id_int FROM works WHERE doi = %s LIMIT 1", (doi,))
@@ -228,18 +228,18 @@ def _enrich_metadata(
         return {}
 
     try:
-        cols = (
-            "work_id_int, title, pub_year, cited_by_count, doi, "
-            "fwci, citation_normalized_percentile, rcr, host_venue"
+        query = (
+            "SELECT work_id_int, title, pub_year, cited_by_count, doi, "
+            "fwci, citation_normalized_percentile, rcr, host_venue, abstract "
+            "FROM works WHERE work_id_int = ANY(%s)"
+            if include_abstract
+            else "SELECT work_id_int, title, pub_year, cited_by_count, doi, "
+            "fwci, citation_normalized_percentile, rcr, host_venue "
+            "FROM works WHERE work_id_int = ANY(%s)"
         )
-        if include_abstract:
-            cols += ", abstract"
 
         with psycopg.connect(pg_conninfo) as conn, conn.cursor() as cur:
-            cur.execute(
-                f"SELECT {cols} FROM works WHERE work_id_int = ANY(%s)",  # noqa: S608
-                (list(work_ids),),
-            )
+            cur.execute(query, (list(work_ids),))
             result = {}
             for row in cur.fetchall():
                 entry = {
@@ -256,5 +256,5 @@ def _enrich_metadata(
                     entry["abstract"] = row[9] or ""
                 result[row[0]] = entry
             return result
-    except Exception:
+    except (OSError, psycopg.Error, RuntimeError, TypeError, ValueError):
         return {}
