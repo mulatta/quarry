@@ -64,7 +64,7 @@ def _run_cmd(
 ) -> subprocess.CompletedProcess:
     """Run a command with logging."""
     logger.info(f"[{label}] {' '.join(cmd)}")
-    r = subprocess.run(cmd, capture_output=True, text=True)
+    r = subprocess.run(cmd, capture_output=True, text=True, check=False)
     if r.stdout.strip():
         for line in r.stdout.strip().split("\n"):
             logger.debug(f"  stdout: {line}")
@@ -164,6 +164,7 @@ def test_databases():
     subprocess.run(
         ["pkill", "-f", f"clickhouse-client.*{TEST_CH_DATABASE}"],
         capture_output=True,
+        check=False,
     )
 
     _ch_query(f"DROP DATABASE IF EXISTS {TEST_CH_DATABASE}", label="CH teardown")

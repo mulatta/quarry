@@ -10,6 +10,7 @@ Usage:
 
 from __future__ import annotations
 
+import datetime
 import json
 import sys
 import time
@@ -77,7 +78,7 @@ def _method_b_expand(seeds: list[str], limit: int = 200) -> tuple[list[int], int
                 rank = paper["rank"]
                 if wid not in best_rank or rank < best_rank[wid]:
                     best_rank[wid] = rank
-        except Exception as exc:  # noqa: BLE001
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
             print(f"    expand({seed[:20]}): {exc}", file=sys.stderr)
 
     ordered = sorted(best_rank.keys(), key=lambda w: best_rank[w])
@@ -101,10 +102,8 @@ def _method_c_bridge(
     # Rank seeds by recency-adjusted citation count to pick top-2 bridge anchors.
     # Recent papers (≤ RECENCY_YEARS old) are under-cited by definition, so we
     # apply a 1.5× multiplier to avoid systematically deprioritising new work.
-    import datetime
-
     db = PGStore(settings.pg_conninfo)
-    current_year = datetime.date.today().year
+    current_year = datetime.datetime.now(tz=datetime.UTC).year
     seed_scores: list[tuple[str, float]] = []
     for seed in seeds:
         try:
@@ -118,7 +117,7 @@ def _method_c_bridge(
                 score = citations * recency_mult
             else:
                 score = 0.0
-        except Exception:  # noqa: BLE001
+        except (OSError, RuntimeError, TypeError, ValueError):
             score = 0.0
         seed_scores.append((seed, score))
     seed_scores.sort(key=lambda x: -x[1])
@@ -131,7 +130,7 @@ def _method_c_bridge(
             pg_conninfo=settings.pg_conninfo,
             limit=limit,
         )
-    except Exception as exc:  # noqa: BLE001
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
         print(f"    bridge({top2[0][:12]},{top2[1][:12]}): {exc}", file=sys.stderr)
         return b_found, b_n_resolved
 
@@ -161,8 +160,8 @@ def _method_d_mesh(
     mesh_papers_limit: int = 50,
 ) -> tuple[list[int], int]:
     """expand + MeSH: top descriptors from B → mesh-tagged papers."""
-    from quarry.store.pg import PGStore
     from quarry.config import settings
+    from quarry.store.pg import PGStore
 
     db = PGStore(settings.pg_conninfo)
 
@@ -171,7 +170,7 @@ def _method_d_mesh(
         top_mesh = db.top_mesh_by_work_ids(
             b_work_ids, limit=top_mesh_limit, major_only=True
         )
-    except Exception as exc:  # noqa: BLE001
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
         print(f"    top_mesh: {exc}", file=sys.stderr)
         return b_found, b_n_resolved
 
@@ -185,7 +184,7 @@ def _method_d_mesh(
                 wid = w.get("work_id")
                 if wid:
                     mesh_wids.add(work_id_to_int(wid))
-        except Exception as exc:  # noqa: BLE001
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
             print(f"    mesh({descriptor['descriptor_ui']}): {exc}", file=sys.stderr)
 
     b_set = set(b_found)
@@ -240,7 +239,7 @@ def run_review(review: dict, force: bool = False) -> None:
                 found, n_resolved = _method_d_mesh(b_found, b_n_resolved)
             else:
                 continue
-        except Exception as exc:  # noqa: BLE001
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
             print(f"    [{method}] FAILED: {exc}", file=sys.stderr)
             continue
 

@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from urllib.parse import urljoin, urlparse
 
 import httpx
+from lxml import etree
 from lxml import html as lxml_html
 
 CHROMIUM_BIN = os.environ.get("CHROMIUM_BIN")
@@ -106,7 +107,7 @@ class FetchResult:
 def _find_pdf_url(html_bytes: bytes, base_url: str) -> str | None:
     try:
         tree = lxml_html.fromstring(html_bytes)
-    except Exception:
+    except (etree.ParserError, TypeError, ValueError):
         return None
 
     for meta in tree.xpath('//meta[@name="citation_pdf_url"]'):
@@ -143,7 +144,7 @@ def _html_to_text(html_bytes: bytes) -> str:
             if p is not None:
                 p.remove(tag)
         return " ".join(tree.text_content().split())
-    except Exception:
+    except (etree.ParserError, TypeError, ValueError):
         return ""
 
 
@@ -213,13 +214,14 @@ def _pdf_to_markdown(data: bytes) -> str:
     """Parse PDF bytes → Markdown via docling. Returns empty string on failure."""
     try:
         import io
+
         from docling_core.types.io import DocumentStream
 
         converter = _make_docling_converter()
         stream = DocumentStream(name="paper.pdf", stream=io.BytesIO(data))
         result = converter.convert(stream)
         return result.document.export_to_markdown()
-    except Exception:
+    except (ImportError, OSError, RuntimeError, ValueError):
         return ""
 
 
@@ -284,7 +286,7 @@ async def _zenodo_api(url: str) -> FetchResult | None:
                 result.notes.append(f"download not PDF: {ct[:30]}")
                 result.layer = "FAIL"
 
-    except Exception as e:
+    except (httpx.HTTPError, KeyError, TypeError, ValueError) as e:
         result.notes.append(f"error: {e}")
         result.layer = "FAIL"
 
@@ -338,7 +340,7 @@ async def _layer1(url: str) -> FetchResult:
             else:
                 result.notes.append(f"unexpected ct: {ct[:40]}")
 
-    except Exception as e:
+    except (httpx.HTTPError, etree.ParserError, TypeError, ValueError) as e:
         result.notes.append(f"error: {e}")
 
     result.elapsed = time.monotonic() - t0
@@ -356,6 +358,7 @@ async def _layer2(prev: FetchResult) -> FetchResult:
     pdf_data: list[bytes] = []
 
     try:
+        from playwright.async_api import Error as PlaywrightError
         from playwright.async_api import async_playwright
         from playwright_stealth import Stealth
 
@@ -371,14 +374,14 @@ async def _layer2(prev: FetchResult) -> FetchResult:
                 locale="en-US",
             )
             page = await context.new_page()
-            await Stealth().apply_stealth_async(page)  # type: ignore[attr-defined]
+            await Stealth().apply_stealth_async(page)
 
             async def intercept_pdf(response) -> None:
                 if "application/pdf" in response.headers.get("content-type", ""):
                     try:
                         pdf_data.append(await response.body())
-                    except Exception:
-                        pass
+                    except PlaywrightError:
+                        result.notes.append("failed to read intercepted PDF response")
 
             page.on("response", intercept_pdf)
 
@@ -425,12 +428,12 @@ async def _layer2(prev: FetchResult) -> FetchResult:
                     else:
                         result.notes.append("no PDF found in rendered page")
 
-            except Exception as e:
+            except PlaywrightError as e:
                 result.notes.append(f"navigation error: {e}")
             finally:
                 await browser.close()
 
-    except Exception as e:
+    except (ImportError, OSError, PlaywrightError) as e:
         result.notes.append(f"L2 error: {e}")
 
     result.elapsed = time.monotonic() - t0
@@ -471,7 +474,7 @@ async def _layer3(prev: FetchResult) -> FetchResult:
                 result.text = text
                 result.notes.append(f"text: {text[:60]!r}")
 
-    except Exception as e:
+    except (httpx.HTTPError, etree.ParserError, TypeError, ValueError) as e:
         result.layer = "FAIL"
         result.notes.append(f"error: {e}")
 
@@ -547,7 +550,7 @@ async def fetch_unpaywall(doi: str) -> FetchResult:
 
             result.notes.append(f"unpaywall -> {oa_url[:70]}")
 
-    except Exception as e:
+    except (httpx.HTTPError, KeyError, TypeError, ValueError) as e:
         result.layer = "FAIL"
         result.notes.append(f"unpaywall error: {e}")
         result.elapsed = time.monotonic() - t0
@@ -576,9 +579,8 @@ async def fetch(url: str) -> FetchResult:
 
     # API — Zenodo
     r_api = await _zenodo_api(url)
-    if r_api is not None:
-        if r_api.success:
-            return r_api
+    if r_api is not None and r_api.success:
+        return r_api
         # Recognized zenodo record but failed — fall through to L1
 
     # L1 — httpx

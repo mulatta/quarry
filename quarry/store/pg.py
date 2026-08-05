@@ -113,14 +113,12 @@ class PGStore:
         tokens = name.split()
         if not tokens:
             return []
-        conditions = " AND ".join("term ILIKE %s" for _ in tokens)
-        params: list = [f"%{t}%" for t in tokens]
-        params.append(limit)
+        patterns = [f"%{token}%" for token in tokens]
         with self.conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
-                f"SELECT DISTINCT descriptor_ui, descriptor_name "  # noqa: S608
-                f"FROM mesh_lookup WHERE {conditions} LIMIT %s",
-                params,
+                "SELECT DISTINCT descriptor_ui, descriptor_name "
+                "FROM mesh_lookup WHERE term ILIKE ALL(%s) LIMIT %s",
+                (patterns, limit),
             )
             return cur.fetchall()
 
@@ -225,22 +223,29 @@ class PGStore:
         descriptors by counting first.
         """
         with self.conn.cursor(row_factory=dict_row) as cur:
-            major_filter = " AND wm.is_major_topic = true" if major_only else ""
-            cur.execute(
-                f"SELECT COUNT(DISTINCT wm.work_id) FROM work_mesh wm "  # noqa: S608
-                f"WHERE wm.descriptor_ui = %s{major_filter}",
-                (descriptor_ui,),
+            count_query = (
+                "SELECT COUNT(DISTINCT wm.work_id) FROM work_mesh wm "
+                "WHERE wm.descriptor_ui = %s AND wm.is_major_topic = true"
+                if major_only
+                else "SELECT COUNT(DISTINCT wm.work_id) FROM work_mesh wm "
+                "WHERE wm.descriptor_ui = %s"
             )
+            cur.execute(count_query, (descriptor_ui,))
             row = cur.fetchone()
             total = row["count"] if row else 0
 
-            cur.execute(
-                f"SELECT w.work_id, w.pub_year, w.cited_by_count, w.title "  # noqa: S608
-                f"FROM work_mesh wm JOIN works w ON wm.work_id = w.work_id "
-                f"WHERE wm.descriptor_ui = %s{major_filter} "
-                f"ORDER BY w.cited_by_count DESC NULLS LAST LIMIT %s",
-                (descriptor_ui, limit),
+            works_query = (
+                "SELECT w.work_id, w.pub_year, w.cited_by_count, w.title "
+                "FROM work_mesh wm JOIN works w ON wm.work_id = w.work_id "
+                "WHERE wm.descriptor_ui = %s AND wm.is_major_topic = true "
+                "ORDER BY w.cited_by_count DESC NULLS LAST LIMIT %s"
+                if major_only
+                else "SELECT w.work_id, w.pub_year, w.cited_by_count, w.title "
+                "FROM work_mesh wm JOIN works w ON wm.work_id = w.work_id "
+                "WHERE wm.descriptor_ui = %s "
+                "ORDER BY w.cited_by_count DESC NULLS LAST LIMIT %s"
             )
+            cur.execute(works_query, (descriptor_ui, limit))
             return cur.fetchall(), total
 
     def mesh_parent(self, tree_number: str) -> dict | None:
@@ -263,17 +268,21 @@ class PGStore:
         """Top MeSH descriptors across a set of work_ids."""
         if not work_ids:
             return []
-        major_filter = " AND is_major_topic = true" if major_only else ""
+        query = (
+            "SELECT descriptor_ui, descriptor_name, "
+            "COUNT(DISTINCT work_id) AS cnt FROM work_mesh "
+            "WHERE work_id = ANY(%s) AND is_major_topic = true "
+            "GROUP BY descriptor_ui, descriptor_name "
+            "ORDER BY cnt DESC LIMIT %s"
+            if major_only
+            else "SELECT descriptor_ui, descriptor_name, "
+            "COUNT(DISTINCT work_id) AS cnt FROM work_mesh "
+            "WHERE work_id = ANY(%s) "
+            "GROUP BY descriptor_ui, descriptor_name "
+            "ORDER BY cnt DESC LIMIT %s"
+        )
         with self.conn.cursor(row_factory=dict_row) as cur:
-            cur.execute(
-                f"SELECT descriptor_ui, descriptor_name, "  # noqa: S608
-                f"COUNT(DISTINCT work_id) AS cnt "
-                f"FROM work_mesh "
-                f"WHERE work_id = ANY(%s){major_filter} "
-                f"GROUP BY descriptor_ui, descriptor_name "
-                f"ORDER BY cnt DESC LIMIT %s",
-                (work_ids, limit),
-            )
+            cur.execute(query, (work_ids, limit))
             return cur.fetchall()
 
     def resolve_pmid_to_work_id(self, pmid: int) -> str | None:
