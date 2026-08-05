@@ -8,11 +8,11 @@ MeSH descriptors: FTP from NLM (auto-discover latest year)
 import ftplib
 import time
 import zipfile
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import Callable
 
 import httpx
 
@@ -65,8 +65,10 @@ def sync_ftp_dir(
         modify = remote_mtimes.get(name, "")
         if modify:
             try:
-                remote_ts = datetime.strptime(modify[:14], "%Y%m%d%H%M%S")
-                local_ts = datetime.fromtimestamp(local_path.stat().st_mtime)
+                remote_ts = datetime.strptime(modify[:14], "%Y%m%d%H%M%S").replace(
+                    tzinfo=UTC
+                )
+                local_ts = datetime.fromtimestamp(local_path.stat().st_mtime, tz=UTC)
                 if remote_ts > local_ts:
                     to_download.append(name)
             except ValueError:
@@ -118,14 +120,14 @@ def sync_ftp_dir(
                             # Reconnect on transient failure
                             try:
                                 conn.close()
-                            except Exception:
+                            except OSError:
                                 pass
                             conn = ftplib.FTP(host, timeout=120)
                             conn.login()
         finally:
             try:
                 conn.quit()
-            except Exception:
+            except (EOFError, OSError, ftplib.Error):
                 pass
         return results
 
@@ -186,19 +188,22 @@ def download_http(
     dest.parent.mkdir(parents=True, exist_ok=True)
 
     if dest.exists() and max_age_days is not None:
-        age = datetime.now() - datetime.fromtimestamp(dest.stat().st_mtime)
+        age = datetime.now(tz=UTC) - datetime.fromtimestamp(
+            dest.stat().st_mtime, tz=UTC
+        )
         if age < timedelta(days=max_age_days):
             return {"status": "fresh", "path": str(dest), "bytes": dest.stat().st_size}
 
     tmp = dest.with_suffix(dest.suffix + ".tmp")
-    with httpx.Client(
-        timeout=httpx.Timeout(600, connect=30), follow_redirects=True
-    ) as client:
-        with client.stream("GET", url) as resp:
-            resp.raise_for_status()
-            with open(tmp, "wb") as f:
-                for chunk in resp.iter_bytes(chunk_size=65536):
-                    f.write(chunk)
+    with (
+        httpx.Client(
+            timeout=httpx.Timeout(600, connect=30), follow_redirects=True
+        ) as client,
+        client.stream("GET", url) as resp,
+    ):
+        resp.raise_for_status()
+        with open(tmp, "wb") as f:
+            f.writelines(resp.iter_bytes(chunk_size=65536))
     tmp.rename(dest)
     return {"status": "downloaded", "path": str(dest), "bytes": dest.stat().st_size}
 
@@ -246,7 +251,9 @@ def download_and_extract_zip(
     target = local_dir / expected_file
 
     if target.exists():
-        age = datetime.now() - datetime.fromtimestamp(target.stat().st_mtime)
+        age = datetime.now(tz=UTC) - datetime.fromtimestamp(
+            target.stat().st_mtime, tz=UTC
+        )
         if age < timedelta(days=max_age_days):
             return {
                 "status": "fresh",
@@ -258,11 +265,13 @@ def download_and_extract_zip(
     download_http(url, zip_path)
 
     tmp_target = target.with_suffix(target.suffix + ".tmp")
-    with zipfile.ZipFile(zip_path) as zf:
-        # Extract only the expected file to a temp path
-        with zf.open(expected_file) as src, open(tmp_target, "wb") as dst:
-            while chunk := src.read(65536):
-                dst.write(chunk)
+    with (
+        zipfile.ZipFile(zip_path) as zf,
+        zf.open(expected_file) as src,
+        tmp_target.open("wb") as dst,
+    ):
+        while chunk := src.read(65536):
+            dst.write(chunk)
     tmp_target.rename(target)
     zip_path.unlink()
 
