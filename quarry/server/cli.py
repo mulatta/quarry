@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import secrets
-from typing import Optional
 
 import typer
 
@@ -73,7 +72,7 @@ def db_init() -> None:
 @keys_app.command("create")
 def keys_create(
     name: str = typer.Argument(..., help="Client identifier, e.g. 'seungwon-claude'"),
-    expires_days: Optional[int] = typer.Option(
+    expires_days: int | None = typer.Option(
         None, "--expires", "-e", help="Expiry in days. Omit for no expiry."
     ),
 ) -> None:
@@ -114,12 +113,11 @@ def keys_list() -> None:
 
     from quarry.server.config import server_settings
 
-    with psycopg.connect(server_settings.pg_conninfo) as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT client_id, created_at, expires_at FROM api_keys ORDER BY created_at"
-            )
-            rows = cur.fetchall()
+    with psycopg.connect(server_settings.pg_conninfo) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT client_id, created_at, expires_at FROM api_keys ORDER BY created_at"
+        )
+        rows = cur.fetchall()
 
     if not rows:
         typer.echo("No API keys found.")

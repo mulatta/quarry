@@ -3,6 +3,8 @@
 Requires: pip install quarry[cli]
 """
 
+from typing import Annotated
+
 try:
     import typer
 except ImportError:
@@ -18,9 +20,9 @@ def search(
     mode: str = typer.Option("hybrid", "--mode", "-m", help="hybrid|vector|text"),
 ):
     """Hybrid search for papers."""
+    from quarry.config import settings
     from quarry.search.hybrid import HybridSearcher
     from quarry.store.pg import PGStore
-    from quarry.config import settings
 
     db = PGStore(settings.pg_conninfo)
     searcher = HybridSearcher(db=db)
@@ -38,9 +40,9 @@ def vsearch(
     limit: int = typer.Option(20, "--limit", "-n"),
 ):
     """Vector search: find similar papers by embedding."""
+    from quarry.config import settings
     from quarry.search.hybrid import HybridSearcher
     from quarry.store.pg import PGStore
-    from quarry.config import settings
 
     db = PGStore(settings.pg_conninfo)
     searcher = HybridSearcher(db=db)
@@ -53,9 +55,9 @@ def vsearch(
 
 @app.command()
 def info(
-    work_ids: list[str] = typer.Argument(
-        ..., help="One or more work IDs: W<id>, DOI, PMID"
-    ),
+    work_ids: Annotated[
+        list[str], typer.Argument(help="One or more work IDs: W<id>, DOI, PMID")
+    ],
     full: bool = typer.Option(False, "--full", help="Show full abstract"),
     show_mesh: bool = typer.Option(False, "--mesh", help="Show MeSH descriptors"),
     fmt: str = typer.Option("table", "--format", "-f", help="table|json"),
@@ -160,7 +162,7 @@ def _resolve_and_get(identifier: str, db) -> dict | None:
         pass
 
     # DOI
-    if identifier.startswith("10.") or identifier.startswith("https://doi.org/"):
+    if identifier.startswith(("10.", "https://doi.org/")):
         doi = "https://doi.org/" + identifier.removeprefix("https://doi.org/").lower()
         return db.get_work_by_doi(doi)
 
@@ -383,8 +385,8 @@ def sql(
     ),
 ):
     """Execute read-only SQL against PG (development only)."""
-    from quarry.store.pg import PGStore
     from quarry.config import settings
+    from quarry.store.pg import PGStore
 
     if schema is not None:
         tbl = schema.lower()
@@ -687,17 +689,21 @@ def _print_shrink_table(result: dict) -> None:
 
 @app.command()
 def bridge(
-    seeds: list[str] = typer.Argument(
-        ...,
-        help="Two or more seed papers: work_id_int, W<id>, DOI, or https://doi.org/...",
-    ),
-    types: list[str] = typer.Option(
-        None,
-        "--type",
-        "-t",
-        help="Bridge types to compute (default: all). "
-        "Options: common_refs, common_citers, coupling, cocitation, path, ppr",
-    ),
+    seeds: Annotated[
+        list[str],
+        typer.Argument(
+            help="Two or more seed papers: work_id_int, W<id>, DOI, or https://doi.org/..."
+        ),
+    ],
+    types: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--type",
+            "-t",
+            help="Bridge types to compute (default: all). "
+            "Options: common_refs, common_citers, coupling, cocitation, path, ppr",
+        ),
+    ] = None,
     limit: int = typer.Option(100, "--limit", "-n", help="Max results per type"),
     max_neighbor_degree: int = typer.Option(
         10_000, "--max-degree", help="Prune neighbors above this degree (Type 3-4)"
